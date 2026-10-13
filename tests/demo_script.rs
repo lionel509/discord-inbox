@@ -109,11 +109,15 @@ fn real_target_dir() -> PathBuf {
 }
 
 fn run_demo_in(crate_dir: &Path, tmp: &Path) -> Output {
+    run_demo_with_target(crate_dir, tmp, &real_target_dir())
+}
+
+fn run_demo_with_target(crate_dir: &Path, tmp: &Path, target: &Path) -> Output {
     Command::new("sh")
         .arg("examples/demo.sh")
         .current_dir(crate_dir)
         .env("TMPDIR", tmp)
-        .env("CARGO_TARGET_DIR", real_target_dir())
+        .env("CARGO_TARGET_DIR", target)
         .output()
         .unwrap()
 }
@@ -147,7 +151,10 @@ fn demo_script_fails_when_the_gate_admits_a_stranger() {
     let broken = text.replace("self.0.contains(&user_id)", "{ let _ = user_id; true }");
     assert_ne!(text, broken, "patch did not apply");
     fs::write(&file, broken).unwrap();
-    let out = run_demo_in(&copy, &dir);
+    // Own target dir: the broken build must not overwrite the real demo binary
+    // that the other tests run in parallel. Kept across runs so deps build once.
+    let target = std::env::temp_dir().join("di-demo-broken-gate-target");
+    let out = run_demo_with_target(&copy, &dir, &target);
     assert!(
         !out.status.success(),
         "demo.sh exited 0 with a gate that admits everyone\n{}",

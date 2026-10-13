@@ -61,19 +61,14 @@ async fn ingest(ctx: &Context, h: &Handler, msg: &Message) {
         content: msg.content.clone(),
         attachments: files,
     };
-    match dump::admit_and_write(&h.allow, &h.inbox, &incoming) {
-        Ok(Some(_)) => {}
-        Ok(None) => return,
-        Err(e) => {
-            eprintln!("discord-inbox: write {} failed: {e}", msg.id);
-            return;
+    match dump::accept(&h.allow, &h.inbox, &incoming) {
+        Ok(true) => {
+            if let Err(e) = msg.react(&ctx.http, '✅').await {
+                eprintln!("discord-inbox: react on {} failed: {e}", msg.id);
+            }
         }
-    }
-    if let Err(e) = dump::write_last_id(&h.inbox, msg.id.get()) {
-        eprintln!("discord-inbox: cursor write failed: {e}");
-    }
-    if let Err(e) = msg.react(&ctx.http, '✅').await {
-        eprintln!("discord-inbox: react on {} failed: {e}", msg.id);
+        Ok(false) => {}
+        Err(e) => eprintln!("discord-inbox: write {} failed: {e}", msg.id),
     }
 }
 

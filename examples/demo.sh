@@ -7,6 +7,8 @@ cd "$(dirname "$0")/.."
 export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 cargo build -q --bin discord-inbox --example demo
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/discord-inbox-run.XXXXXX")
+# Mask the temp path with awk index(): sed would break on a delimiter character in TMPDIR.
+mask() { T="$TMP" awk '{ o = ""; t = ENVIRON["T"]; while ((i = index($0, t)) > 0) { o = o substr($0, 1, i - 1) "<tmp>"; $0 = substr($0, i + length(t)) } print o $0 }' "$1"; }
 trap 'rm -rf "$TMP"' EXIT
 
 echo "== 1. allowlist set: main and alt accepted, third ID ignored =="
@@ -15,7 +17,7 @@ set +e
 cargo run -q --example demo > "$TMP/demo.txt" 2>&1
 DEMO_RC=$?
 set -e
-sed "s#$TMP#<tmp>#g" "$TMP/demo.txt"
+mask "$TMP/demo.txt"
 if [ "$DEMO_RC" -ne 0 ]; then
   echo "allowlist demo failed: exit $DEMO_RC" >&2
   exit "$DEMO_RC"
@@ -28,7 +30,7 @@ env -u DISCORD_INBOX_ALLOWED_IDS_FILE HOME="$TMP/home" DISCORD_INBOX_DIR="$TMP/I
   cargo run -q --bin discord-inbox > "$TMP/refuse.txt" 2>&1
 RC=$?
 set -e
-sed "s#$TMP#<tmp>#g" "$TMP/refuse.txt"
+mask "$TMP/refuse.txt"
 echo "exit code: $RC"
 if [ "$RC" -ne 1 ]; then
   echo "step 2 did not refuse to start with exit 1" >&2

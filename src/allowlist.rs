@@ -5,7 +5,8 @@ pub struct Allowlist(HashSet<u64>);
 
 /// One user ID per line. Blank lines and `#` comments are skipped.
 pub fn parse(text: &str) -> Result<Allowlist, String> {
-    // Editors and Windows tools can stack more than one BOM.
+    // Editors and Windows tools can stack more than one BOM. Only leading ones are
+    // stripped; a BOM anywhere else is a bad line and the bot refuses to start.
     let text = text.trim_start_matches('\u{feff}');
     let mut ids = HashSet::new();
     for (n, raw) in text.lines().enumerate() {

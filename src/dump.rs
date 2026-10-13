@@ -89,8 +89,7 @@ pub fn write_note(inbox: &Path, msg: &Incoming) -> std::io::Result<PathBuf> {
     Ok(note)
 }
 
-/// The gate and the write, in one place. `main.rs` calls this for every DM and
-/// the offline demo calls it too, so both run the same allowlist check.
+/// The gate and the write, in one place. `accept` calls this, so both run the same allowlist check.
 /// `Ok(None)` means the author is not on the allowlist and nothing was written.
 pub fn admit_and_write(
     allow: &Allowlist,
@@ -106,7 +105,11 @@ pub fn admit_and_write(
 /// Gate, write and cursor in one call. Returns whether the caller should react.
 /// A sender not on the allowlist gets no file, no cursor move and `Ok(false)`.
 pub fn accept(allow: &Allowlist, inbox: &Path, msg: &Incoming) -> std::io::Result<bool> {
-    Ok(false)
+    if admit_and_write(allow, inbox, msg)?.is_none() {
+        return Ok(false);
+    }
+    write_last_id(inbox, msg.msg_id)?;
+    Ok(true)
 }
 
 const LAST_ID: &str = ".last_msg_id";

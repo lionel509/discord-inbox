@@ -3,14 +3,14 @@
 //!
 //! The allowlist is written to a temp file and loaded through `allowlist::default_path()`
 //! (via DISCORD_INBOX_ALLOWED_IDS_FILE), the same path the bot reads at startup.
-//! Messages go through `dump::admit_and_write`, the same gate and write that `ingest`
+//! Messages go through `dump::accept`, the same gate, write and cursor that `ingest`
 //! in main.rs calls. NOT exercised here: the serenity event plumbing and the
 //! pre-download check in `ingest`, which need a live gateway.
 //!
 //! Real IDs come from the environment (DEMO_MAIN_ID, DEMO_ALT_ID) and are never printed.
 //! Without them the demo uses stand-in IDs and says so.
 use discord_inbox::allowlist::{self, Allowlist};
-use discord_inbox::dump::{admit_and_write, sha256_hex, Incoming};
+use discord_inbox::dump::{accept, read_last_id, sha256_hex, Incoming};
 use std::fs;
 use std::path::Path;
 
@@ -52,8 +52,9 @@ fn main() {
     let path = allowlist::default_path();
     let allow: Allowlist = Allowlist::load(&path).expect("demo allowlist loads");
     println!(
-        "allowlist loaded from {}: 2 IDs (main, alt){source}",
-        show(&path, &tmp_text)
+        "allowlist loaded from {}: {}{source}",
+        show(&path, &tmp_text),
+        plural(allow.ids().count(), "ID")
     );
     println!();
 
@@ -90,23 +91,63 @@ fn main() {
         ),
     ];
 
-    let mut alt_note = None;
+    // Outcomes are checked, not announced: any wrong one is collected and the demo exits 1.
+    let mut problems: Vec<String> = Vec::new();
     for (label, m) in &messages {
-        match admit_and_write(&allow, &inbox, m).expect("write") {
-            Some(note) => {
-                println!(
-                    "ACCEPTED {label}: wrote {}",
-                    note.file_name().unwrap().to_string_lossy()
-                );
-                if m.author_id == alt_id {
-                    alt_note = Some(note);
-                }
-            }
-            None => println!(
-                "IGNORED {}: not on allowlist, nothing written",
-                m.author_id
-            ),
+        let expect = *label != "third";
+        let admitted = accept(&allow, &inbox, m).expect("write");
+        if admitted {
+            println!("ACCEPTED {label}");
+        } else {
+            println!("IGNORED {label}: not on allowlist");
         }
+        if admitted != expect {
+            problems.push(format!("{label}: admitted={admitted}, expected {expect}"));
+        }
+    }
+
+    let listing = |dir: &Path| -> Vec<String> {
+        let mut v: Vec<String> = fs::read_dir(dir)
+            .map(|rd| {
+                rd.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        v.sort();
+        v
+    };
+    let all = listing(&inbox);
+    let names: Vec<String> = all.iter().filter(|n| !n.starts_with('.')).cloned().collect();
+    let alt_note = names
+        .iter()
+        .find(|n| n.ends_with(&format!("_{}.md", messages[1].1.msg_id)))
+        .map(|n| inbox.join(n));
+    let third_files = names
+        .iter()
+        .filter(|n| n.contains(&messages[2].1.msg_id.to_string()))
+        .count();
+    let stranger_in_text = names.iter().filter(|n| n.ends_with(".md")).any(|n| {
+        fs::read_to_string(inbox.join(n))
+            .map(|t| t.contains(&THIRD_ID.to_string()))
+            .unwrap_or(false)
+    });
+    let ids: Vec<u64> = messages.iter().map(|(_, m)| m.msg_id).collect();
+    for (label, id) in [("main", ids[0]), ("alt", ids[1])] {
+        if !names.iter().any(|n| n.ends_with(&format!("_{id}.md"))) {
+            problems.push(format!("no note for {label}"));
+        }
+    }
+    if third_files > 0 || stranger_in_text {
+        problems.push("a file exists for the ignored sender".into());
+    }
+    if names.len() != 3 {
+        problems.push(format!("inbox holds {} files, expected 3", names.len()));
+    }
+    if read_last_id(&inbox) != Some(ids[1]) {
+        problems.push(format!(
+            "cursor is {:?}, expected the alt message",
+            read_last_id(&inbox)
+        ));
     }
 
     // The alt note carries the attachment. Show it whole, with the real IDs masked.
@@ -124,18 +165,15 @@ fn main() {
         println!("--- end of note ---");
     }
 
-    let names: Vec<String> = fs::read_dir(&inbox)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
     let notes = names.iter().filter(|n| n.ends_with(".md")).count();
     let files = names.len() - notes;
     println!();
     println!(
-        "Inbox {} now holds {} and {}; nothing was written for the ignored sender.",
+        "Inbox {} now holds {} and {}; {} written for the ignored sender.",
         show(&inbox, &tmp_text),
         plural(notes, "note"),
-        plural(files, "attachment")
+        plural(files, "attachment"),
+        if third_files == 0 && !stranger_in_text { "nothing" } else { "FILES" }
     );
     println!("(The real target is ~/Documents/Inbox/.)");
 
@@ -149,4 +187,9 @@ fn main() {
     }
 
     fs::remove_dir_all(&tmp).unwrap();
+    if !problems.is_empty() {
+        eprintln!("DEMO FAILED: {}", problems.join("; "));
+        std::process::exit(1);
+    }
+    println!("PASS: every outcome checked against the inbox listing.");
 }
