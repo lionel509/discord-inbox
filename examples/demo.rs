@@ -239,7 +239,11 @@ async fn main() {
 
     println!("== live, CDN down ==");
     world.cdn_down.store(true, Ordering::SeqCst);
-    let live = [("main", &main_msg), ("alt", &alt_msg), ("third", &third_msg)];
+    let live = [
+        ("main", &main_msg),
+        ("alt", &alt_msg),
+        ("third", &third_msg),
+    ];
     let expected = [Outcome::Saved, Outcome::Pending, Outcome::Ignored];
     for ((label, m), want) in live.iter().zip(expected.iter()) {
         let got = ingest(&allow, &inbox, *m).await;
@@ -271,7 +275,11 @@ async fn main() {
         v
     };
     let all = listing(&inbox);
-    let names: Vec<String> = all.iter().filter(|n| !n.starts_with('.')).cloned().collect();
+    let names: Vec<String> = all
+        .iter()
+        .filter(|n| !n.starts_with('.'))
+        .cloned()
+        .collect();
 
     // The ignored sender: no download, no reaction, no file, no name, no text.
     if world.downloads(third_msg.id) != 0 || world.reacts(third_msg.id) != 0 {
@@ -354,7 +362,11 @@ async fn main() {
         show(&inbox, &tmp_text),
         plural(notes, "note"),
         plural(files, "attachment"),
-        if third_files == 0 && !stranger_in_text { "nothing" } else { "FILES" }
+        if third_files == 0 && !stranger_in_text {
+            "nothing"
+        } else {
+            "FILES"
+        }
     );
     println!("(The real target is ~/Documents/Inbox/.)");
 

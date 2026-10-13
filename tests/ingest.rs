@@ -1,7 +1,9 @@
 //! Behaviour of `ingest` and `catch_up` against fakes. Fake IDs only.
 use discord_inbox::allowlist;
 use discord_inbox::allowlist::Allowlist;
-use discord_inbox::dump::{self, add_retry, in_retry, read_cursor, retry_entries, sha256_hex, write_cursor};
+use discord_inbox::dump::{
+    self, add_retry, in_retry, read_cursor, retry_entries, sha256_hex, write_cursor,
+};
 use discord_inbox::ingest::{catch_up, ingest, History, Inbound, Outcome, PAGE};
 use std::collections::HashMap;
 use std::fs;
@@ -134,7 +136,11 @@ impl Inbound for FakeMsg {
     async fn react(&self) -> Result<(), String> {
         self.w.add_react(self.spec.id);
         let at = note(&self.w.inbox, self.spec.id).is_file();
-        self.w.note_at_react.lock().unwrap().insert(self.spec.id, at);
+        self.w
+            .note_at_react
+            .lock()
+            .unwrap()
+            .insert(self.spec.id, at);
         if self.w.react_fails.load(Ordering::SeqCst) {
             return Err("react 500".to_string());
         }
@@ -263,11 +269,19 @@ async fn allowed_dm_is_saved_then_reacted_once() {
         assert_eq!(ingest(&allow(), &inbox, &msg(&w, &s)).await, Outcome::Saved);
         assert_eq!(w.downloads(id), 1, "id {id}");
         assert_eq!(w.reacts(id), 1, "id {id}");
-        assert_eq!(w.note_at_react.lock().unwrap().get(&id), Some(&true), "react must follow the note");
+        assert_eq!(
+            w.note_at_react.lock().unwrap().get(&id),
+            Some(&true),
+            "react must follow the note"
+        );
         assert!(note(&inbox, id).is_file());
         assert!(att(&inbox, id, 1, "a.txt").is_file());
         assert!(retry_entries(&inbox).is_empty());
-        assert_eq!(read_cursor(&inbox, channel), None, "the live path writes no cursor");
+        assert_eq!(
+            read_cursor(&inbox, channel),
+            None,
+            "the live path writes no cursor"
+        );
     }
 }
 
@@ -277,7 +291,10 @@ async fn failed_download_still_writes_the_note_and_queues_a_retry() {
     let w = World::new(&inbox);
     w.cdn_down.store(true, Ordering::SeqCst);
     let s = spec(MAIN, MAIN_CH, 100, &[("good.txt", b"g"), ("bad.jpg", b"b")]);
-    assert_eq!(ingest(&allow(), &inbox, &msg(&w, &s)).await, Outcome::Pending);
+    assert_eq!(
+        ingest(&allow(), &inbox, &msg(&w, &s)).await,
+        Outcome::Pending
+    );
     assert_eq!(w.downloads(100), 2, "keeps going after a failure");
     assert_eq!(w.reacts(100), 0);
     assert!(att(&inbox, 100, 1, "good.txt").is_file());
@@ -319,7 +336,11 @@ async fn next_start_retries_and_completes_the_note() {
     assert!(att(&inbox, 100, 1, "bad.jpg").is_file());
     assert_eq!(w.reacts(100), 1);
     assert_eq!(w.reacts(200), 1);
-    assert_eq!(w.total_downloads(), 2, "200 is text-only; 100 was tried twice");
+    assert_eq!(
+        w.total_downloads(),
+        2,
+        "200 is text-only; 100 was tried twice"
+    );
 }
 
 #[tokio::test]
@@ -346,7 +367,11 @@ async fn cursor_stops_before_a_message_that_was_not_recorded() {
     catch_up(&allow(), &inbox, &h).await;
     assert!(note(&inbox, 200).is_file());
     assert_eq!(w.reacts(200), 1);
-    assert_eq!(w.reacts(300), 1, "300 is Skipped on the second pass, not reacted again");
+    assert_eq!(
+        w.reacts(300),
+        1,
+        "300 is Skipped on the second pass, not reacted again"
+    );
     assert_eq!(read_cursor(&inbox, MAIN_CH), Some(300));
 }
 
@@ -361,7 +386,10 @@ async fn failed_react_keeps_the_note_and_no_retry() {
     assert!(retry_entries(&inbox).is_empty());
     assert_eq!(w.reacts(100), 1);
     let downloads = w.total_downloads();
-    assert_eq!(ingest(&allow(), &inbox, &msg(&w, &s)).await, Outcome::Skipped);
+    assert_eq!(
+        ingest(&allow(), &inbox, &msg(&w, &s)).await,
+        Outcome::Skipped
+    );
     assert_eq!(w.reacts(100), 1);
     assert_eq!(w.total_downloads(), downloads);
 }
@@ -393,12 +421,20 @@ async fn catch_up_pages_past_one_page() {
     let inbox = scratch("paging");
     let w = World::new(&inbox);
     write_cursor(&inbox, MAIN_CH, 1).unwrap();
-    let msgs = (2..=251u64).map(|id| spec(MAIN, MAIN_CH, id, &[])).collect();
+    let msgs = (2..=251u64)
+        .map(|id| spec(MAIN, MAIN_CH, id, &[]))
+        .collect();
     let h = FakeHistory::new(&w, msgs);
     catch_up(&allow(), &inbox, &h).await;
     let notes = fs::read_dir(&inbox)
         .unwrap()
-        .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().ends_with(".md"))
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".md")
+        })
         .count();
     assert_eq!(notes, 250);
     assert_eq!(read_cursor(&inbox, MAIN_CH), Some(251));
@@ -486,16 +522,35 @@ async fn invariants_hold_for_random_histories() {
             assert_eq!(w.downloads(s.id), 0, "round {round}: I2 download {}", s.id);
             assert_eq!(w.reacts(s.id), 0, "round {round}: I2 react {}", s.id);
             assert!(!in_retry(&inbox, s.id), "round {round}: I2 retry {}", s.id);
-            assert!(names_for(&inbox, s.id).is_empty(), "round {round}: I2 file for {}", s.id);
+            assert!(
+                names_for(&inbox, s.id).is_empty(),
+                "round {round}: I2 file for {}",
+                s.id
+            );
         }
-        assert!(!inbox.join(".cursor-7009").exists(), "round {round}: I2 cursor for stranger channel");
+        assert!(
+            !inbox.join(".cursor-7009").exists(),
+            "round {round}: I2 cursor for stranger channel"
+        );
         // I3: a react means the note is complete.
         for s in &msgs {
             if w.reacts(s.id) > 0 {
-                assert!(note(&inbox, s.id).is_file(), "round {round}: I3 no note for reacted {}", s.id);
-                assert!(!in_retry(&inbox, s.id), "round {round}: I3 retry left for reacted {}", s.id);
+                assert!(
+                    note(&inbox, s.id).is_file(),
+                    "round {round}: I3 no note for reacted {}",
+                    s.id
+                );
+                assert!(
+                    !in_retry(&inbox, s.id),
+                    "round {round}: I3 retry left for reacted {}",
+                    s.id
+                );
                 let text = fs::read_to_string(note(&inbox, s.id)).unwrap();
-                assert!(!text.contains("pending"), "round {round}: I3 pending note reacted {}", s.id);
+                assert!(
+                    !text.contains("pending"),
+                    "round {round}: I3 pending note reacted {}",
+                    s.id
+                );
             }
         }
     }

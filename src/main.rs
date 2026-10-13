@@ -31,16 +31,25 @@ impl Inbound for LiveMsg {
         self.msg.channel_id.get()
     }
     fn received(&self) -> String {
-        (*self.msg.timestamp).format("%Y-%m-%dT%H:%M:%SZ").to_string()
+        (*self.msg.timestamp)
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string()
     }
     fn content(&self) -> String {
         self.msg.content.clone()
     }
     fn attachment_names(&self) -> Vec<String> {
-        self.msg.attachments.iter().map(|a| a.filename.clone()).collect()
+        self.msg
+            .attachments
+            .iter()
+            .map(|a| a.filename.clone())
+            .collect()
     }
     async fn download(&self, i: usize) -> Result<Vec<u8>, String> {
-        self.msg.attachments[i].download().await.map_err(|e| e.to_string())
+        self.msg.attachments[i]
+            .download()
+            .await
+            .map_err(|e| e.to_string())
     }
     async fn react(&self) -> Result<(), String> {
         self.msg
@@ -106,11 +115,26 @@ struct Handler {
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, _: Ready) {
         eprintln!("discord-inbox: connected");
-        catch_up(&self.allow, &self.inbox, &Live { http: ctx.http.clone() }).await;
+        catch_up(
+            &self.allow,
+            &self.inbox,
+            &Live {
+                http: ctx.http.clone(),
+            },
+        )
+        .await;
     }
 
     async fn message(&self, ctx: Context, msg: Message) {
-        let _ = ingest(&self.allow, &self.inbox, &LiveMsg { http: ctx.http.clone(), msg }).await;
+        let _ = ingest(
+            &self.allow,
+            &self.inbox,
+            &LiveMsg {
+                http: ctx.http.clone(),
+                msg,
+            },
+        )
+        .await;
     }
 }
 

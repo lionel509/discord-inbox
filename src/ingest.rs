@@ -23,17 +23,31 @@ pub trait Inbound: Send + Sync {
     fn received(&self) -> String;
     fn content(&self) -> String;
     fn attachment_names(&self) -> Vec<String>;
-    fn download(&self, i: usize) -> impl std::future::Future<Output = Result<Vec<u8>, String>> + Send;
+    fn download(
+        &self,
+        i: usize,
+    ) -> impl std::future::Future<Output = Result<Vec<u8>, String>> + Send;
     fn react(&self) -> impl std::future::Future<Output = Result<(), String>> + Send;
 }
 
 /// The Discord history calls the catch-up needs.
 pub trait History: Send + Sync {
     type Msg: Inbound;
-    fn dm_channel(&self, user_id: u64) -> impl std::future::Future<Output = Result<u64, String>> + Send;
+    fn dm_channel(
+        &self,
+        user_id: u64,
+    ) -> impl std::future::Future<Output = Result<u64, String>> + Send;
     /// Up to PAGE messages after `after` (the newest PAGE when None), in any order.
-    fn page(&self, channel: u64, after: Option<u64>) -> impl std::future::Future<Output = Result<Vec<Self::Msg>, String>> + Send;
-    fn fetch(&self, channel: u64, msg_id: u64) -> impl std::future::Future<Output = Result<Self::Msg, String>> + Send;
+    fn page(
+        &self,
+        channel: u64,
+        after: Option<u64>,
+    ) -> impl std::future::Future<Output = Result<Vec<Self::Msg>, String>> + Send;
+    fn fetch(
+        &self,
+        channel: u64,
+        msg_id: u64,
+    ) -> impl std::future::Future<Output = Result<Self::Msg, String>> + Send;
 }
 
 /// Gate, download, write and react for one message. Used by the live event and by the catch-up.
@@ -82,7 +96,11 @@ pub async fn ingest<M: Inbound>(allow: &Allowlist, inbox: &Path, m: &M) -> Outco
         Ok(false) => return Outcome::Ignored,
         Err(e) => {
             eprintln!("discord-inbox: write {id} failed: {e}");
-            return if pending { Outcome::Pending } else { Outcome::Failed };
+            return if pending {
+                Outcome::Pending
+            } else {
+                Outcome::Failed
+            };
         }
     }
 

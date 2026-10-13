@@ -19,8 +19,14 @@ fn body_after<'a>(src: &'a str, start: &str) -> &'a str {
 #[test]
 fn main_rs_is_glue_over_the_lib() {
     let src = main_rs();
-    assert!(body_after(&src, "async fn message(").contains("ingest("), "message must call ingest");
-    assert!(body_after(&src, "async fn ready(").contains("catch_up("), "ready must call catch_up");
+    assert!(
+        body_after(&src, "async fn message(").contains("ingest("),
+        "message must call ingest"
+    );
+    assert!(
+        body_after(&src, "async fn ready(").contains("catch_up("),
+        "ready must call catch_up"
+    );
     for banned in [
         "write_note",
         "accept(",
@@ -32,6 +38,14 @@ fn main_rs_is_glue_over_the_lib() {
     ] {
         assert!(!src.contains(banned), "main.rs must not contain {banned}");
     }
-    assert_eq!(src.matches(".react(").count(), 1, "one react path, in the adapter");
-    assert_eq!(src.matches(".download(").count(), 1, "one download path, in the adapter");
+    assert_eq!(
+        src.matches(".react(").count(),
+        1,
+        "one react path, in the adapter"
+    );
+    assert_eq!(
+        src.matches(".download(").count(),
+        1,
+        "one download path, in the adapter"
+    );
 }

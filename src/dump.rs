@@ -80,10 +80,7 @@ pub fn write_note(inbox: &Path, msg: &Incoming) -> std::io::Result<PathBuf> {
         match bytes {
             Some(b) => {
                 fs::write(inbox.join(&file), b)?;
-                entries.push(format!(
-                    "  - file: {file}\n    sha256: {}\n",
-                    sha256_hex(b)
-                ));
+                entries.push(format!("  - file: {file}\n    sha256: {}\n", sha256_hex(b)));
             }
             None => entries.push(format!("  - file: {file}\n    sha256: pending\n")),
         }
@@ -235,7 +232,10 @@ mod tests {
         assert!(!inbox.exists(), "no dir, note or cursor for a stranger");
         let mut alt = sample(vec![]);
         alt.author_id = 100000000000000002;
-        assert!(accept(&allow, &inbox, &alt).unwrap(), "the alt account is admitted");
+        assert!(
+            accept(&allow, &inbox, &alt).unwrap(),
+            "the alt account is admitted"
+        );
     }
 
     #[test]
@@ -245,8 +245,14 @@ mod tests {
         let mut alt = sample(vec![]);
         alt.author_id = 100000000000000002;
         assert!(accept(&allow, &inbox, &alt).unwrap());
-        assert!(inbox.join("2026-10-13_140322_1427000000000000000.md").exists());
-        assert_eq!(read_cursor(&inbox, 7001), None, "accept never writes a cursor");
+        assert!(inbox
+            .join("2026-10-13_140322_1427000000000000000.md")
+            .exists());
+        assert_eq!(
+            read_cursor(&inbox, 7001),
+            None,
+            "accept never writes a cursor"
+        );
     }
 
     #[test]
@@ -413,7 +419,11 @@ mod tests {
     #[test]
     fn retry_entries_skip_junk_and_zero() {
         let inbox = temp_inbox();
-        fs::write(inbox.join(".retry"), "7001 5\njunk\n0 6\n7002 0\n7003 7 8\n").unwrap();
+        fs::write(
+            inbox.join(".retry"),
+            "7001 5\njunk\n0 6\n7002 0\n7003 7 8\n",
+        )
+        .unwrap();
         assert_eq!(retry_entries(&inbox), vec![(7001, 5)]);
     }
 
@@ -421,6 +431,9 @@ mod tests {
     fn remove_retry_of_absent_id_touches_nothing() {
         let inbox = temp_inbox().join("Inbox");
         remove_retry(&inbox, 5).unwrap();
-        assert!(!inbox.exists(), "a live message with no retry must not create files");
+        assert!(
+            !inbox.exists(),
+            "a live message with no retry must not create files"
+        );
     }
 }
