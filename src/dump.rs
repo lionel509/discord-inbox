@@ -42,10 +42,16 @@ fn sanitize(name: &str) -> String {
         .collect();
     if clean.is_empty() || clean.chars().all(|c| c == '.') {
         "file".to_string()
+    } else if clean.len() > MAX_NAME {
+        // ASCII only, so byte slicing is safe. Keep the tail so the extension survives.
+        clean[clean.len() - MAX_NAME..].to_string()
     } else {
         clean
     }
 }
+
+/// Keeps the on-disk name well under the 255-byte filesystem limit.
+const MAX_NAME: usize = 100;
 
 /// Writes attachments first, then the note, so a note on disk always has its files.
 pub fn write_note(inbox: &Path, msg: &Incoming) -> std::io::Result<PathBuf> {
@@ -92,8 +98,11 @@ pub fn read_last_id(inbox: &Path) -> Option<u64> {
         .ok()
 }
 
-/// Only ever moves forward.
+/// Only ever moves forward. The lock stops two writers (live event and catch-up)
+/// from sharing one tmp file or interleaving check-then-write.
 pub fn write_last_id(inbox: &Path, id: u64) -> std::io::Result<()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
     if read_last_id(inbox).is_some_and(|cur| cur >= id) {
         return Ok(());
     }
@@ -175,6 +184,54 @@ mod tests {
         assert_eq!(names.len(), 1, "{names:?}");
         assert!(names[0].ends_with("_1_.._.._evil_sh.txt"), "{names:?}");
         assert!(!names[0].contains('/') && !names[0].contains(' '));
+    }
+
+    #[test]
+    fn long_attachment_name_is_dumped() {
+        let inbox = temp_inbox();
+        let long = format!(
+            "{}.png",
+            "screenshot-of-a-very-long-window-title-".repeat(6)
+        );
+        assert!(long.len() > 200 && long.len() < 255);
+        write_note(&inbox, &sample(vec![(long.as_str(), b"png")])).unwrap();
+        let files: Vec<String> = fs::read_dir(&inbox)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".png"))
+            .collect();
+        assert_eq!(files.len(), 1, "{files:?}");
+        assert!(files[0].len() <= 255, "{}", files[0].len());
+    }
+
+    #[test]
+    fn concurrent_cursor_writes_keep_max() {
+        let inbox = temp_inbox();
+        let mut handles = Vec::new();
+        for t in 0..8u64 {
+            let inbox = inbox.clone();
+            handles.push(std::thread::spawn(move || {
+                let mut errs = Vec::new();
+                for i in 0..200u64 {
+                    let id = 1000 + t * 200 + i;
+                    if let Err(e) = write_last_id(&inbox, id) {
+                        errs.push(format!("id {id}: {e}"));
+                    }
+                }
+                errs
+            }));
+        }
+        let mut errs: Vec<String> = Vec::new();
+        for h in handles {
+            errs.extend(h.join().unwrap());
+        }
+        assert!(
+            errs.is_empty(),
+            "{} errors, first: {:?}",
+            errs.len(),
+            errs.first()
+        );
+        assert_eq!(read_last_id(&inbox), Some(1000 + 7 * 200 + 199));
     }
 
     #[test]

@@ -75,6 +75,8 @@ async fn ingest(ctx: &Context, h: &Handler, msg: &Message) {
 
 /// Pages each allowlisted DM channel forward from the saved cursor.
 async fn catch_up(ctx: &Context, h: &Handler) {
+    // Snapshot once: a channel paged after another channel moved the cursor would skip its older DMs.
+    let start = dump::read_last_id(&h.inbox);
     for id in h.allow.ids() {
         let dm = match UserId::new(id).create_dm_channel(&ctx.http).await {
             Ok(ch) => ch,
@@ -84,7 +86,7 @@ async fn catch_up(ctx: &Context, h: &Handler) {
             }
         };
         // Local cursor so paging always moves forward, even if every message on a page fails.
-        let mut after = dump::read_last_id(&h.inbox);
+        let mut after = start;
         loop {
             let mut req = GetMessages::new().limit(PAGE as u8);
             if let Some(last) = after {

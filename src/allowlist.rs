@@ -14,6 +14,9 @@ pub fn parse(text: &str) -> Result<Allowlist, String> {
         let id: u64 = line
             .parse()
             .map_err(|_| format!("allowed_ids: bad line {}", n + 1))?;
+        if id == 0 {
+            return Err("allowed_ids: 0 is not a user ID".into());
+        }
         ids.insert(id);
     }
     if ids.is_empty() {
@@ -85,6 +88,12 @@ mod tests {
     fn empty_file_is_err() {
         assert!(parse("").is_err());
         assert!(parse("# nothing\n").is_err());
+    }
+
+    #[test]
+    fn zero_is_err() {
+        assert!(parse("0\n").is_err());
+        assert!(parse("100000000000000001\n0\n").is_err());
     }
 
     #[test]
