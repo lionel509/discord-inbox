@@ -16,6 +16,6 @@ Env overrides: `DISCORD_INBOX_ALLOWED_IDS_FILE`, `DISCORD_INBOX_DIR`.
 
 - `cargo run --release`: connects and dumps. On start it catches up on DMs since the last saved message.
 - `cargo test`: unit tests, plus integration tests that check refuse-to-start.
-- `cargo run --example demo`: offline demo of the allowlist and dump writer. No Discord, no token.
+- `sh examples/demo.sh`: offline demo of the allowlist gate, the Inbox writer and the refuse-to-start check. No Discord, no token.
 
 Builds on macOS only (Keychain via `security-framework`).
