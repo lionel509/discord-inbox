@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Barrier, Mutex};
 
 const MAIN: u64 = 100000000000000001;
 const ALT: u64 = 100000000000000002;
@@ -290,21 +290,28 @@ async fn failed_download_still_writes_the_note_and_queues_a_retry() {
     let inbox = scratch("failed-download");
     let w = World::new(&inbox);
     w.cdn_down.store(true, Ordering::SeqCst);
-    let s = spec(MAIN, MAIN_CH, 100, &[("good.txt", b"g"), ("bad.jpg", b"b")]);
+    // The failing attachment comes first, so a `break` after the first failure would drop the good one.
+    let s = spec(MAIN, MAIN_CH, 100, &[("bad.jpg", b"b"), ("good.txt", b"g")]);
     assert_eq!(
         ingest(&allow(), &inbox, &msg(&w, &s)).await,
         Outcome::Pending
     );
     assert_eq!(w.downloads(100), 2, "keeps going after a failure");
     assert_eq!(w.reacts(100), 0);
-    assert!(att(&inbox, 100, 1, "good.txt").is_file());
-    assert!(!att(&inbox, 100, 2, "bad.jpg").exists());
+    assert!(att(&inbox, 100, 2, "good.txt").is_file(), "the file after a failed one is saved");
+    assert!(!att(&inbox, 100, 1, "bad.jpg").exists());
     let text = fs::read_to_string(note(&inbox, 100)).unwrap();
     assert!(
-        text.contains("  - file: 2026-10-13_140322_100_2_bad.jpg\n    sha256: pending\n"),
+        text.contains("  - file: 2026-10-13_140322_100_1_bad.jpg\n    sha256: pending\n"),
         "{text}"
     );
-    assert!(text.contains(&sha256_hex(b"g")), "{text}");
+    assert!(
+        text.contains(&format!(
+            "  - file: 2026-10-13_140322_100_2_good.txt\n    sha256: {}\n",
+            sha256_hex(b"g")
+        )),
+        "{text}"
+    );
     assert_eq!(retry_entries(&inbox), vec![(MAIN_CH, 100)]);
 }
 
@@ -449,6 +456,88 @@ async fn unfetchable_retry_entry_is_kept() {
     let h = FakeHistory::new(&w, vec![]);
     catch_up(&allow(), &inbox, &h).await;
     assert_eq!(retry_entries(&inbox), vec![(MAIN_CH, 999)]);
+}
+
+/// Every `.tmp` file left in `inbox`.
+fn tmp_files(inbox: &Path) -> Vec<String> {
+    let Ok(rd) = fs::read_dir(inbox) else {
+        return Vec::new();
+    };
+    rd.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".tmp"))
+        .collect()
+}
+
+#[tokio::test]
+async fn zero_byte_note_is_repaired_not_skipped() {
+    let inbox = scratch("zero-byte");
+    let w = World::new(&inbox);
+    fs::create_dir_all(&inbox).unwrap();
+    fs::write(note(&inbox, 100), b"").unwrap();
+    let s = spec(MAIN, MAIN_CH, 100, &[("a.txt", b"x")]);
+    assert_eq!(ingest(&allow(), &inbox, &msg(&w, &s)).await, Outcome::Saved);
+    let text = fs::read_to_string(note(&inbox, 100)).unwrap();
+    assert!(text.contains(&sha256_hex(b"x")), "empty note left in place: {text:?}");
+    assert!(att(&inbox, 100, 1, "a.txt").is_file());
+    assert_eq!(w.reacts(100), 1);
+    assert!(tmp_files(&inbox).is_empty(), "{:?}", tmp_files(&inbox));
+}
+
+#[tokio::test]
+async fn failed_note_write_leaves_the_old_note_whole() {
+    let inbox = scratch("atomic");
+    let w = World::new(&inbox);
+    fs::create_dir_all(&inbox).unwrap();
+    fs::write(note(&inbox, 100), "old note\n").unwrap();
+    add_retry(&inbox, MAIN_CH, 100).unwrap();
+    // A directory where the temp file goes makes the note write fail.
+    fs::create_dir_all(note(&inbox, 100).with_extension("md.tmp")).unwrap();
+    let s = spec(MAIN, MAIN_CH, 100, &[]);
+    assert_eq!(ingest(&allow(), &inbox, &msg(&w, &s)).await, Outcome::Failed);
+    assert_eq!(fs::read_to_string(note(&inbox, 100)).unwrap(), "old note\n");
+}
+
+/// The breaker's race: the live event and the catch-up see one message, and its one download
+/// fails for one of them. Each round must end with a complete note or a retry entry.
+#[test]
+fn live_and_catch_up_on_one_message_never_leave_a_pending_note_unowed() {
+    let rounds = 1500;
+    let mut bad = 0;
+    for round in 0..rounds {
+        let inbox = scratch(&format!("race-{round}"));
+        let failing = World::new(&inbox);
+        failing.cdn_down.store(true, Ordering::SeqCst);
+        let ok = World::new(&inbox);
+        let s = spec(MAIN, MAIN_CH, 100, &[("bad.jpg", b"b")]);
+        let barrier = Arc::new(Barrier::new(2));
+        let mut handles = Vec::new();
+        for w in [failing, ok] {
+            let (barrier, s) = (barrier.clone(), s.clone());
+            handles.push(std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let inbox = w.inbox.clone();
+                barrier.wait();
+                rt.block_on(ingest(&allow(), &inbox, &msg(&w, &s)));
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        let pending = fs::read_to_string(note(&inbox, 100))
+            .map(|t| t.contains("pending"))
+            .unwrap_or(false);
+        if pending && !in_retry(&inbox, 100) {
+            bad += 1;
+        }
+        let _ = fs::remove_dir_all(inbox.parent().unwrap());
+    }
+    assert_eq!(
+        bad, 0,
+        "{bad} of {rounds} rounds ended with a pending note and no retry entry"
+    );
 }
 
 /// A 64-bit LCG, seed 42, so every run draws the same histories.
