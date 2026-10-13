@@ -1,0 +1,11 @@
+[package]
+name = "discord-inbox"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+serenity = "0.12"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+security-framework = "3"
+sha2 = "0.11"
