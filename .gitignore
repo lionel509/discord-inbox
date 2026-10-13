@@ -2,3 +2,4 @@ Discord Inbox — Project Hub.md
 .DS_Store
 __pycache__/
 .env
+target/
