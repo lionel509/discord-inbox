@@ -1,22 +1,29 @@
-//! Offline demo of the allowlist gate and the Inbox writer. No Discord, no token.
+//! Offline demo of the allowlist gate, the Inbox writer and the retry list. No Discord, no token.
 //! Run with `sh examples/demo.sh` (also runs the refuse-to-start check).
 //!
 //! The allowlist is written to a temp file and loaded through `allowlist::default_path()`
 //! (via DISCORD_INBOX_ALLOWED_IDS_FILE), the same path the bot reads at startup.
-//! Messages go through `dump::accept`, the same gate, write and cursor that `ingest`
-//! in main.rs calls. NOT exercised here: the serenity event plumbing and the
-//! pre-download check in `ingest`, which need a live gateway.
+//! Messages go through the real `ingest::ingest` and `ingest::catch_up`, with an in-file fake
+//! of `Inbound` and `History`. NOT exercised: serenity's adapters in main.rs (`LiveMsg`, `Live`),
+//! which need a live gateway.
 //!
 //! Real IDs come from the environment (DEMO_MAIN_ID, DEMO_ALT_ID) and are never printed.
 //! Without them the demo uses stand-in IDs and says so.
 use discord_inbox::allowlist::{self, Allowlist};
-use discord_inbox::dump::{accept, read_last_id, sha256_hex, Incoming};
+use discord_inbox::dump::{self, read_cursor, retry_entries, sha256_hex};
+use discord_inbox::ingest::{catch_up, ingest, History, Inbound, Outcome, PAGE};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 const STAND_IN_MAIN: u64 = 100000000000000001;
 const STAND_IN_ALT: u64 = 100000000000000002;
 const THIRD_ID: u64 = 999999999999999999;
+const MAIN_CH: u64 = 7001;
+const ALT_CH: u64 = 7002;
+const THIRD_CH: u64 = 7009;
 
 fn show(path: &Path, tmp: &str) -> String {
     path.display().to_string().replace(tmp, "<tmp>")
@@ -33,7 +40,147 @@ fn id_from_env(var: &str, fallback: u64) -> (u64, bool) {
     }
 }
 
-fn main() {
+/// Shared by every fake message: the CDN switch and per-message `(downloads, reacts)`.
+#[derive(Default)]
+struct World {
+    cdn_down: AtomicBool,
+    calls: Mutex<HashMap<u64, (usize, usize)>>,
+}
+
+impl World {
+    fn count(&self, id: u64, react: bool) {
+        let mut calls = self.calls.lock().unwrap();
+        let entry = calls.entry(id).or_insert((0, 0));
+        if react {
+            entry.1 += 1;
+        } else {
+            entry.0 += 1;
+        }
+    }
+    fn downloads(&self, id: u64) -> usize {
+        self.calls.lock().unwrap().get(&id).map_or(0, |c| c.0)
+    }
+    fn reacts(&self, id: u64) -> usize {
+        self.calls.lock().unwrap().get(&id).map_or(0, |c| c.1)
+    }
+}
+
+#[derive(Clone)]
+struct DemoMsg {
+    author: u64,
+    channel: u64,
+    id: u64,
+    received: &'static str,
+    content: &'static str,
+    files: Vec<(String, Vec<u8>)>,
+    world: Arc<World>,
+}
+
+impl Inbound for DemoMsg {
+    fn author_id(&self) -> u64 {
+        self.author
+    }
+    fn msg_id(&self) -> u64 {
+        self.id
+    }
+    fn channel_id(&self) -> u64 {
+        self.channel
+    }
+    fn received(&self) -> String {
+        self.received.to_string()
+    }
+    fn content(&self) -> String {
+        self.content.to_string()
+    }
+    fn attachment_names(&self) -> Vec<String> {
+        self.files.iter().map(|f| f.0.clone()).collect()
+    }
+    async fn download(&self, i: usize) -> Result<Vec<u8>, String> {
+        self.world.count(self.id, false);
+        let (name, bytes) = &self.files[i];
+        if self.world.cdn_down.load(Ordering::SeqCst) && name.starts_with("bad") {
+            return Err("cdn 503".to_string());
+        }
+        Ok(bytes.clone())
+    }
+    async fn react(&self) -> Result<(), String> {
+        self.world.count(self.id, true);
+        Ok(())
+    }
+}
+
+struct DemoHistory {
+    main_id: u64,
+    alt_id: u64,
+    msgs: Vec<DemoMsg>,
+}
+
+impl History for DemoHistory {
+    type Msg = DemoMsg;
+
+    async fn dm_channel(&self, user_id: u64) -> Result<u64, String> {
+        if user_id == self.main_id {
+            Ok(MAIN_CH)
+        } else if user_id == self.alt_id {
+            Ok(ALT_CH)
+        } else {
+            Err("no dm channel".to_string())
+        }
+    }
+
+    async fn page(&self, channel: u64, after: Option<u64>) -> Result<Vec<DemoMsg>, String> {
+        let mut picked: Vec<DemoMsg> = self
+            .msgs
+            .iter()
+            .filter(|m| m.channel == channel && after.is_none_or(|a| m.id > a))
+            .cloned()
+            .collect();
+        picked.sort_by_key(|m| m.id);
+        match after {
+            None => {
+                let start = picked.len().saturating_sub(PAGE);
+                picked = picked.split_off(start);
+            }
+            Some(_) => picked.truncate(PAGE),
+        }
+        picked.reverse();
+        Ok(picked)
+    }
+
+    async fn fetch(&self, channel: u64, msg_id: u64) -> Result<DemoMsg, String> {
+        self.msgs
+            .iter()
+            .find(|m| m.id == msg_id && m.channel == channel)
+            .cloned()
+            .ok_or_else(|| "unknown message".to_string())
+    }
+}
+
+fn demo_msg(
+    world: &Arc<World>,
+    author: u64,
+    channel: u64,
+    id: u64,
+    received: &'static str,
+    content: &'static str,
+    files: &[(&str, &[u8])],
+) -> DemoMsg {
+    DemoMsg {
+        author,
+        channel,
+        id,
+        received,
+        content,
+        files: files
+            .iter()
+            .map(|(n, b)| (n.to_string(), b.to_vec()))
+            .collect(),
+        world: world.clone(),
+    }
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
     let (main_id, real) = id_from_env("DEMO_MAIN_ID", STAND_IN_MAIN);
     let (alt_id, _) = id_from_env("DEMO_ALT_ID", STAND_IN_ALT);
     let source = if real { "" } else { " (stand-in IDs)" };
@@ -58,53 +205,60 @@ fn main() {
     );
     println!();
 
-    let messages = vec![
-        (
-            "main",
-            Incoming {
-                msg_id: 1427000000000000001,
-                author_id: main_id,
-                received: "2026-10-13T14:03:22Z".into(),
-                content: "https://example.com/recipe".into(),
-                attachments: vec![],
-            },
-        ),
-        (
-            "alt",
-            Incoming {
-                msg_id: 1427000000000000002,
-                author_id: alt_id,
-                received: "2026-10-13T14:05:10Z".into(),
-                content: "see attached".into(),
-                attachments: vec![("note.txt".into(), b"hello".to_vec())],
-            },
-        ),
-        (
-            "third",
-            Incoming {
-                msg_id: 1427000000000000003,
-                author_id: THIRD_ID,
-                received: "2026-10-13T14:06:00Z".into(),
-                content: "spam".into(),
-                attachments: vec![],
-            },
-        ),
-    ];
+    let world = Arc::new(World::default());
+    let main_msg = demo_msg(
+        &world,
+        main_id,
+        MAIN_CH,
+        1427000000000000001,
+        "2026-10-13T14:03:22Z",
+        "https://example.com/recipe",
+        &[],
+    );
+    let alt_msg = demo_msg(
+        &world,
+        alt_id,
+        ALT_CH,
+        1427000000000000002,
+        "2026-10-13T14:05:10Z",
+        "see attached",
+        &[("note.txt", b"hello"), ("bad-photo.jpg", b"jpeg bytes")],
+    );
+    let third_msg = demo_msg(
+        &world,
+        THIRD_ID,
+        THIRD_CH,
+        1427000000000000003,
+        "2026-10-13T14:06:00Z",
+        "spam",
+        &[("x.txt", b"x")],
+    );
 
     // Outcomes are checked, not announced: any wrong one is collected and the demo exits 1.
     let mut problems: Vec<String> = Vec::new();
-    for (label, m) in &messages {
-        let expect = *label != "third";
-        let admitted = accept(&allow, &inbox, m).expect("write");
-        if admitted {
-            println!("ACCEPTED {label}");
-        } else {
-            println!("IGNORED {label}: not on allowlist");
-        }
-        if admitted != expect {
-            problems.push(format!("{label}: admitted={admitted}, expected {expect}"));
+
+    println!("== live, CDN down ==");
+    world.cdn_down.store(true, Ordering::SeqCst);
+    let live = [("main", &main_msg), ("alt", &alt_msg), ("third", &third_msg)];
+    let expected = [Outcome::Saved, Outcome::Pending, Outcome::Ignored];
+    for ((label, m), want) in live.iter().zip(expected.iter()) {
+        let got = ingest(&allow, &inbox, *m).await;
+        println!("{label}: {got:?}");
+        if got != *want {
+            problems.push(format!("{label}: {got:?}, expected {want:?}"));
         }
     }
+
+    println!();
+    println!("== next start, CDN back ==");
+    world.cdn_down.store(false, Ordering::SeqCst);
+    let history = DemoHistory {
+        main_id,
+        alt_id,
+        msgs: vec![main_msg.clone(), alt_msg.clone()],
+    };
+    catch_up(&allow, &inbox, &history).await;
+    println!("retry list: {} entries", retry_entries(&inbox).len());
 
     let listing = |dir: &Path| -> Vec<String> {
         let mut v: Vec<String> = fs::read_dir(dir)
@@ -118,44 +272,71 @@ fn main() {
     };
     let all = listing(&inbox);
     let names: Vec<String> = all.iter().filter(|n| !n.starts_with('.')).cloned().collect();
-    let alt_note = names
+
+    // The ignored sender: no download, no reaction, no file, no name, no text.
+    if world.downloads(third_msg.id) != 0 || world.reacts(third_msg.id) != 0 {
+        problems.push("the ignored sender caused a download or a reaction".into());
+    }
+    let third_files = all
         .iter()
-        .find(|n| n.ends_with(&format!("_{}.md", messages[1].1.msg_id)))
-        .map(|n| inbox.join(n));
-    let third_files = names
-        .iter()
-        .filter(|n| n.contains(&messages[2].1.msg_id.to_string()))
+        .filter(|n| n.contains(&third_msg.id.to_string()))
         .count();
     let stranger_in_text = names.iter().filter(|n| n.ends_with(".md")).any(|n| {
         fs::read_to_string(inbox.join(n))
             .map(|t| t.contains(&THIRD_ID.to_string()))
             .unwrap_or(false)
     });
-    let ids: Vec<u64> = messages.iter().map(|(_, m)| m.msg_id).collect();
-    for (label, id) in [("main", ids[0]), ("alt", ids[1])] {
-        if !names.iter().any(|n| n.ends_with(&format!("_{id}.md"))) {
-            problems.push(format!("no note for {label}"));
-        }
-    }
     if third_files > 0 || stranger_in_text {
         problems.push("a file exists for the ignored sender".into());
     }
-    if names.len() != 3 {
-        problems.push(format!("inbox holds {} files, expected 3", names.len()));
+
+    // The two allowlisted DMs: complete notes, one reaction each, cursors at their IDs.
+    if !retry_entries(&inbox).is_empty() {
+        problems.push("the retry list is not empty".into());
     }
-    if read_last_id(&inbox) != Some(ids[1]) {
+    let main_note = dump::note_path(&inbox, main_msg.received, main_msg.id);
+    let alt_note = dump::note_path(&inbox, alt_msg.received, alt_msg.id);
+    if !main_note.is_file() {
+        problems.push("no note for main".into());
+    }
+    if !alt_note.is_file() {
+        problems.push("no note for alt".into());
+    }
+    let alt_text = fs::read_to_string(&alt_note).unwrap_or_default();
+    if alt_text.contains("pending") || alt_text.matches("sha256: ").count() != 2 {
+        problems.push("the alt note is not complete".into());
+    }
+    if names.len() != 4 {
+        problems.push(format!("inbox holds {} files, expected 4", names.len()));
+    }
+    if !names.iter().any(|n| n.ends_with("_1_note.txt"))
+        || !names.iter().any(|n| n.ends_with("_2_bad-photo.jpg"))
+    {
+        problems.push("the alt attachments are not both on disk".into());
+    }
+    if world.reacts(main_msg.id) != 1 || world.reacts(alt_msg.id) != 1 {
         problems.push(format!(
-            "cursor is {:?}, expected the alt message",
-            read_last_id(&inbox)
+            "reactions main={} alt={}, expected 1 and 1",
+            world.reacts(main_msg.id),
+            world.reacts(alt_msg.id)
         ));
     }
+    if read_cursor(&inbox, MAIN_CH) != Some(main_msg.id) {
+        problems.push(format!("main cursor is {:?}", read_cursor(&inbox, MAIN_CH)));
+    }
+    if read_cursor(&inbox, ALT_CH) != Some(alt_msg.id) {
+        problems.push(format!("alt cursor is {:?}", read_cursor(&inbox, ALT_CH)));
+    }
+    if inbox.join(".cursor-7009").exists() {
+        problems.push("a cursor exists for the ignored sender's channel".into());
+    }
 
-    // The alt note carries the attachment. Show it whole, with the real IDs masked.
-    if let Some(note) = alt_note {
+    // The alt note carries the attachments. Show it whole, with the real IDs masked.
+    if alt_note.is_file() {
         let mut pairs = [(main_id, "main"), (alt_id, "alt")];
         // Longest first, so a short ID cannot mask part of a longer one.
         pairs.sort_by_key(|(id, _)| std::cmp::Reverse(id.to_string().len()));
-        let mut text = fs::read_to_string(&note).unwrap();
+        let mut text = fs::read_to_string(&alt_note).unwrap();
         for (id, label) in pairs {
             text = text.replace(&id.to_string(), label);
         }
