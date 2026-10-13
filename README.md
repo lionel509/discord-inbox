@@ -24,6 +24,6 @@ The note is written anyway. The failed attachment is listed as `sha256: pending`
 
 ## First start
 
-On the first start (or if a channel's cursor file is lost), only the newest 100 messages per DM channel are fetched; older history is not backfilled.
+Until a DM channel has a cursor (`Inbox/.cursor-<channel>`), each start fetches only the newest 100 messages in it; older history is not backfilled.
 
 Builds on macOS only (Keychain via `security-framework`).

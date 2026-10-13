@@ -151,9 +151,39 @@ async fn main() -> ExitCode {
         Err(e) => return fail(e),
     };
     let inbox = dump::inbox_dir();
+    // An empty or relative path would write notes relative to the working directory.
+    if !inbox.is_absolute() {
+        return fail(format!(
+            "inbox dir {inbox:?} is not an absolute path; refusing to start"
+        ));
+    }
     if let Err(e) = fs::create_dir_all(&inbox) {
         return fail(format!("inbox {} not creatable: {e}", inbox.display()));
     }
+
+    // Single instance: a second process would race this one on the same Inbox. The kernel drops
+    // the lock when the process exits, even on kill -9, so a crash never blocks a restart.
+    // Held as `_lock` until main returns, which is the whole run.
+    let lock_path = inbox.join(".lock");
+    let _lock = match fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)
+    {
+        Ok(f) => match f.try_lock() {
+            Ok(()) => f,
+            Err(fs::TryLockError::WouldBlock) => {
+                return fail(format!(
+                    "already running: {} is held by another instance",
+                    lock_path.display()
+                ))
+            }
+            Err(fs::TryLockError::Error(e)) => {
+                return fail(format!("lock {} failed: {e}", lock_path.display()))
+            }
+        },
+        Err(e) => return fail(format!("lock {} not openable: {e}", lock_path.display())),
+    };
 
     // 2. Token from the login Keychain. Never printed.
     let token = match security_framework::passwords::get_generic_password(
