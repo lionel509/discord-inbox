@@ -159,24 +159,9 @@ mod tests {
             content: "hi".to_string(),
             attachments: attachments
                 .into_iter()
-                .map(|(n, b)| (n.to_string(), b.to_vec()))
+                .map(|(n, b)| (n.to_string(), Some(b.to_vec())))
                 .collect(),
         }
-    }
-
-    #[test]
-    fn admit_and_write_ignores_strangers() {
-        let allow = crate::allowlist::parse("100000000000000001\n100000000000000002\n").unwrap();
-        let inbox = temp_inbox().join("Inbox");
-        let mut stranger = sample(vec![("a.txt", b"x")]);
-        stranger.author_id = 999999999999999999;
-        assert!(admit_and_write(&allow, &inbox, &stranger)
-            .unwrap()
-            .is_none());
-        assert!(!inbox.exists(), "nothing may be created for a stranger");
-        let mut alt = sample(vec![]);
-        alt.author_id = 100000000000000002;
-        assert!(admit_and_write(&allow, &inbox, &alt).unwrap().is_some());
     }
 
     #[test]
@@ -187,17 +172,20 @@ mod tests {
         stranger.author_id = 999999999999999999;
         assert!(!accept(&allow, &inbox, &stranger).unwrap());
         assert!(!inbox.exists(), "no dir, note or cursor for a stranger");
+        let mut alt = sample(vec![]);
+        alt.author_id = 100000000000000002;
+        assert!(accept(&allow, &inbox, &alt).unwrap(), "the alt account is admitted");
     }
 
     #[test]
-    fn accept_writes_and_advances_for_allowed() {
+    fn accept_writes_for_allowed() {
         let allow = crate::allowlist::parse("100000000000000001\n100000000000000002\n").unwrap();
         let inbox = temp_inbox().join("Inbox");
         let mut alt = sample(vec![]);
         alt.author_id = 100000000000000002;
         assert!(accept(&allow, &inbox, &alt).unwrap());
         assert!(inbox.join("2026-10-13_140322_1427000000000000000.md").exists());
-        assert_eq!(read_last_id(&inbox), Some(alt.msg_id));
+        assert_eq!(read_cursor(&inbox, 7001), None, "accept never writes a cursor");
     }
 
     #[test]
@@ -265,6 +253,29 @@ mod tests {
     }
 
     #[test]
+    fn pending_attachment_is_listed_without_a_file() {
+        let inbox = temp_inbox();
+        let msg = Incoming {
+            msg_id: 1427000000000000000,
+            author_id: 100000000000000001,
+            received: "2026-10-13T14:03:22Z".to_string(),
+            content: "hi".to_string(),
+            attachments: vec![
+                ("a.txt".to_string(), Some(b"x".to_vec())),
+                ("b.jpg".to_string(), None),
+            ],
+        };
+        let note = write_note(&inbox, &msg).unwrap();
+        let stem = "2026-10-13_140322_1427000000000000000";
+        let expected = format!(
+            "---\nreceived: 2026-10-13T14:03:22Z\nfrom: 100000000000000001\nmsg_id: 1427000000000000000\nlane: dump\nattachments:\n  - file: {stem}_1_a.txt\n    sha256: {}\n  - file: {stem}_2_b.jpg\n    sha256: pending\n---\nhi\n",
+            sha256_hex(b"x")
+        );
+        assert_eq!(fs::read_to_string(&note).unwrap(), expected);
+        assert!(!inbox.join(format!("{stem}_2_b.jpg")).exists());
+    }
+
+    #[test]
     fn concurrent_cursor_writes_keep_max() {
         let inbox = temp_inbox();
         let mut handles = Vec::new();
@@ -274,7 +285,7 @@ mod tests {
                 let mut errs = Vec::new();
                 for i in 0..200u64 {
                     let id = 1000 + t * 200 + i;
-                    if let Err(e) = write_last_id(&inbox, id) {
+                    if let Err(e) = write_cursor(&inbox, 7001, id) {
                         errs.push(format!("id {id}: {e}"));
                     }
                 }
@@ -291,19 +302,64 @@ mod tests {
             errs.len(),
             errs.first()
         );
-        assert_eq!(read_last_id(&inbox), Some(1000 + 7 * 200 + 199));
+        assert_eq!(read_cursor(&inbox, 7001), Some(1000 + 7 * 200 + 199));
     }
 
     #[test]
-    fn last_id_only_advances() {
+    fn cursor_only_advances() {
         let inbox = temp_inbox();
-        assert_eq!(read_last_id(&inbox), None);
-        write_last_id(&inbox, 10).unwrap();
-        assert_eq!(read_last_id(&inbox), Some(10));
-        write_last_id(&inbox, 5).unwrap();
-        assert_eq!(read_last_id(&inbox), Some(10));
-        write_last_id(&inbox, 11).unwrap();
-        assert_eq!(read_last_id(&inbox), Some(11));
-        assert!(!inbox.join(".last_msg_id.tmp").exists());
+        assert_eq!(read_cursor(&inbox, 7001), None);
+        write_cursor(&inbox, 7001, 10).unwrap();
+        assert_eq!(read_cursor(&inbox, 7001), Some(10));
+        write_cursor(&inbox, 7001, 5).unwrap();
+        assert_eq!(read_cursor(&inbox, 7001), Some(10));
+        write_cursor(&inbox, 7001, 11).unwrap();
+        assert_eq!(read_cursor(&inbox, 7001), Some(11));
+        assert!(!inbox.join(".cursor-7001.tmp").exists());
+    }
+
+    #[test]
+    fn cursors_are_per_channel() {
+        let inbox = temp_inbox();
+        write_cursor(&inbox, 7001, 50).unwrap();
+        write_cursor(&inbox, 7002, 20).unwrap();
+        assert_eq!(read_cursor(&inbox, 7001), Some(50));
+        assert_eq!(read_cursor(&inbox, 7002), Some(20));
+    }
+
+    #[test]
+    fn read_cursor_ignores_zero_and_junk() {
+        let inbox = temp_inbox();
+        fs::write(inbox.join(".cursor-7001"), "0\n").unwrap();
+        fs::write(inbox.join(".cursor-7002"), "abc\n").unwrap();
+        assert_eq!(read_cursor(&inbox, 7001), None);
+        assert_eq!(read_cursor(&inbox, 7002), None);
+    }
+
+    #[test]
+    fn retry_add_is_idempotent_and_remove_clears() {
+        let inbox = temp_inbox();
+        add_retry(&inbox, 7001, 5).unwrap();
+        add_retry(&inbox, 7001, 5).unwrap();
+        add_retry(&inbox, 7002, 6).unwrap();
+        assert_eq!(retry_entries(&inbox), vec![(7001, 5), (7002, 6)]);
+        remove_retry(&inbox, 5).unwrap();
+        assert_eq!(retry_entries(&inbox), vec![(7002, 6)]);
+        remove_retry(&inbox, 6).unwrap();
+        assert!(!inbox.join(".retry").exists());
+    }
+
+    #[test]
+    fn retry_entries_skip_junk_and_zero() {
+        let inbox = temp_inbox();
+        fs::write(inbox.join(".retry"), "7001 5\njunk\n0 6\n7002 0\n7003 7 8\n").unwrap();
+        assert_eq!(retry_entries(&inbox), vec![(7001, 5)]);
+    }
+
+    #[test]
+    fn remove_retry_of_absent_id_touches_nothing() {
+        let inbox = temp_inbox().join("Inbox");
+        remove_retry(&inbox, 5).unwrap();
+        assert!(!inbox.exists(), "a live message with no retry must not create files");
     }
 }

@@ -1,42 +1,37 @@
-//! Pins the gate wiring in `src/main.rs`, which the lib tests cannot reach.
-//! A source check: crude on purpose, and it fails if the wiring is edited away.
+//! The one glue check on `src/main.rs`. The logic is tested in the lib, through `tests/ingest.rs`.
+//! This is a source check, crude on purpose: it fails if `main.rs` grows its own write, gate or cursor.
 use std::fs;
 
 fn main_rs() -> String {
     fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs")).unwrap()
 }
 
-#[test]
-fn ingest_checks_the_allowlist_before_anything_else() {
-    let src = main_rs();
-    let at = src.find("async fn ingest(").expect("ingest exists");
-    let body = &src[at..];
-    let open = body.find('{').unwrap();
-    let first = body[open + 1..]
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty() && !l.starts_with("//"))
-        .unwrap();
-    assert!(
-        first.starts_with("if !h.allow.contains(msg.author.id.get())"),
-        "first statement of ingest is {first:?}"
-    );
-}
-
-#[test]
-fn main_rs_only_writes_through_accept() {
-    let src = main_rs();
-    for banned in ["write_note", "write_last_id", "admit_and_write"] {
-        assert!(!src.contains(banned), "main.rs must not call {banned}");
+/// The text from `start` up to the next `async fn ` (or the end of the file).
+fn body_after<'a>(src: &'a str, start: &str) -> &'a str {
+    let at = src.find(start).unwrap_or_else(|| panic!("{start} missing"));
+    let rest = &src[at + start.len()..];
+    match rest.find("async fn ") {
+        Some(end) => &rest[..end],
+        None => rest,
     }
-    assert_eq!(src.matches("dump::accept(").count(), 1);
 }
 
 #[test]
-fn react_happens_once_and_only_after_accept() {
+fn main_rs_is_glue_over_the_lib() {
     let src = main_rs();
-    assert_eq!(src.matches(".react(").count(), 1, "one react call");
-    let accept = src.find("dump::accept(").expect("accept call");
-    let react = src.find(".react(").unwrap();
-    assert!(accept < react, "react must come after accept");
+    assert!(body_after(&src, "async fn message(").contains("ingest("), "message must call ingest");
+    assert!(body_after(&src, "async fn ready(").contains("catch_up("), "ready must call catch_up");
+    for banned in [
+        "write_note",
+        "accept(",
+        "write_cursor",
+        "read_cursor",
+        "add_retry",
+        "remove_retry",
+        "allow.contains",
+    ] {
+        assert!(!src.contains(banned), "main.rs must not contain {banned}");
+    }
+    assert_eq!(src.matches(".react(").count(), 1, "one react path, in the adapter");
+    assert_eq!(src.matches(".download(").count(), 1, "one download path, in the adapter");
 }
