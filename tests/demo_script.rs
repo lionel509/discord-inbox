@@ -95,8 +95,10 @@ fn demo_script_refuse_check_honours_cargo_target_dir() {
     let target = std::env::temp_dir().join("di-demo-test-target");
     let out = run_demo(None, Some(&target), &dir);
     let stdout = String::from_utf8_lossy(&out.stdout);
+    // Exact line match: "exit code: 127" also starts with "exit code: 1".
+    let refused = stdout.lines().any(|l| l == "exit code: 1");
     assert!(
-        stdout.contains("exit code: 1") && !stdout.contains("No such file"),
+        refused && stdout.contains("allowed_ids not found"),
         "step 2 did not show refuse-to-start; script status {:?}\n{stdout}",
         out.status.code()
     );
