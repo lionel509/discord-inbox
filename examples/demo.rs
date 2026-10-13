@@ -1,12 +1,14 @@
 //! Offline demo of the allowlist gate and the Inbox writer. No Discord, no token.
 //! Run with `sh examples/demo.sh` (also runs the refuse-to-start check).
 //!
-//! The allowlist is loaded through `allowlist::default_path()`, the same path the
-//! bot reads at startup. Messages go through `dump::admit_and_write`, the same gate
-//! and write the bot's `ingest` calls. The only part not run is the serenity
-//! event plumbing and the pre-download check in `main.rs`, which needs a live gateway.
+//! The allowlist is written to a temp file and loaded through `allowlist::default_path()`
+//! (via DISCORD_INBOX_ALLOWED_IDS_FILE), the same path the bot reads at startup.
+//! Messages go through `dump::admit_and_write`, the same gate and write that `ingest`
+//! in main.rs calls. NOT exercised here: the serenity event plumbing and the
+//! pre-download check in `ingest`, which need a live gateway.
 //!
-//! The IDs below are stand-ins. The real IDs live only in the local config file.
+//! Real IDs come from the environment (DEMO_MAIN_ID, DEMO_ALT_ID) and are never printed.
+//! Without them the demo uses stand-in IDs and says so.
 use discord_inbox::allowlist::{self, Allowlist};
 use discord_inbox::dump::{admit_and_write, sha256_hex, Incoming};
 use std::fs;
@@ -20,7 +22,22 @@ fn show(path: &Path, tmp: &str) -> String {
     path.display().to_string().replace(tmp, "<tmp>")
 }
 
+fn plural(n: usize, word: &str) -> String {
+    format!("{n} {word}{}", if n == 1 { "" } else { "s" })
+}
+
+fn id_from_env(var: &str, fallback: u64) -> (u64, bool) {
+    match std::env::var(var) {
+        Ok(v) => (v.trim().parse().expect("DEMO_*_ID must be a number"), true),
+        Err(_) => (fallback, false),
+    }
+}
+
 fn main() {
+    let (main_id, real) = id_from_env("DEMO_MAIN_ID", STAND_IN_MAIN);
+    let (alt_id, _) = id_from_env("DEMO_ALT_ID", STAND_IN_ALT);
+    let source = if real { "" } else { " (stand-in IDs)" };
+
     let tmp = std::env::temp_dir().join(format!("discord-inbox-demo-{}", std::process::id()));
     let _ = fs::remove_dir_all(&tmp);
     fs::create_dir_all(&tmp).unwrap();
@@ -29,44 +46,40 @@ fn main() {
 
     // Config file in the temp dir, read through the bot's real config path.
     let cfg = tmp.join("allowed_ids");
-    fs::write(
-        &cfg,
-        format!("# stand-in IDs for the demo\n{STAND_IN_MAIN}\n{STAND_IN_ALT}\n"),
-    )
-    .unwrap();
+    fs::write(&cfg, format!("# demo allowlist\n{main_id}\n{alt_id}\n")).unwrap();
     // Edition 2021: set_var is safe. Only this process reads it.
     std::env::set_var("DISCORD_INBOX_ALLOWED_IDS_FILE", &cfg);
     let path = allowlist::default_path();
     let allow: Allowlist = Allowlist::load(&path).expect("demo allowlist loads");
     println!(
-        "allowlist loaded from {}: 2 IDs (main, alt)",
+        "allowlist loaded from {}: 2 IDs (main, alt){source}",
         show(&path, &tmp_text)
     );
     println!();
 
     let messages = vec![
         (
-            "stand-in for main",
+            "main",
             Incoming {
                 msg_id: 1427000000000000001,
-                author_id: STAND_IN_MAIN,
+                author_id: main_id,
                 received: "2026-10-13T14:03:22Z".into(),
                 content: "https://example.com/recipe".into(),
                 attachments: vec![],
             },
         ),
         (
-            "stand-in for alt",
+            "alt",
             Incoming {
                 msg_id: 1427000000000000002,
-                author_id: STAND_IN_ALT,
+                author_id: alt_id,
                 received: "2026-10-13T14:05:10Z".into(),
                 content: "see attached".into(),
                 attachments: vec![("note.txt".into(), b"hello".to_vec())],
             },
         ),
         (
-            "third ID",
+            "third",
             Incoming {
                 msg_id: 1427000000000000003,
                 author_id: THIRD_ID,
@@ -80,14 +93,12 @@ fn main() {
     for (label, m) in &messages {
         match admit_and_write(&allow, &inbox, m).expect("write") {
             Some(note) => println!(
-                "ACCEPTED {} ({}): wrote {}",
-                m.author_id,
-                label,
+                "ACCEPTED {label}: wrote {}",
                 note.file_name().unwrap().to_string_lossy()
             ),
             None => println!(
-                "IGNORED {} ({}): not on allowlist, nothing written",
-                m.author_id, label
+                "IGNORED {}: not on allowlist, nothing written",
+                m.author_id
             ),
         }
     }
@@ -100,9 +111,12 @@ fn main() {
     let files = names.len() - notes;
     println!();
     println!(
-        "Inbox {} now holds {notes} notes and {files} attachment; nothing was written for the ignored sender.",
-        show(&inbox, &tmp_text)
+        "Inbox {} now holds {} and {}; nothing was written for the ignored sender.",
+        show(&inbox, &tmp_text),
+        plural(notes, "note"),
+        plural(files, "attachment")
     );
+    println!("(The real target is ~/Documents/Inbox/.)");
 
     for n in names.iter().filter(|n| !n.ends_with(".md")) {
         let bytes = fs::read(inbox.join(n)).unwrap();
