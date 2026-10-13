@@ -98,6 +98,12 @@ mod tests {
     }
 
     #[test]
+    fn double_bom_prefixed_allowlist_parses() {
+        let a = parse("\u{feff}\u{feff}100000000000000001 # main\n100000000000000002\n").unwrap();
+        assert!(a.contains(MAIN) && a.contains(ALT));
+    }
+
+    #[test]
     fn empty_file_is_err() {
         assert!(parse("").is_err());
         assert!(parse("# nothing\n").is_err());
