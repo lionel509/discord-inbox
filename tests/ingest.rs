@@ -2,14 +2,16 @@
 use discord_inbox::allowlist;
 use discord_inbox::allowlist::Allowlist;
 use discord_inbox::dump::{
-    self, add_retry, in_retry, read_cursor, retry_entries, sha256_hex, write_cursor,
+    self, add_retry, in_retry, note_is_complete, read_cursor, retry_entries, sha256_hex,
+    write_cursor,
 };
 use discord_inbox::ingest::{catch_up, ingest, History, Inbound, Outcome, PAGE};
 use std::collections::HashMap;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Barrier, Mutex, OnceLock};
 
 const MAIN: u64 = 100000000000000001;
 const ALT: u64 = 100000000000000002;
@@ -25,8 +27,26 @@ fn allow() -> Allowlist {
     allowlist::parse(&format!("{MAIN}\n{ALT}\n")).unwrap()
 }
 
+/// Stands in for the Vision helper: reads the image on stdin, answers only for receipts.
+/// Set once for the whole test binary, so no test reaches the real helper.
+fn ocr_stub() -> &'static Path {
+    static STUB: OnceLock<PathBuf> = OnceLock::new();
+    STUB.get_or_init(|| {
+        let path = std::env::temp_dir().join(format!("di-ocr-stub-{}", std::process::id()));
+        let body = r#"#!/bin/sh
+in=$(cat)
+case "$in" in *receipt*) printf 'TRADER JOES\nTOTAL  12.34\nVISA 1234\n' ;; *) exit 1 ;; esac
+"#;
+        fs::write(&path, body).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        std::env::set_var("DISCORD_INBOX_OCR", &path);
+        path
+    })
+}
+
 /// A fresh scratch dir; returns its `Inbox` path, which is NOT created.
 fn scratch(name: &str) -> PathBuf {
+    ocr_stub();
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let dir = std::env::temp_dir().join(format!("di-ingest-{}-{name}-{n}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
@@ -676,4 +696,97 @@ async fn invariants_hold_for_random_histories() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn receipt_text_is_in_the_note_before_the_tick() {
+    let inbox = scratch("ocr-receipt");
+    let w = World::new(&inbox);
+    let s = spec(
+        MAIN,
+        MAIN_CH,
+        300,
+        &[
+            ("receipt.jpg", b"receipt bytes"),
+            ("notes.txt", b"receipt in text"),
+        ],
+    );
+    assert_eq!(ingest(&allow(), &inbox, &msg(&w, &s)).await, Outcome::Saved);
+    assert_eq!(w.reacts(300), 1);
+    assert_eq!(
+        w.note_at_react.lock().unwrap().get(&300),
+        Some(&true),
+        "react must follow the note"
+    );
+    let text = fs::read_to_string(note(&inbox, 300)).unwrap();
+    assert!(
+        text.contains(
+            "\n## OCR 2026-10-13_140322_300_1_receipt.jpg\n\n~~~text\nTRADER JOES\nTOTAL  12.34\nVISA 1234\n~~~\n"
+        ),
+        "{text}"
+    );
+    assert_eq!(text.matches("## OCR").count(), 1, "{text}");
+    assert!(note_is_complete(&note(&inbox, 300)));
+    assert!(!in_retry(&inbox, 300));
+    let mut names: Vec<String> = fs::read_dir(&inbox)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    let mut want = vec![
+        "2026-10-13_140322_300.md".to_string(),
+        "2026-10-13_140322_300_1_receipt.jpg".to_string(),
+        "2026-10-13_140322_300_2_notes.txt".to_string(),
+    ];
+    want.sort();
+    assert_eq!(names, want);
+}
+
+#[tokio::test]
+async fn failed_ocr_still_saves_and_ticks() {
+    let inbox = scratch("ocr-failed");
+    let w = World::new(&inbox);
+    let s = spec(MAIN, MAIN_CH, 310, &[("photo.jpg", b"jpeg bytes")]);
+    assert_eq!(ingest(&allow(), &inbox, &msg(&w, &s)).await, Outcome::Saved);
+    assert_eq!(w.reacts(310), 1);
+    assert!(note_is_complete(&note(&inbox, 310)));
+    let text = fs::read_to_string(note(&inbox, 310)).unwrap();
+    assert!(!text.contains("## OCR"), "{text}");
+    assert!(!in_retry(&inbox, 310));
+}
+
+#[tokio::test]
+async fn pending_download_keeps_ocr_and_retry_semantics() {
+    let inbox = scratch("ocr-pending");
+    let w = World::new(&inbox);
+    w.cdn_down.store(true, Ordering::SeqCst);
+    let s = spec(
+        MAIN,
+        MAIN_CH,
+        320,
+        &[
+            ("receipt.jpg", b"receipt a"),
+            ("bad-receipt.jpg", b"receipt b"),
+        ],
+    );
+    assert_eq!(
+        ingest(&allow(), &inbox, &msg(&w, &s)).await,
+        Outcome::Pending
+    );
+    assert_eq!(w.reacts(320), 0);
+    assert!(in_retry(&inbox, 320));
+    let text = fs::read_to_string(note(&inbox, 320)).unwrap();
+    assert_eq!(text.matches("## OCR").count(), 1, "{text}");
+    assert!(
+        text.contains("## OCR 2026-10-13_140322_320_1_receipt.jpg\n"),
+        "{text}"
+    );
+    assert!(text.contains("sha256: pending"), "{text}");
+
+    w.cdn_down.store(false, Ordering::SeqCst);
+    assert_eq!(ingest(&allow(), &inbox, &msg(&w, &s)).await, Outcome::Saved);
+    assert_eq!(w.reacts(320), 1);
+    let text = fs::read_to_string(note(&inbox, 320)).unwrap();
+    assert_eq!(text.matches("## OCR").count(), 2, "{text}");
+    assert!(!in_retry(&inbox, 320));
 }
