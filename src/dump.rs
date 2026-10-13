@@ -9,8 +9,9 @@ pub struct Incoming {
     /// UTC, exactly `YYYY-MM-DDTHH:MM:SSZ`.
     pub received: String,
     pub content: String,
-    /// `(original filename, bytes)`.
-    pub attachments: Vec<(String, Vec<u8>)>,
+    /// `(original filename, bytes)`. `None` means the download failed: the note lists the
+    /// attachment as `sha256: pending` and writes no file for it.
+    pub attachments: Vec<(String, Option<Vec<u8>>)>,
 }
 
 /// `$DISCORD_INBOX_DIR`, else `~/Documents/Inbox`.
@@ -54,24 +55,38 @@ fn sanitize(name: &str) -> String {
 /// Keeps the on-disk name well under the 255-byte filesystem limit.
 const MAX_NAME: usize = 100;
 
+fn stem(received: &str, msg_id: u64) -> String {
+    format!(
+        "{}_{}_{}",
+        &received[..10],
+        received[11..19].replace(':', ""),
+        msg_id
+    )
+}
+
+/// Where the note for a message lives. The skip check and `write_note` both use this.
+pub fn note_path(inbox: &Path, received: &str, msg_id: u64) -> PathBuf {
+    inbox.join(format!("{}.md", stem(received, msg_id)))
+}
+
 /// Writes attachments first, then the note, so a note on disk always has its files.
 pub fn write_note(inbox: &Path, msg: &Incoming) -> std::io::Result<PathBuf> {
     fs::create_dir_all(inbox)?;
-    let stem = format!(
-        "{}_{}_{}",
-        &msg.received[..10],
-        msg.received[11..19].replace(':', ""),
-        msg.msg_id
-    );
+    let base = stem(&msg.received, msg.msg_id);
 
     let mut entries = Vec::new();
     for (i, (name, bytes)) in msg.attachments.iter().enumerate() {
-        let file = format!("{stem}_{}_{}", i + 1, sanitize(name));
-        fs::write(inbox.join(&file), bytes)?;
-        entries.push(format!(
-            "  - file: {file}\n    sha256: {}\n",
-            sha256_hex(bytes)
-        ));
+        let file = format!("{base}_{}_{}", i + 1, sanitize(name));
+        match bytes {
+            Some(b) => {
+                fs::write(inbox.join(&file), b)?;
+                entries.push(format!(
+                    "  - file: {file}\n    sha256: {}\n",
+                    sha256_hex(b)
+                ));
+            }
+            None => entries.push(format!("  - file: {file}\n    sha256: pending\n")),
+        }
     }
 
     let attachments = if entries.is_empty() {
@@ -84,55 +99,101 @@ pub fn write_note(inbox: &Path, msg: &Incoming) -> std::io::Result<PathBuf> {
         msg.received, msg.author_id, msg.msg_id, msg.content
     );
 
-    let note = inbox.join(format!("{stem}.md"));
+    let note = note_path(inbox, &msg.received, msg.msg_id);
     fs::write(&note, text)?;
     Ok(note)
 }
 
-/// The gate and the write, in one place. `accept` calls this, so both run the same allowlist check.
-/// `Ok(None)` means the author is not on the allowlist and nothing was written.
-pub fn admit_and_write(
-    allow: &Allowlist,
-    inbox: &Path,
-    msg: &Incoming,
-) -> std::io::Result<Option<PathBuf>> {
-    if !allow.contains(msg.author_id) {
-        return Ok(None);
-    }
-    write_note(inbox, msg).map(Some)
-}
-
-/// Gate, write and cursor in one call. Returns whether the caller should react.
-/// A sender not on the allowlist gets no file, no cursor move and `Ok(false)`.
+/// The lib gate. A sender not on the allowlist gets no file. Never touches cursors.
 pub fn accept(allow: &Allowlist, inbox: &Path, msg: &Incoming) -> std::io::Result<bool> {
-    if admit_and_write(allow, inbox, msg)?.is_none() {
+    if !allow.contains(msg.author_id) {
         return Ok(false);
     }
-    write_last_id(inbox, msg.msg_id)?;
+    write_note(inbox, msg)?;
     Ok(true)
 }
 
-const LAST_ID: &str = ".last_msg_id";
+/// Serialises every writer of `.cursor-*` and `.retry`. The live event and catch-up can run at once.
+static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-pub fn read_last_id(inbox: &Path) -> Option<u64> {
-    fs::read_to_string(inbox.join(LAST_ID))
+/// The saved cursor for one DM channel, or `None` when there is none (or it is 0 or junk).
+pub fn read_cursor(inbox: &Path, channel: u64) -> Option<u64> {
+    fs::read_to_string(inbox.join(format!(".cursor-{channel}")))
         .ok()?
         .trim()
         .parse()
         .ok()
+        .filter(|&id: &u64| id != 0)
 }
 
-/// Only ever moves forward. The lock stops two writers (live event and catch-up)
-/// from sharing one tmp file or interleaving check-then-write.
-pub fn write_last_id(inbox: &Path, id: u64) -> std::io::Result<()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// Only ever moves forward. The lock stops two writers from sharing one tmp file or
+/// interleaving check-then-write.
+pub fn write_cursor(inbox: &Path, channel: u64, id: u64) -> std::io::Result<()> {
     let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    if read_last_id(inbox).is_some_and(|cur| cur >= id) {
+    if read_cursor(inbox, channel).is_some_and(|c| c >= id) {
         return Ok(());
     }
-    let tmp = inbox.join(format!("{LAST_ID}.tmp"));
+    fs::create_dir_all(inbox)?;
+    let tmp = inbox.join(format!(".cursor-{channel}.tmp"));
     fs::write(&tmp, format!("{id}\n"))?;
-    fs::rename(tmp, inbox.join(LAST_ID))
+    fs::rename(tmp, inbox.join(format!(".cursor-{channel}")))
+}
+
+const RETRY: &str = ".retry";
+
+/// `(channel, msg id)` pairs still owed a complete note. Junk and zero IDs are skipped.
+pub fn retry_entries(inbox: &Path) -> Vec<(u64, u64)> {
+    let Ok(text) = fs::read_to_string(inbox.join(RETRY)) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() != 2 {
+                return None;
+            }
+            let channel: u64 = parts[0].parse().ok()?;
+            let id: u64 = parts[1].parse().ok()?;
+            (channel != 0 && id != 0).then_some((channel, id))
+        })
+        .collect()
+}
+
+pub fn in_retry(inbox: &Path, msg_id: u64) -> bool {
+    retry_entries(inbox).iter().any(|e| e.1 == msg_id)
+}
+
+fn write_retry(inbox: &Path, entries: &[(u64, u64)]) -> std::io::Result<()> {
+    let text: String = entries.iter().map(|(c, m)| format!("{c} {m}\n")).collect();
+    let tmp = inbox.join(format!("{RETRY}.tmp"));
+    fs::write(&tmp, text)?;
+    fs::rename(tmp, inbox.join(RETRY))
+}
+
+/// Records a message that still owes an attachment. Adding it twice is a no-op.
+pub fn add_retry(inbox: &Path, channel: u64, msg_id: u64) -> std::io::Result<()> {
+    let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let mut entries = retry_entries(inbox);
+    if entries.iter().any(|e| e.1 == msg_id) {
+        return Ok(());
+    }
+    entries.push((channel, msg_id));
+    fs::create_dir_all(inbox)?;
+    write_retry(inbox, &entries)
+}
+
+/// Clears a message from the retry list. Without a matching entry it touches nothing on disk.
+pub fn remove_retry(inbox: &Path, msg_id: u64) -> std::io::Result<()> {
+    let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let entries = retry_entries(inbox);
+    if !entries.iter().any(|e| e.1 == msg_id) {
+        return Ok(());
+    }
+    let left: Vec<(u64, u64)> = entries.into_iter().filter(|e| e.1 != msg_id).collect();
+    if left.is_empty() {
+        return fs::remove_file(inbox.join(RETRY));
+    }
+    write_retry(inbox, &left)
 }
 
 #[cfg(test)]
