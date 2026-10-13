@@ -87,13 +87,45 @@ fn demo_script_fails_when_refuse_to_start_does_not_exit_1() {
     );
 }
 
+/// Copies only what demo.sh needs. No `target/`, so nothing prebuilt is in reach.
+fn copy_crate(dest: &Path) -> PathBuf {
+    let copy = dest.join("crate");
+    fs::create_dir_all(&copy).unwrap();
+    for item in ["Cargo.toml", "Cargo.lock", "src", "examples"] {
+        let ok = Command::new("cp")
+            .args(["-R", repo_root().join(item).to_str().unwrap(), copy.to_str().unwrap()])
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "copy {item}");
+    }
+    copy
+}
+
+fn real_target_dir() -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo_root().join("target"))
+}
+
+fn run_demo_in(crate_dir: &Path, tmp: &Path) -> Output {
+    Command::new("sh")
+        .arg("examples/demo.sh")
+        .current_dir(crate_dir)
+        .env("TMPDIR", tmp)
+        .env("CARGO_TARGET_DIR", real_target_dir())
+        .output()
+        .unwrap()
+}
+
 #[test]
 fn demo_script_refuse_check_honours_cargo_target_dir() {
-    // With CARGO_TARGET_DIR elsewhere, the hardcoded target/debug path is missing.
-    // Before the fix, step 2 reported exit 127 and the script still exited 0.
+    // The copy has no target/, so a hardcoded target/debug/discord-inbox path is
+    // missing even under a bare `cargo test`. Step 2 would then exit 127.
     let dir = scratch("target-dir");
-    let target = std::env::temp_dir().join("di-demo-test-target");
-    let out = run_demo(None, Some(&target), &dir);
+    let copy = copy_crate(&dir);
+    assert!(!copy.join("target").exists());
+    let out = run_demo_in(&copy, &dir);
     let stdout = String::from_utf8_lossy(&out.stdout);
     // Exact line match: "exit code: 127" also starts with "exit code: 1".
     let refused = stdout.lines().any(|l| l == "exit code: 1");
@@ -103,4 +135,34 @@ fn demo_script_refuse_check_honours_cargo_target_dir() {
         out.status.code()
     );
     assert!(out.status.success(), "script failed:\n{stdout}");
+}
+
+#[test]
+fn demo_script_fails_when_the_gate_admits_a_stranger() {
+    // Break the gate in a copy: Allowlist::contains always says yes.
+    let dir = scratch("broken-gate");
+    let copy = copy_crate(&dir);
+    let file = copy.join("src/allowlist.rs");
+    let text = fs::read_to_string(&file).unwrap();
+    let broken = text.replace("self.0.contains(&user_id)", "{ let _ = user_id; true }");
+    assert_ne!(text, broken, "patch did not apply");
+    fs::write(&file, broken).unwrap();
+    let out = run_demo_in(&copy, &dir);
+    assert!(
+        !out.status.success(),
+        "demo.sh exited 0 with a gate that admits everyone\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+#[test]
+fn demo_script_survives_a_hash_in_tmpdir() {
+    let dir = scratch("hash#dir");
+    let out = run_demo(None, None, &dir);
+    assert!(
+        out.status.success(),
+        "demo.sh failed with # in TMPDIR\n{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 }

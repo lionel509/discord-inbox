@@ -103,6 +103,12 @@ pub fn admit_and_write(
     write_note(inbox, msg).map(Some)
 }
 
+/// Gate, write and cursor in one call. Returns whether the caller should react.
+/// A sender not on the allowlist gets no file, no cursor move and `Ok(false)`.
+pub fn accept(allow: &Allowlist, inbox: &Path, msg: &Incoming) -> std::io::Result<bool> {
+    Ok(false)
+}
+
 const LAST_ID: &str = ".last_msg_id";
 
 pub fn read_last_id(inbox: &Path) -> Option<u64> {
@@ -168,6 +174,27 @@ mod tests {
         let mut alt = sample(vec![]);
         alt.author_id = 100000000000000002;
         assert!(admit_and_write(&allow, &inbox, &alt).unwrap().is_some());
+    }
+
+    #[test]
+    fn accept_ignores_strangers() {
+        let allow = crate::allowlist::parse("100000000000000001\n100000000000000002\n").unwrap();
+        let inbox = temp_inbox().join("Inbox");
+        let mut stranger = sample(vec![("a.txt", b"x")]);
+        stranger.author_id = 999999999999999999;
+        assert!(!accept(&allow, &inbox, &stranger).unwrap());
+        assert!(!inbox.exists(), "no dir, note or cursor for a stranger");
+    }
+
+    #[test]
+    fn accept_writes_and_advances_for_allowed() {
+        let allow = crate::allowlist::parse("100000000000000001\n100000000000000002\n").unwrap();
+        let inbox = temp_inbox().join("Inbox");
+        let mut alt = sample(vec![]);
+        alt.author_id = 100000000000000002;
+        assert!(accept(&allow, &inbox, &alt).unwrap());
+        assert!(inbox.join("2026-10-13_140322_1427000000000000000.md").exists());
+        assert_eq!(read_last_id(&inbox), Some(alt.msg_id));
     }
 
     #[test]
