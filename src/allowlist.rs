@@ -3,23 +3,48 @@ use std::path::{Path, PathBuf};
 
 pub struct Allowlist(HashSet<u64>);
 
-pub fn parse(_text: &str) -> Result<Allowlist, String> {
-    todo!()
+/// One user ID per line. Blank lines and `#` comments are skipped.
+pub fn parse(text: &str) -> Result<Allowlist, String> {
+    let mut ids = HashSet::new();
+    for (n, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let id: u64 = line
+            .parse()
+            .map_err(|_| format!("allowed_ids: bad line {}", n + 1))?;
+        ids.insert(id);
+    }
+    if ids.is_empty() {
+        return Err("allowed_ids: no user IDs listed".into());
+    }
+    Ok(Allowlist(ids))
 }
 
 impl Allowlist {
     pub fn load(path: &Path) -> Result<Allowlist, String> {
-        let _ = path;
-        todo!()
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("allowed_ids not found at {}: {e}", path.display()))?;
+        parse(&text)
     }
 
-    pub fn contains(&self, _user_id: u64) -> bool {
-        todo!()
+    pub fn contains(&self, user_id: u64) -> bool {
+        self.0.contains(&user_id)
+    }
+
+    pub fn ids(&self) -> impl Iterator<Item = u64> + '_ {
+        self.0.iter().copied()
     }
 }
 
+/// `$DISCORD_INBOX_ALLOWED_IDS_FILE`, else `~/.config/discord-inbox/allowed_ids`.
 pub fn default_path() -> PathBuf {
-    todo!()
+    if let Some(p) = std::env::var_os("DISCORD_INBOX_ALLOWED_IDS_FILE") {
+        return PathBuf::from(p);
+    }
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".config/discord-inbox/allowed_ids")
 }
 
 #[cfg(test)]
@@ -88,9 +113,12 @@ mod tests {
                 assert!(!a.contains(state), "random id {state} passed");
             }
         }
+        // ALT is MAIN + 1, so only neighbours that are not themselves allowed apply.
         for fake in [MAIN, ALT] {
             for x in [fake - 1, fake + 1] {
-                assert!(!a.contains(x), "neighbour {x} passed");
+                if x != MAIN && x != ALT {
+                    assert!(!a.contains(x), "neighbour {x} passed");
+                }
             }
         }
     }

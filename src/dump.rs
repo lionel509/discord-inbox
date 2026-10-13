@@ -1,31 +1,105 @@
+use sha2::{Digest, Sha256};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 pub struct Incoming {
     pub msg_id: u64,
     pub author_id: u64,
+    /// UTC, exactly `YYYY-MM-DDTHH:MM:SSZ`.
     pub received: String,
     pub content: String,
+    /// `(original filename, bytes)`.
     pub attachments: Vec<(String, Vec<u8>)>,
 }
 
+/// `$DISCORD_INBOX_DIR`, else `~/Documents/Inbox`.
 pub fn inbox_dir() -> PathBuf {
-    todo!()
+    if let Some(p) = std::env::var_os("DISCORD_INBOX_DIR") {
+        return PathBuf::from(p);
+    }
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    PathBuf::from(home).join("Documents/Inbox")
 }
 
-pub fn sha256_hex(_bytes: &[u8]) -> String {
-    todo!()
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
-pub fn write_note(_inbox: &Path, _msg: &Incoming) -> std::io::Result<PathBuf> {
-    todo!()
+/// Keeps ASCII alphanumerics, `.`, `_` and `-`; everything else becomes `_`.
+fn sanitize(name: &str) -> String {
+    let clean: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if clean.is_empty() || clean.chars().all(|c| c == '.') {
+        "file".to_string()
+    } else {
+        clean
+    }
 }
 
-pub fn read_last_id(_inbox: &Path) -> Option<u64> {
-    todo!()
+/// Writes attachments first, then the note, so a note on disk always has its files.
+pub fn write_note(inbox: &Path, msg: &Incoming) -> std::io::Result<PathBuf> {
+    fs::create_dir_all(inbox)?;
+    let stem = format!(
+        "{}_{}_{}",
+        &msg.received[..10],
+        msg.received[11..19].replace(':', ""),
+        msg.msg_id
+    );
+
+    let mut entries = Vec::new();
+    for (i, (name, bytes)) in msg.attachments.iter().enumerate() {
+        let file = format!("{stem}_{}_{}", i + 1, sanitize(name));
+        fs::write(inbox.join(&file), bytes)?;
+        entries.push(format!(
+            "  - file: {file}\n    sha256: {}\n",
+            sha256_hex(bytes)
+        ));
+    }
+
+    let attachments = if entries.is_empty() {
+        "attachments: []\n".to_string()
+    } else {
+        format!("attachments:\n{}", entries.concat())
+    };
+    let text = format!(
+        "---\nreceived: {}\nfrom: {}\nmsg_id: {}\nlane: dump\n{attachments}---\n{}\n",
+        msg.received, msg.author_id, msg.msg_id, msg.content
+    );
+
+    let note = inbox.join(format!("{stem}.md"));
+    fs::write(&note, text)?;
+    Ok(note)
 }
 
-pub fn write_last_id(_inbox: &Path, _id: u64) -> std::io::Result<()> {
-    todo!()
+const LAST_ID: &str = ".last_msg_id";
+
+pub fn read_last_id(inbox: &Path) -> Option<u64> {
+    fs::read_to_string(inbox.join(LAST_ID))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Only ever moves forward.
+pub fn write_last_id(inbox: &Path, id: u64) -> std::io::Result<()> {
+    if read_last_id(inbox).is_some_and(|cur| cur >= id) {
+        return Ok(());
+    }
+    let tmp = inbox.join(format!("{LAST_ID}.tmp"));
+    fs::write(&tmp, format!("{id}\n"))?;
+    fs::rename(tmp, inbox.join(LAST_ID))
 }
 
 #[cfg(test)]
@@ -38,11 +112,7 @@ mod tests {
 
     fn temp_inbox() -> PathBuf {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!(
-            "di-dump-test-{}-{}",
-            std::process::id(),
-            n
-        ));
+        let dir = std::env::temp_dir().join(format!("di-dump-test-{}-{}", std::process::id(), n));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
