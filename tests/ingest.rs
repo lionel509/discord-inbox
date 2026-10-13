@@ -549,6 +549,30 @@ fn live_and_catch_up_on_one_message_never_leave_a_pending_note_unowed() {
     );
 }
 
+/// A pending write that reaches the note after a complete one must leave the complete note alone.
+#[tokio::test]
+async fn pending_write_never_replaces_a_complete_note() {
+    let inbox = scratch("pending-after-complete");
+    let ok = World::new(&inbox);
+    let fail = World::new(&inbox);
+    fail.cdn_down.store(true, Ordering::SeqCst);
+    let s = spec(MAIN, MAIN_CH, 100, &[("bad.jpg", b"b")]);
+    assert_eq!(
+        ingest(&allow(), &inbox, &msg(&ok, &s)).await,
+        Outcome::Saved
+    );
+    // The failing call's retry record lands after the complete call has cleared it.
+    add_retry(&inbox, MAIN_CH, 100).unwrap();
+    assert_eq!(
+        ingest(&allow(), &inbox, &msg(&fail, &s)).await,
+        Outcome::Pending
+    );
+    let text = fs::read_to_string(note(&inbox, 100)).unwrap();
+    assert!(!text.contains("pending"), "{text}");
+    assert!(text.contains(&sha256_hex(b"b")), "{text}");
+    assert!(att(&inbox, 100, 1, "bad.jpg").is_file());
+}
+
 /// A 64-bit LCG, seed 42, so every run draws the same histories.
 #[tokio::test]
 async fn invariants_hold_for_random_histories() {
