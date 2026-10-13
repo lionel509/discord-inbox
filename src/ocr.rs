@@ -47,29 +47,39 @@ pub fn run(cmd: &Path, image: &[u8], timeout: Duration) -> Option<String> {
     std::thread::spawn(move || {
         let _ = input.write_all(&bytes);
     });
-    let reader = std::thread::spawn(move || {
+    // Not joined: a helper that left a grandchild holding stdout must not hang us. The read is waited for only up to the deadline.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut buf = Vec::new();
         let _ = output.read_to_end(&mut buf);
-        buf
+        let _ = tx.send(buf);
     });
 
     let deadline = Instant::now() + timeout;
+    // Starts short so a quick helper isn't charged a full poll interval; doubles up to POLL.
+    let mut nap = Duration::from_millis(1);
     let status: ExitStatus = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(nap);
+                nap = (nap * 2).min(POLL);
+            }
             _ => {
                 kill(&mut child);
-                // The reader is not joined: a helper that left a grandchild on stdout must not hang us here.
                 return None;
             }
         }
     };
 
-    let out = reader.join().ok()?;
     if !status.success() {
         return None;
     }
+    // The child has exited, but a grandchild may still hold stdout: wait until the deadline, at least 1 s.
+    let wait = deadline
+        .saturating_duration_since(Instant::now())
+        .max(Duration::from_secs(1));
+    let out = rx.recv_timeout(wait).ok()?;
     let text = String::from_utf8_lossy(&out).trim().to_string();
     (!text.is_empty()).then_some(text)
 }
