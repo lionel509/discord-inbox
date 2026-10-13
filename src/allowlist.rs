@@ -5,9 +5,10 @@ pub struct Allowlist(HashSet<u64>);
 
 /// One user ID per line. Blank lines and `#` comments are skipped.
 pub fn parse(text: &str) -> Result<Allowlist, String> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut ids = HashSet::new();
     for (n, raw) in text.lines().enumerate() {
-        let line = raw.trim();
+        let line = raw.split('#').next().unwrap_or("").trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
@@ -82,6 +83,18 @@ mod tests {
         let a = parse("# main\n100000000000000001\n\n100000000000000002\n").unwrap();
         assert!(a.contains(MAIN) && a.contains(ALT));
         assert!(!a.contains(STRANGER));
+    }
+
+    #[test]
+    fn trailing_comment_on_id_line_parses() {
+        let a = parse("100000000000000001 # main\n100000000000000002 # alt\n").unwrap();
+        assert!(a.contains(MAIN) && a.contains(ALT));
+    }
+
+    #[test]
+    fn bom_prefixed_allowlist_parses() {
+        let a = parse("\u{feff}100000000000000001\n100000000000000002\n").unwrap();
+        assert!(a.contains(MAIN) && a.contains(ALT));
     }
 
     #[test]
