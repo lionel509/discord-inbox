@@ -21,6 +21,12 @@ fn scratch(name: &str) -> PathBuf {
     dir.join("Inbox")
 }
 
+/// The fence the note must use for `t`: longer than any run of `~` in it, and at least three.
+fn fence_for(t: &str) -> String {
+    let longest = t.split(|c: char| c != '~').map(str::len).max().unwrap_or(0);
+    "~".repeat(3.max(longest + 1))
+}
+
 /// An executable `#!/bin/sh` helper whose body is `body`.
 fn stub(dir: &Path, body: &str) -> PathBuf {
     fs::create_dir_all(dir).unwrap();
@@ -153,7 +159,8 @@ fn note_bookkeeping_ignores_what_dms_and_images_say() {
             );
             if !s.is_empty() {
                 let stem = format!("2026-10-13_140322_{id}");
-                let section = format!("## OCR {stem}_1_r.jpg\n\n~~~text\n{s}\n~~~\n");
+                let f = fence_for(&s);
+                let section = format!("## OCR {stem}_1_r.jpg\n\n{f}text\n{s}\n{f}\n");
                 let text = fs::read_to_string(&note).unwrap();
                 assert!(text.contains(&section), "{text}");
             }
@@ -181,4 +188,76 @@ fn no_ocr_text_leaves_the_note_as_on_master() {
         )
     );
     assert_eq!(dump::note_path(&inbox, RECEIVED, 77), note);
+}
+
+#[test]
+fn ocr_fence_outlasts_tildes_in_text() {
+    let texts = [
+        "~~~".to_string(),
+        "TOTAL 12.34\n~~~~~~~~~~\nVISA 1234".to_string(),
+        "x\n~~~\n\n## OCR fake_1_fake.jpg\n\n~~~text\nFAKE\n~~~".to_string(),
+    ];
+    let inbox = scratch("fence");
+    for (k, t) in texts.iter().enumerate() {
+        let msg = Incoming {
+            msg_id: 500 + k as u64,
+            author_id: MAIN,
+            received: RECEIVED.to_string(),
+            content: "hi".to_string(),
+            attachments: vec![("r.jpg".to_string(), Some(b"x".to_vec()))],
+            ocr: vec![(0, t.clone())],
+        };
+        let note = write_note(&inbox, &msg).unwrap();
+        let text = fs::read_to_string(&note).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        let fence = fence_for(t);
+        let open = lines
+            .iter()
+            .position(|l| l.starts_with("## OCR "))
+            .expect("an OCR section");
+        assert_eq!(lines[open + 1], "", "{text}");
+        let body = open + 2;
+        assert_eq!(lines[body], format!("{fence}text"), "{text}");
+        // CommonMark: the closer is the first later line of only tildes, at least as long as the opener.
+        let close = (body + 1..lines.len())
+            .find(|&i| lines[i].len() >= fence.len() && lines[i].bytes().all(|b| b == b'~'))
+            .expect("a closing fence");
+        assert_eq!(lines[body + 1..close].join("\n"), *t, "{text}");
+        assert_eq!(lines[close], fence, "{text}");
+        // Nothing outside the fenced block looks like an OCR section.
+        let mut outside = lines[..open].iter().chain(&lines[close + 1..]);
+        assert!(outside.all(|l| !l.starts_with("## OCR ")), "{text}");
+    }
+}
+
+#[test]
+fn helper_child_holding_stdout_after_exit_is_bounded() {
+    let dir = scratch("grandchild").parent().unwrap().to_path_buf();
+    // The helper exits 0 at once, but a background child keeps its stdout open.
+    let s = stub(&dir, r#"(sleep 30) & printf 'TOTAL  12.34\n'"#);
+    let start = Instant::now();
+    assert_eq!(run(&s, b"x", Duration::from_secs(2)), None);
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn helper_that_exits_non_zero_with_output_gives_none() {
+    let dir = scratch("failing-output").parent().unwrap().to_path_buf();
+    let failing = stub(&dir, "cat >/dev/null; printf 'partial\\n'; exit 1");
+    assert_eq!(run(&failing, b"x", Duration::from_secs(5)), None);
+}
+
+#[test]
+fn quick_helpers_are_not_paced_by_the_poll_interval() {
+    let dir = scratch("quick").parent().unwrap().to_path_buf();
+    let s = stub(&dir, "cat >/dev/null; printf 'x\\n'");
+    let start = Instant::now();
+    for _ in 0..10 {
+        assert_eq!(run(&s, b"x", Duration::from_secs(5)), Some("x".to_string()));
+    }
+    assert!(start.elapsed() < Duration::from_millis(300), "{:?}", start.elapsed());
 }
