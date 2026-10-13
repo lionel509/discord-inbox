@@ -1,3 +1,4 @@
+use crate::allowlist::Allowlist;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -88,6 +89,20 @@ pub fn write_note(inbox: &Path, msg: &Incoming) -> std::io::Result<PathBuf> {
     Ok(note)
 }
 
+/// The gate and the write, in one place. `main.rs` calls this for every DM and
+/// the offline demo calls it too, so both run the same allowlist check.
+/// `Ok(None)` means the author is not on the allowlist and nothing was written.
+pub fn admit_and_write(
+    allow: &Allowlist,
+    inbox: &Path,
+    msg: &Incoming,
+) -> std::io::Result<Option<PathBuf>> {
+    if !allow.contains(msg.author_id) {
+        return Ok(None);
+    }
+    write_note(inbox, msg).map(Some)
+}
+
 const LAST_ID: &str = ".last_msg_id";
 
 pub fn read_last_id(inbox: &Path) -> Option<u64> {
@@ -138,6 +153,21 @@ mod tests {
                 .map(|(n, b)| (n.to_string(), b.to_vec()))
                 .collect(),
         }
+    }
+
+    #[test]
+    fn admit_and_write_ignores_strangers() {
+        let allow = crate::allowlist::parse("100000000000000001\n100000000000000002\n").unwrap();
+        let inbox = temp_inbox().join("Inbox");
+        let mut stranger = sample(vec![("a.txt", b"x")]);
+        stranger.author_id = 999999999999999999;
+        assert!(admit_and_write(&allow, &inbox, &stranger)
+            .unwrap()
+            .is_none());
+        assert!(!inbox.exists(), "nothing may be created for a stranger");
+        let mut alt = sample(vec![]);
+        alt.author_id = 100000000000000002;
+        assert!(admit_and_write(&allow, &inbox, &alt).unwrap().is_some());
     }
 
     #[test]
