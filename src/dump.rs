@@ -101,7 +101,10 @@ pub fn write_note(inbox: &Path, msg: &Incoming) -> std::io::Result<PathBuf> {
     );
     for (i, t) in &msg.ocr {
         if let Some(f) = files.get(*i) {
-            text.push_str(&format!("\n## OCR {f}\n\n~~~text\n{t}\n~~~\n"));
+            // Longer than any tilde run in the text, so no line of it can close the fence early.
+            let longest = t.split(|c: char| c != '~').map(str::len).max().unwrap_or(0);
+            let fence = "~".repeat(3.max(longest + 1));
+            text.push_str(&format!("\n## OCR {f}\n\n{fence}text\n{t}\n{fence}\n"));
         }
     }
 
