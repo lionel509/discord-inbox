@@ -12,6 +12,8 @@ pub struct Incoming {
     /// `(original filename, bytes)`. `None` means the download failed: the note lists the
     /// attachment as `sha256: pending` and writes no file for it.
     pub attachments: Vec<(String, Option<Vec<u8>>)>,
+    /// (attachment index, text) from ocr::read_all, written under "## OCR <file>" after the content.
+    pub ocr: Vec<(usize, String)>,
 }
 
 /// `$DISCORD_INBOX_DIR`, else `~/Documents/Inbox`.
@@ -75,6 +77,7 @@ pub fn write_note(inbox: &Path, msg: &Incoming) -> std::io::Result<PathBuf> {
     let base = stem(&msg.received, msg.msg_id);
 
     let mut entries = Vec::new();
+    let mut files = Vec::new();
     for (i, (name, bytes)) in msg.attachments.iter().enumerate() {
         let file = format!("{base}_{}_{}", i + 1, sanitize(name));
         match bytes {
@@ -84,6 +87,7 @@ pub fn write_note(inbox: &Path, msg: &Incoming) -> std::io::Result<PathBuf> {
             }
             None => entries.push(format!("  - file: {file}\n    sha256: pending\n")),
         }
+        files.push(file);
     }
 
     let attachments = if entries.is_empty() {
@@ -91,10 +95,18 @@ pub fn write_note(inbox: &Path, msg: &Incoming) -> std::io::Result<PathBuf> {
     } else {
         format!("attachments:\n{}", entries.concat())
     };
-    let text = format!(
+    let mut text = format!(
         "---\nreceived: {}\nfrom: {}\nmsg_id: {}\nlane: dump\n{attachments}---\n{}\n",
         msg.received, msg.author_id, msg.msg_id, msg.content
     );
+    for (i, t) in &msg.ocr {
+        if let Some(f) = files.get(*i) {
+            // Longer than any tilde run in the text, so no line of it can close the fence early.
+            let longest = t.split(|c: char| c != '~').map(str::len).max().unwrap_or(0);
+            let fence = "~".repeat(3.max(longest + 1));
+            text.push_str(&format!("\n## OCR {f}\n\n{fence}text\n{t}\n{fence}\n"));
+        }
+    }
 
     let note = note_path(inbox, &msg.received, msg.msg_id);
     // Written to a temp file, then renamed, so a note at its final path is always whole.
@@ -107,9 +119,12 @@ pub fn write_note(inbox: &Path, msg: &Incoming) -> std::io::Result<PathBuf> {
     Ok(note)
 }
 
-/// A non-empty note that lists no `sha256: pending` attachment.
+/// A non-empty note whose frontmatter lists no `sha256: pending` attachment. Only the frontmatter counts:
+/// the body holds DM and OCR text, which can say anything.
 pub fn note_is_complete(path: &Path) -> bool {
-    fs::read_to_string(path).is_ok_and(|t| !t.is_empty() && !t.contains("sha256: pending"))
+    fs::read_to_string(path).is_ok_and(|t| {
+        !t.is_empty() && !t.split("\n---\n").next().unwrap_or("").contains("sha256: pending")
+    })
 }
 
 /// A non-empty note is on disk. A zero-length one is left by a crash, so it does not count as saved.
@@ -238,6 +253,7 @@ mod tests {
             author_id: 100000000000000001,
             received: "2026-10-13T14:03:22Z".to_string(),
             content: "hi".to_string(),
+            ocr: Vec::new(),
             attachments: attachments
                 .into_iter()
                 .map(|(n, b)| (n.to_string(), Some(b.to_vec())))
@@ -350,6 +366,7 @@ mod tests {
             author_id: 100000000000000001,
             received: "2026-10-13T14:03:22Z".to_string(),
             content: "hi".to_string(),
+            ocr: Vec::new(),
             attachments: vec![
                 ("a.txt".to_string(), Some(b"x".to_vec())),
                 ("b.jpg".to_string(), None),
