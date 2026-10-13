@@ -84,12 +84,16 @@ pub async fn ingest<M: Inbound>(allow: &Allowlist, inbox: &Path, m: &M) -> Outco
         }
     }
 
+    // Read before the write and outside the dump lock, so the note is still written once. No text is logged.
+    let ocr = crate::ocr::read_all(id, &attachments).await;
+
     let incoming = Incoming {
         msg_id: id,
         author_id: m.author_id(),
         received,
         content: m.content(),
         attachments,
+        ocr,
     };
     match dump::accept(allow, inbox, &incoming) {
         Ok(true) => {}

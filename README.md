@@ -2,6 +2,8 @@
 
 A Discord bot that takes DMs from two allowlisted accounts and dumps each one (text and attachments) into `~/Documents/Inbox/`. Everyone else is ignored silently: no reply, no reaction, no file.
 
+Image attachments (png, jpg, heic, webp, gif, tiff, bmp) are read with Apple Vision on this Mac, and the text goes into the note under `## OCR <file>`. Nothing leaves the machine. If OCR fails, that section is simply missing; the note, the ✅ and the retry don't change. `DISCORD_INBOX_OCR` overrides the helper path.
+
 ## Setup
 
 1. Allowlist: one Discord user ID per line, outside the repo.
@@ -17,6 +19,7 @@ Env overrides: `DISCORD_INBOX_ALLOWED_IDS_FILE`, `DISCORD_INBOX_DIR`.
 - `cargo run --release`: connects and dumps. On start it first retries any DM in `Inbox/.retry`, then catches up on each DM channel from its own cursor (`Inbox/.cursor-<channel>`).
 - `cargo test`: unit tests, plus integration tests that check refuse-to-start.
 - `sh examples/demo.sh`: offline demo of the allowlist gate, the Inbox writer, the retry list and the refuse-to-start check. No Discord, no token.
+- `DISCORD_INBOX_DIR=<scratch> cargo run --example ocr_demo -- <image>...`: writes a note per image through the real ingest path and prints it. Use a scratch dir, never your real Inbox.
 
 ## When a download fails
 
@@ -27,3 +30,5 @@ The note is written anyway. The failed attachment is listed as `sha256: pending`
 Until a DM channel has a cursor (`Inbox/.cursor-<channel>`), each start fetches only the newest 100 messages in it; older history is not backfilled.
 
 Builds on macOS only (Keychain via `security-framework`).
+
+OCR needs Xcode's `swiftc` at build time; without it the build warns and OCR is off.
