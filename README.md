@@ -22,4 +22,8 @@ Env overrides: `DISCORD_INBOX_ALLOWED_IDS_FILE`, `DISCORD_INBOX_DIR`.
 
 The note is written anyway. The failed attachment is listed as `sha256: pending`, the message is recorded in `Inbox/.retry`, and it is retried on every start until it completes. The ✅ appears only once every attachment is saved. Nothing is dropped.
 
+## First start
+
+On the first start (or if a channel's cursor file is lost), only the newest 100 messages per DM channel are fetched; older history is not backfilled.
+
 Builds on macOS only (Keychain via `security-framework`).

@@ -97,21 +97,44 @@ pub fn write_note(inbox: &Path, msg: &Incoming) -> std::io::Result<PathBuf> {
     );
 
     let note = note_path(inbox, &msg.received, msg.msg_id);
-    fs::write(&note, text)?;
+    // Written to a temp file, then renamed, so a note at its final path is always whole.
+    let tmp = note.with_extension("md.tmp");
+    fs::write(&tmp, text)?;
+    if let Err(e) = fs::rename(&tmp, &note) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
     Ok(note)
 }
 
+/// A non-empty note that lists no `sha256: pending` attachment.
+pub fn note_is_complete(path: &Path) -> bool {
+    fs::read_to_string(path).is_ok_and(|t| !t.is_empty() && !t.contains("sha256: pending"))
+}
+
+/// A non-empty note is on disk. A zero-length one is left by a crash, so it does not count as saved.
+pub fn note_saved(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() > 0)
+}
+
+/// Serialises every writer of `.cursor-*`, `.retry` and notes. The live event and catch-up can run at once.
+static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// The lib gate. A sender not on the allowlist gets no file. Never touches cursors.
+/// A pending note never replaces a complete one, so the check and the write share the lock.
 pub fn accept(allow: &Allowlist, inbox: &Path, msg: &Incoming) -> std::io::Result<bool> {
     if !allow.contains(msg.author_id) {
         return Ok(false);
     }
+    let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let pending = msg.attachments.iter().any(|(_, b)| b.is_none());
+    if pending && note_is_complete(&note_path(inbox, &msg.received, msg.msg_id)) {
+        // Keep the complete note. The retry entry stays until the next start clears it.
+        return Ok(true);
+    }
     write_note(inbox, msg)?;
     Ok(true)
 }
-
-/// Serialises every writer of `.cursor-*` and `.retry`. The live event and catch-up can run at once.
-static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The saved cursor for one DM channel, or `None` when there is none (or it is 0 or junk).
 pub fn read_cursor(inbox: &Path, channel: u64) -> Option<u64> {

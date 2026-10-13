@@ -59,7 +59,7 @@ pub async fn ingest<M: Inbound>(allow: &Allowlist, inbox: &Path, m: &M) -> Outco
 
     let id = m.msg_id();
     let received = m.received();
-    if dump::note_path(inbox, &received, id).is_file() && !dump::in_retry(inbox, id) {
+    if dump::note_saved(&dump::note_path(inbox, &received, id)) && !dump::in_retry(inbox, id) {
         return Outcome::Skipped;
     }
 

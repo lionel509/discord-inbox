@@ -298,7 +298,10 @@ async fn failed_download_still_writes_the_note_and_queues_a_retry() {
     );
     assert_eq!(w.downloads(100), 2, "keeps going after a failure");
     assert_eq!(w.reacts(100), 0);
-    assert!(att(&inbox, 100, 2, "good.txt").is_file(), "the file after a failed one is saved");
+    assert!(
+        att(&inbox, 100, 2, "good.txt").is_file(),
+        "the file after a failed one is saved"
+    );
     assert!(!att(&inbox, 100, 1, "bad.jpg").exists());
     let text = fs::read_to_string(note(&inbox, 100)).unwrap();
     assert!(
@@ -477,7 +480,10 @@ async fn zero_byte_note_is_repaired_not_skipped() {
     let s = spec(MAIN, MAIN_CH, 100, &[("a.txt", b"x")]);
     assert_eq!(ingest(&allow(), &inbox, &msg(&w, &s)).await, Outcome::Saved);
     let text = fs::read_to_string(note(&inbox, 100)).unwrap();
-    assert!(text.contains(&sha256_hex(b"x")), "empty note left in place: {text:?}");
+    assert!(
+        text.contains(&sha256_hex(b"x")),
+        "empty note left in place: {text:?}"
+    );
     assert!(att(&inbox, 100, 1, "a.txt").is_file());
     assert_eq!(w.reacts(100), 1);
     assert!(tmp_files(&inbox).is_empty(), "{:?}", tmp_files(&inbox));
@@ -493,7 +499,10 @@ async fn failed_note_write_leaves_the_old_note_whole() {
     // A directory where the temp file goes makes the note write fail.
     fs::create_dir_all(note(&inbox, 100).with_extension("md.tmp")).unwrap();
     let s = spec(MAIN, MAIN_CH, 100, &[]);
-    assert_eq!(ingest(&allow(), &inbox, &msg(&w, &s)).await, Outcome::Failed);
+    assert_eq!(
+        ingest(&allow(), &inbox, &msg(&w, &s)).await,
+        Outcome::Failed
+    );
     assert_eq!(fs::read_to_string(note(&inbox, 100)).unwrap(), "old note\n");
 }
 
