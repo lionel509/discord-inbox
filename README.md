@@ -25,7 +25,7 @@ Env overrides: `DISCORD_INBOX_ALLOWED_IDS_FILE`, `DISCORD_INBOX_DIR`, `DISCORD_I
 
 ## When a download fails
 
-The note is written anyway. The failed attachment is listed as `sha256: pending`, the message is recorded in `Inbox/.retry`, and it is retried on every start until it completes. The ✅ appears only once every attachment is saved. Nothing is dropped.
+The note is written anyway. The failed attachment is listed as `sha256: pending`, the message is recorded in `Inbox/.retry`, and it is retried on every start until it completes. While it waits the message carries ⏳; the start that completes it swaps ⏳ for ✅. A message whose note could not be written at all gets ⚠️ and nothing on disk, so resend it; it is also retried from the cursor on the next start, and ⚠️ becomes ✅ if that works. A message never shows two marks. Reactions are best-effort: a failed react or unreact is logged and changes nothing else. Nothing is dropped.
 
 ## First start
 

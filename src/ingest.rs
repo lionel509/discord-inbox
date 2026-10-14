@@ -14,6 +14,29 @@ pub enum Outcome {
     Failed,
 }
 
+pub const SAVED_MARK: &str = "✅";
+pub const PENDING_MARK: &str = "⏳";
+pub const FAILED_MARK: &str = "\u{26A0}\u{FE0F}";
+
+/// Leaves exactly `want` on the message among the three marks. Best-effort: errors are logged and change nothing.
+async fn mark<M: Inbound>(m: &M, want: &str) {
+    let id = m.msg_id();
+    let have = m.own_reactions();
+    let same = |a: &str, b: &str| a.replace('\u{FE0F}', "") == b.replace('\u{FE0F}', "");
+    for stale in [SAVED_MARK, PENDING_MARK, FAILED_MARK] {
+        if !same(stale, want) && have.iter().any(|h| same(h, stale)) {
+            if let Err(e) = m.unreact(stale).await {
+                eprintln!("discord-inbox: unreact {stale} on {id} failed: {e}");
+            }
+        }
+    }
+    if !have.iter().any(|h| same(h, want)) {
+        if let Err(e) = m.react(want).await {
+            eprintln!("discord-inbox: react {want} on {id} failed: {e}");
+        }
+    }
+}
+
 /// One message, as the decision logic sees it.
 pub trait Inbound: Send + Sync {
     fn author_id(&self) -> u64;
@@ -27,7 +50,12 @@ pub trait Inbound: Send + Sync {
         &self,
         i: usize,
     ) -> impl std::future::Future<Output = Result<Vec<u8>, String>> + Send;
-    fn react(&self) -> impl std::future::Future<Output = Result<(), String>> + Send;
+    /// Adds the bot's reaction `emoji` to this message.
+    fn react(&self, emoji: &str) -> impl std::future::Future<Output = Result<(), String>> + Send;
+    /// Removes the bot's own reaction `emoji` from this message (nobody else's).
+    fn unreact(&self, emoji: &str) -> impl std::future::Future<Output = Result<(), String>> + Send;
+    /// The bot's own unicode reactions as this message object carries them: none on a live message, what Discord returned on a fetched one.
+    fn own_reactions(&self) -> Vec<String>;
     /// Sends `text` back into the channel this message came from.
     fn reply(&self, text: &str) -> impl std::future::Future<Output = Result<(), String>> + Send;
 }
@@ -82,6 +110,7 @@ pub async fn ingest<M: Inbound>(allow: &Allowlist, inbox: &Path, m: &M) -> Outco
     if pending {
         if let Err(e) = dump::add_retry(inbox, m.channel_id(), id) {
             eprintln!("discord-inbox: retry record for {id} failed: {e}");
+            mark(m, FAILED_MARK).await;
             return Outcome::Failed;
         }
     }
@@ -103,22 +132,23 @@ pub async fn ingest<M: Inbound>(allow: &Allowlist, inbox: &Path, m: &M) -> Outco
         Err(e) => {
             eprintln!("discord-inbox: write {id} failed: {e}");
             return if pending {
+                mark(m, PENDING_MARK).await;
                 Outcome::Pending
             } else {
+                mark(m, FAILED_MARK).await;
                 Outcome::Failed
             };
         }
     }
 
     if pending {
+        mark(m, PENDING_MARK).await;
         return Outcome::Pending;
     }
     if let Err(e) = dump::remove_retry(inbox, id) {
         eprintln!("discord-inbox: retry clear for {id} failed: {e}");
     }
-    if let Err(e) = m.react().await {
-        eprintln!("discord-inbox: react on {id} failed: {e}");
-    }
+    mark(m, SAVED_MARK).await;
     // After the tick, so a slow model never delays the ✅. The reply is best-effort and never changes the outcome.
     if let Some(text) = crate::insight::compose(&incoming).await {
         if let Err(e) = m.reply(&text).await {
