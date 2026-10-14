@@ -399,3 +399,51 @@ fn scaledown_without_verdict_falls_through_to_haiku() {
     assert!(!c.expect("explicit no verdict").receipt);
     assert!(!cap.join("claude.env").exists(), "haiku spawned after an explicit no");
 }
+
+/// A receipt label counts only when it is confident and reads yes or no. A weak or odd label
+/// is ignored, so it cannot overrule a confident total or stand in as a verdict on its own.
+#[test]
+fn scaledown_weak_or_odd_label_is_not_a_verdict() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let cap = init();
+    std::env::remove_var("DISCORD_INBOX_INSIGHT");
+    std::env::set_var("DISCORD_INBOX_OPENROUTER_KEY", cap.join("openrouter_key"));
+    let s = Duration::from_secs(1);
+    let total = Duration::from_secs(3);
+
+    // Parser: a low-confidence "no" does not overrule a confident total.
+    let weak_no = insight::parse_scaledown(&body_with(vec![
+        ent("no", "receipt", 0.1),
+        ent("Hua Lian", "merchant", 0.93),
+        ent("$15.48", "total", 0.95),
+    ]))
+    .expect("total is evidence");
+    assert!(weak_no.receipt);
+    assert_eq!(weak_no.total, "15.48");
+
+    // Parser: a low-confidence "no" with nothing else is no verdict.
+    assert_eq!(insight::parse_scaledown(&body_with(vec![ent("no", "receipt", 0.1)])), None);
+
+    // Parser: an empty confident label is ignored, so the total decides.
+    let empty = insight::parse_scaledown(&body_with(vec![ent("", "receipt", 0.9), ent("$15.48", "total", 0.95)]))
+        .expect("total is evidence");
+    assert!(empty.receipt);
+
+    // Parser: a confident label that reads neither yes nor no is ignored, so the total decides.
+    let odd = insight::parse_scaledown(&body_with(vec![ent("receipt", "receipt", 0.9), ent("$15.48", "total", 0.95)]))
+        .expect("total is evidence");
+    assert!(odd.receipt);
+
+    // Parser: an empty confident label alone is no verdict.
+    assert_eq!(insight::parse_scaledown(&body_with(vec![ent("", "receipt", 0.9)])), None);
+
+    // Parser: a confident "no" is still a verdict.
+    assert!(!insight::parse_scaledown(&body_with(vec![ent("no", "receipt", 0.9)])).expect("confident no").receipt);
+
+    // Chain: a weak "no" with only a merchant is no verdict, so Haiku answers.
+    fs::write(cap.join("openrouter.json"), body_with(vec![ent("no", "receipt", 0.1), ent("Hua Lian", "merchant", 0.93)])).unwrap();
+    let weak = insight::ask_chain("HUA LIAN 2 MILK", s, total);
+    fs::write(cap.join("openrouter.json"), openrouter_body()).unwrap();
+
+    assert_eq!(weak.expect("haiku after weak label").merchant, "Haiku Mart");
+}
