@@ -1005,8 +1005,11 @@ async fn pending_gets_hourglass_then_tick_on_retry() {
     assert_eq!(
         w.ops_for(100),
         vec![
+            ("unreact", "✅".to_string()),
+            ("unreact", "\u{26A0}\u{FE0F}".to_string()),
             ("react", "⏳".to_string()),
             ("unreact", "⏳".to_string()),
+            ("unreact", "\u{26A0}\u{FE0F}".to_string()),
             ("react", "✅".to_string())
         ]
     );
@@ -1032,8 +1035,11 @@ async fn failed_unreact_still_adds_tick_beside_hourglass() {
     assert_eq!(
         w.ops_for(100),
         vec![
+            ("unreact", "✅".to_string()),
+            ("unreact", "\u{26A0}\u{FE0F}".to_string()),
             ("react", "⏳".to_string()),
             ("unreact", "⏳".to_string()),
+            ("unreact", "\u{26A0}\u{FE0F}".to_string()),
             ("react", "✅".to_string())
         ]
     );

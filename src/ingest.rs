@@ -24,9 +24,13 @@ async fn mark<M: Inbound>(m: &M, want: &str) {
     let have = m.own_reactions();
     let same = |a: &str, b: &str| a.replace('\u{FE0F}', "") == b.replace('\u{FE0F}', "");
     for stale in [SAVED_MARK, PENDING_MARK, FAILED_MARK] {
-        if !same(stale, want) && have.iter().any(|h| same(h, stale)) {
+        // Always try: a fetched snapshot can predate a mark the live path just added.
+        if !same(stale, want) {
+            let seen = have.iter().any(|h| same(h, stale));
             if let Err(e) = m.unreact(stale).await {
-                eprintln!("discord-inbox: unreact {stale} on {id} failed: {e}");
+                if seen {
+                    eprintln!("discord-inbox: unreact {stale} on {id} failed: {e}");
+                }
             }
         }
     }
