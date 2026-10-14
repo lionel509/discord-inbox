@@ -135,11 +135,17 @@ pub fn mask_cards(text: &str) -> String {
         loop {
             if j < chars.len() && chars[j].is_ascii_digit() {
                 j += 1;
-            } else if j + 1 < chars.len()
-                && matches!(chars[j], ' ' | '-' | '\n')
-                && chars[j + 1].is_ascii_digit()
-            {
-                j += 2;
+            } else if {
+                let mut k = j;
+                while k < chars.len() && k - j < 3 && matches!(chars[k], ' ' | '-' | '\n' | '\r') {
+                    k += 1;
+                }
+                k > j && k < chars.len() && chars[k].is_ascii_digit()
+            } {
+                while !chars[j].is_ascii_digit() {
+                    j += 1;
+                }
+                j += 1;
             } else {
                 break;
             }
@@ -217,7 +223,11 @@ fn date_end(line: &str) -> Option<usize> {
 pub fn parse_budget(text: &str) -> Option<(f64, f64)> {
     let (budget, _) = text
         .lines()
-        .filter(|l| l.to_ascii_lowercase().contains("budget"))
+        .filter(|l| {
+            l.trim_start_matches(|c: char| !c.is_alphanumeric())
+                .to_ascii_lowercase()
+                .starts_with("budget")
+        })
         .find_map(|l| first_money(l, 0))?;
     let mut spent: i64 = 0;
     for line in text.lines() {
@@ -334,7 +344,7 @@ pub async fn compose(msg: &Incoming) -> Option<String> {
         let insight = if cmd.is_empty() {
             None
         } else {
-            let (c, t) = (cmd.clone(), text.clone());
+            let (c, t) = (cmd.clone(), mask_cards(text));
             let got = tokio::task::spawn_blocking(move || ask(&c, &t, TIMEOUT))
                 .await
                 .ok()
