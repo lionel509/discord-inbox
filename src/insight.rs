@@ -1,4 +1,4 @@
-//! The reply under a receipt DM: the OCR text with card digits masked, a one-line verdict, and the budget left for the month. The verdict comes from ScaleDown Extract on OpenRouter's zero-data-retention endpoint (when the key file exists), then Claude Haiku (direct to Anthropic, never the local router), or from the command in `$DISCORD_INBOX_INSIGHT`. Only masked text reaches either model. The text goes only into the reply: never a log line, never a file. This module writes nothing; the budget note is read-only.
+//! The reply under a receipt DM: the OCR text with card digits masked, a one-line verdict, and the budget left for the month. The verdict comes from ScaleDown Extract on OpenRouter's zero-data-retention endpoint (when the key file exists and is not empty), then Claude Haiku (direct to Anthropic, never the local router), or from the command in `$DISCORD_INBOX_INSIGHT`. Only masked text reaches either model. The text goes only into the reply: never a log line, never a file. This module writes nothing; the budget note is read-only.
 use crate::dump::Incoming;
 use serde_json::{json, Value};
 use std::fs;
@@ -166,6 +166,13 @@ pub fn key_path() -> Option<PathBuf> {
     env_or_home("DISCORD_INBOX_OPENROUTER_KEY", ".config/discord-inbox/openrouter_key")
 }
 
+/// The key path, only if the file exists and has a non-empty line. The key is read to check it and never kept.
+pub fn key_file() -> Option<PathBuf> {
+    let p = key_path()?;
+    let text = fs::read_to_string(&p).ok()?;
+    (!text.trim().is_empty()).then_some(p)
+}
+
 /// `$DISCORD_INBOX_CURL` if set, else `/usr/bin/curl`.
 pub fn curl_path() -> PathBuf {
     std::env::var_os("DISCORD_INBOX_CURL")
@@ -190,11 +197,11 @@ pub fn ask_model(model: &Model, ocr: &str, timeout: Duration) -> Option<Insight>
     }
 }
 
-/// ScaleDown first, only when the key file exists, capped at `total` minus `haiku`, so Haiku keeps
+/// ScaleDown first, only when the key file exists and is non-empty, capped at `total` minus `haiku`, so Haiku keeps
 /// its own cap. Then Haiku with whatever is left of `total`. `None` when both fail or neither runs.
 pub fn ask_chain(ocr: &str, haiku: Duration, total: Duration) -> Option<Insight> {
     let start = Instant::now();
-    if key_path().filter(|p| p.is_file()).is_some() {
+    if key_file().is_some() {
         eprintln!("discord-inbox: trying scaledown");
         if let Some(i) = ask_scaledown(ocr, total.saturating_sub(haiku)) {
             return Some(i);
@@ -225,9 +232,9 @@ pub fn ask_haiku(ocr: &str, timeout: Duration) -> Option<Insight> {
 }
 
 /// ScaleDown Extract through OpenRouter. curl reads the key from its file, so the key is in neither argv nor the body.
-/// No key file means `None` with no process spawned.
+/// No key file (or a blank one) means `None` with no process spawned.
 pub fn ask_scaledown(ocr: &str, timeout: Duration) -> Option<Insight> {
-    let key = key_path().filter(|p| p.is_file())?;
+    let key = key_file()?;
     let secs = timeout.as_secs().max(1).to_string();
     let args: Vec<String> = [
         "-s",
