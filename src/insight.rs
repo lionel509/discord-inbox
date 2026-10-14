@@ -310,13 +310,14 @@ pub fn parse_scaledown(body: &str) -> Option<Insight> {
         .map(|t| t.strip_prefix('$').unwrap_or(&t).trim().to_string())
         .unwrap_or_default();
     // No receipt label and no total is no verdict at all: `None` lets the chain fall through to Haiku.
-    // An explicit receipt label, yes or no, is a verdict on its own.
-    let receipt_label = best("receipt");
+    // An explicit receipt label, yes or no, is a verdict on its own. It must be confident and read
+    // yes or no; any other label is ignored, so it cannot overrule a total or stand in for one.
+    let receipt_label = confident("receipt").filter(|t| matches!(t.chars().next(), Some('y' | 'Y' | 'n' | 'N')));
     if receipt_label.is_none() && total.is_empty() {
         return None;
     }
     let receipt = match receipt_label {
-        Some((text, _)) => matches!(text.chars().next(), Some('y' | 'Y')),
+        Some(text) => matches!(text.chars().next(), Some('y' | 'Y')),
         // No label, but a found total is the evidence.
         None => true,
     };
