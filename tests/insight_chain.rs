@@ -252,3 +252,37 @@ fn vision_helper_reads_chinese() {
     assert!(swift.contains("zh-Hans"), "vision.swift lists no zh-Hans");
     assert!(Path::new(env!("DISCORD_INBOX_VISION")).is_file(), "the Vision helper did not build");
 }
+
+/// Review finding 1: a photo whose OCR text is blank must not reach either model.
+#[tokio::test]
+async fn blank_photo_makes_no_model_call() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let cap = init();
+    std::env::remove_var("DISCORD_INBOX_INSIGHT");
+    for blank in ["", "  \n\t "] {
+        let _ = fs::remove_file(cap.join("claude.env"));
+        let _ = fs::remove_file(cap.join("curl.args"));
+        let msg = Incoming {
+            msg_id: 2,
+            author_id: 1,
+            received: "2026-10-14T14:03:22Z".into(),
+            content: String::new(),
+            attachments: vec![],
+            ocr: vec![(0, blank.into())],
+        };
+        let _ = insight::compose(&msg).await;
+        assert!(!cap.join("claude.env").exists(), "blank OCR {blank:?} reached claude");
+        assert!(!cap.join("curl.args").exists(), "blank OCR {blank:?} reached curl");
+    }
+}
+
+/// Review finding 5: a quoted empty `DISCORD_INBOX_INSIGHT` means off, not a command named `""`.
+#[test]
+fn quoted_empty_insight_is_off() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    for v in ["''", "\"\"", "  "] {
+        std::env::set_var("DISCORD_INBOX_INSIGHT", v);
+        assert_eq!(insight::model(), Model::Off, "DISCORD_INBOX_INSIGHT={v:?}");
+    }
+    std::env::remove_var("DISCORD_INBOX_INSIGHT");
+}
