@@ -1,4 +1,4 @@
-//! The reply under a receipt DM: the OCR text with card digits masked, a one-line verdict, and the budget left for the month. The verdict comes from Claude Haiku (direct to Anthropic, never the local router), then ScaleDown Extract on OpenRouter's zero-data-retention endpoint, or from the command in `$DISCORD_INBOX_INSIGHT`. Only masked text reaches either model. The text goes only into the reply: never a log line, never a file. This module writes nothing; the budget note is read-only.
+//! The reply under a receipt DM: the OCR text with card digits masked, a one-line verdict, and the budget left for the month. The verdict comes from ScaleDown Extract on OpenRouter's zero-data-retention endpoint (when the key file exists), then Claude Haiku (direct to Anthropic, never the local router), or from the command in `$DISCORD_INBOX_INSIGHT`. Only masked text reaches either model. The text goes only into the reply: never a log line, never a file. This module writes nothing; the budget note is read-only.
 use crate::dump::Incoming;
 use serde_json::{json, Value};
 use std::fs;
@@ -17,7 +17,7 @@ const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 /// Lowest ScaleDown confidence that counts as a merchant or a total.
 const CONFIDENCE: f64 = 0.5;
 
-/// Which model answers. Unset `$DISCORD_INBOX_INSIGHT` is the Haiku then ScaleDown chain, empty turns the model off, any other value is the command to run.
+/// Which model answers. Unset `$DISCORD_INBOX_INSIGHT` is the ScaleDown then Haiku chain, empty turns the model off, any other value is the command to run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Model {
     Off,
@@ -190,23 +190,25 @@ pub fn ask_model(model: &Model, ocr: &str, timeout: Duration) -> Option<Insight>
     }
 }
 
-/// Haiku with its own cap, then ScaleDown with whatever is left of `total`. `None` when both fail.
+/// ScaleDown first, only when the key file exists, capped at `total` minus `haiku`, so Haiku keeps
+/// its own cap. Then Haiku with whatever is left of `total`. `None` when both fail or neither runs.
 pub fn ask_chain(ocr: &str, haiku: Duration, total: Duration) -> Option<Insight> {
     let start = Instant::now();
-    if let Some(i) = ask_haiku(ocr, haiku.min(total)) {
-        return Some(i);
-    }
-    eprintln!("discord-inbox: haiku gave no insight");
-    if key_path().filter(|p| p.is_file()).is_none() {
+    if key_path().filter(|p| p.is_file()).is_some() {
+        eprintln!("discord-inbox: trying scaledown");
+        if let Some(i) = ask_scaledown(ocr, total.saturating_sub(haiku)) {
+            return Some(i);
+        }
+        eprintln!("discord-inbox: scaledown gave no insight");
+    } else {
         eprintln!("discord-inbox: no openrouter key file, skipping scaledown");
-        return None;
     }
-    eprintln!("discord-inbox: trying scaledown");
     let left = total.saturating_sub(start.elapsed());
     if left.is_zero() {
         return None;
     }
-    ask_scaledown(ocr, left)
+    eprintln!("discord-inbox: trying haiku");
+    ask_haiku(ocr, haiku.min(left))
 }
 
 /// `claude -p --model haiku` on the prompt. `env -u` clears `ANTHROPIC_BASE_URL`, so the local router is never used.

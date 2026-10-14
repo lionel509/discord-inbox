@@ -1,4 +1,4 @@
-//! The verdict chain: Claude Haiku direct, then ScaleDown Extract through OpenRouter. Every model
+//! The verdict chain: ScaleDown Extract through OpenRouter first, then Claude Haiku direct. Every model
 //! and curl call here goes to a stub script; no test reaches the network.
 use discord_inbox::dump::Incoming;
 use discord_inbox::insight::{self, Insight, Model};
@@ -51,6 +51,7 @@ fn init() -> PathBuf {
                  printf '%s\\n' \"$@\" > {c}/curl.args\n\
                  cat > {c}/curl.body\n\
                  if grep -q CURLDOWN {c}/curl.body; then exit 22; fi\n\
+                 if grep -q CURLSLOW {c}/curl.body; then sleep 5; exit 22; fi\n\
                  cat {c}/openrouter.json\n"
             ),
         );
@@ -182,16 +183,12 @@ async fn chain_end_to_end() {
     let total = Duration::from_secs(3);
     let key = cap.join("openrouter_key");
 
-    // (a) Haiku answers; ScaleDown is never called, and Haiku sees no router.
+    // (a) ScaleDown answers with the key read by curl, never in argv or body; Haiku is never spawned.
+    let _ = fs::remove_file(cap.join("claude.env"));
     let _ = fs::remove_file(cap.join("curl.args"));
-    let a = insight::ask_chain("TRADER JOES", s, total).expect("haiku insight");
-    assert_eq!(a.merchant, "Haiku Mart");
-    assert_eq!(fs::read_to_string(cap.join("claude.env")).unwrap().trim(), "unset");
-    assert!(!cap.join("curl.args").exists());
-
-    // (b) Haiku fails; ScaleDown answers with the key read by curl, never in argv or body.
-    let b = insight::ask_chain("TOTAL 123 HAIKUDOWN", s, total).expect("scaledown insight");
-    assert_eq!(b, Insight { receipt: true, merchant: "Hua Lian".into(), total: "123".into(), category: "groceries".into() });
+    let a = insight::ask_chain("TOTAL 123 HAIKUDOWN", s, total).expect("scaledown insight");
+    assert_eq!(a, Insight { receipt: true, merchant: "Hua Lian".into(), total: "123".into(), category: "groceries".into() });
+    assert!(!cap.join("claude.env").exists(), "haiku spawned while scaledown answered");
     let args = fs::read_to_string(cap.join("curl.args")).unwrap();
     let arg_lines: Vec<&str> = args.lines().collect();
     assert!(arg_lines.contains(&"--variable"), "{args}");
@@ -209,19 +206,28 @@ async fn chain_end_to_end() {
     assert_eq!(v["provider"]["zdr"], true);
     assert_eq!(v["messages"][0]["content"], "TOTAL 123 HAIKUDOWN");
 
-    // (c) Haiku fails and ScaleDown's call fails too: nothing.
+    // (b) ScaleDown fails; Haiku answers and sees no router.
+    let _ = fs::remove_file(cap.join("claude.env"));
+    let b = insight::ask_chain("TOTAL 123 CURLDOWN", s, total).expect("haiku insight");
+    assert_eq!(b.merchant, "Haiku Mart");
+    assert_eq!(fs::read_to_string(cap.join("claude.env")).unwrap().trim(), "unset");
+
+    // (c) ScaleDown fails and Haiku fails too: nothing.
     assert_eq!(insight::ask_chain("HAIKUDOWN CURLDOWN", s, total), None);
 
-    // (d) Haiku is cut at its own 1 s cap, not at the 3 s total, and ScaleDown still answers.
+    // (d) ScaleDown is cut at total minus Haiku's cap (2 s of the 3 s total), and Haiku still
+    // answers within the total.
     let started = Instant::now();
-    let d = insight::ask_chain("HAIKUSLOW", s, total).expect("scaledown after haiku timeout");
-    assert_eq!(d.merchant, "Hua Lian");
+    let d = insight::ask_chain("CURLSLOW", s, total).expect("haiku after scaledown timeout");
+    assert_eq!(d.merchant, "Haiku Mart");
     assert!(started.elapsed() < total, "took {:?}", started.elapsed());
 
-    // (e) No key file: no curl process at all.
+    // (e) No key file: no curl process at all, and Haiku answers.
     std::env::set_var("DISCORD_INBOX_OPENROUTER_KEY", cap.join("no-such-key"));
     let _ = fs::remove_file(cap.join("curl.args"));
     assert_eq!(insight::ask_chain("HAIKUDOWN", s, total), None);
+    assert!(!cap.join("curl.args").exists());
+    assert_eq!(insight::ask_chain("TRADER JOES", s, total).expect("haiku, no key").merchant, "Haiku Mart");
     assert!(!cap.join("curl.args").exists());
     std::env::set_var("DISCORD_INBOX_OPENROUTER_KEY", &key);
 
