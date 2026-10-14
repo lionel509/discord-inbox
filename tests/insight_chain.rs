@@ -146,10 +146,10 @@ fn parse_scaledown_maps_entities() {
         Insight { receipt: true, merchant: "Hua Lian".into(), total: "123".into(), category: "groceries".into() }
     );
 
-    let b = parse(body_with(vec![ent("A", "merchant", 0.4), ent("Hua Lian", "merchant", 0.9)])).unwrap();
+    let b = parse(body_with(vec![ent("A", "merchant", 0.4), ent("Hua Lian", "merchant", 0.9), ent("$3", "total", 0.9)])).unwrap();
     assert_eq!(b.merchant, "Hua Lian");
 
-    let c = parse(body_with(vec![ent("X", "merchant", 0.2)])).unwrap();
+    let c = parse(body_with(vec![ent("X", "merchant", 0.2), ent("$3", "total", 0.9)])).unwrap();
     assert_eq!(c.merchant, "unknown");
 
     let d = parse(body_with(vec![ent("$5", "total", 0.9), ent("no", "receipt", 0.9)])).unwrap();
@@ -158,8 +158,9 @@ fn parse_scaledown_maps_entities() {
     let e = parse(body_with(vec![ent("$8.00", "total", 0.8)])).unwrap();
     assert!(e.receipt);
 
-    let f = parse(body_with(vec![])).unwrap();
-    assert!(!f.receipt);
+    // No receipt label and no total is no verdict: None, so the chain asks Haiku.
+    let f = insight::parse_scaledown(&body_with(vec![]));
+    assert_eq!(f, None);
 
     let g = json!({"choices": [{"message": {"content": "Sorry, I can't help"}}]}).to_string();
     assert_eq!(insight::parse_scaledown(&g), None);
@@ -167,11 +168,8 @@ fn parse_scaledown_maps_entities() {
     let h = json!({"error": {"code": 400, "message": "bad"}}).to_string();
     assert_eq!(insight::parse_scaledown(&h), None);
 
-    let i = parse(body_with(vec![])).unwrap();
-    assert_eq!(
-        i,
-        Insight { receipt: false, merchant: "unknown".into(), total: "unknown".into(), category: "unknown".into() }
-    );
+    // A merchant alone is no verdict either.
+    assert_eq!(insight::parse_scaledown(&body_with(vec![ent("Hua Lian", "merchant", 0.93)])), None);
 }
 
 #[tokio::test]
