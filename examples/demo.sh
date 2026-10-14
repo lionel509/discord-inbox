@@ -11,6 +11,12 @@ TMP=$(mktemp -d "${TMPDIR:-/tmp}/discord-inbox-run.XXXXXX")
 mask() { T="$TMP" awk '{ o = ""; t = ENVIRON["T"]; while ((i = index($0, t)) > 0) { o = o substr($0, 1, i - 1) "<tmp>"; $0 = substr($0, i + length(t)) } print o $0 }' "$1"; }
 trap 'rm -rf "$TMP"' EXIT
 
+echo "Marks on the Discord message (what the bot does to the DM):"
+echo "  ✅  written to the Inbox folder (logged in the vault)"
+echo "  ⏳  cached and waiting to be logged (retried at the next start)"
+echo "  ⚠️  could not be written"
+echo "  (no mark)  sender is not on the allowlist: ignored"
+echo
 echo "== 1. allowlist set: main and alt accepted, third ID ignored =="
 # Keep the demo's own status: a pipe would report sed's status and hide a failure.
 set +e

@@ -11,7 +11,9 @@
 //! Without them the demo uses stand-in IDs and says so.
 use discord_inbox::allowlist::{self, Allowlist};
 use discord_inbox::dump::{self, read_cursor, retry_entries, sha256_hex};
-use discord_inbox::ingest::{catch_up, ingest, History, Inbound, Outcome, PAGE};
+use discord_inbox::ingest::{
+    catch_up, ingest, History, Inbound, Outcome, FAILED_MARK, PAGE, PENDING_MARK, SAVED_MARK,
+};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -27,6 +29,20 @@ const THIRD_CH: u64 = 7009;
 
 fn show(path: &Path, tmp: &str) -> String {
     path.display().to_string().replace(tmp, "<tmp>")
+}
+
+/// The mark a message carries, in Lionel's terms. Empty list means no mark.
+fn mark_text(marks: &[String]) -> String {
+    let has = |m: &str| marks.iter().any(|x| x == m);
+    if has(SAVED_MARK) {
+        format!("{SAVED_MARK} (logged in the vault)")
+    } else if has(PENDING_MARK) {
+        format!("{PENDING_MARK} (cached, waiting to be logged)")
+    } else if has(FAILED_MARK) {
+        format!("{FAILED_MARK} (could not be written)")
+    } else {
+        "(no mark)".to_string()
+    }
 }
 
 fn plural(n: usize, word: &str) -> String {
@@ -268,7 +284,7 @@ async fn main() {
     let expected = [Outcome::Saved, Outcome::Pending, Outcome::Ignored];
     for ((label, m), want) in live.iter().zip(expected.iter()) {
         let got = ingest(&allow, &inbox, *m).await;
-        println!("{label}: {got:?}");
+        println!("{label}: {got:?} -> {}", mark_text(&world.marks(m.id)));
         if got != *want {
             problems.push(format!("{label}: {got:?}, expected {want:?}"));
         }
@@ -282,7 +298,14 @@ async fn main() {
         alt_id,
         msgs: vec![main_msg.clone(), alt_msg.clone()],
     };
+    let alt_before = world.marks(alt_msg.id);
     catch_up(&allow, &inbox, &history).await;
+    let alt_after = world.marks(alt_msg.id);
+    println!("alt: {} -> {}", mark_text(&alt_before), mark_text(&alt_after));
+    for old in alt_before.iter().filter(|m| !alt_after.contains(m)) {
+        println!("  {old} removed from alt's message");
+    }
+    println!("main: {} (unchanged)", mark_text(&world.marks(main_msg.id)));
     println!("retry list: {} entries", retry_entries(&inbox).len());
 
     let listing = |dir: &Path| -> Vec<String> {
@@ -401,6 +424,40 @@ async fn main() {
             String::from_utf8_lossy(&bytes),
             sha256_hex(&bytes)
         );
+    }
+
+    // The retry fails again: the CDN is still down, so the mark stays on ⏳.
+    println!();
+    println!("== next start, CDN still down ==");
+    world.cdn_down.store(true, Ordering::SeqCst);
+    let fourth_msg = demo_msg(
+        &world,
+        alt_id,
+        ALT_CH,
+        1427000000000000004,
+        "2026-10-13T14:09:45Z",
+        "one more scan",
+        &[("bad-scan.jpg", b"scan bytes")],
+    );
+    let first = ingest(&allow, &inbox, &fourth_msg).await;
+    println!("fourth: {first:?} -> {}", mark_text(&world.marks(fourth_msg.id)));
+    let before_retry = world.marks(fourth_msg.id);
+    let history = DemoHistory {
+        main_id,
+        alt_id,
+        msgs: vec![main_msg.clone(), alt_msg.clone(), fourth_msg.clone()],
+    };
+    catch_up(&allow, &inbox, &history).await;
+    let after_retry = world.marks(fourth_msg.id);
+    println!(
+        "fourth retry: {} -> {}",
+        mark_text(&before_retry),
+        mark_text(&after_retry)
+    );
+    if first != Outcome::Pending || after_retry != [PENDING_MARK.to_string()] {
+        problems.push(format!(
+            "fourth: {first:?} and marks {after_retry:?}, expected Pending and ⏳ to stay"
+        ));
     }
 
     fs::remove_dir_all(&tmp).unwrap();
