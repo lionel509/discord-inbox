@@ -624,7 +624,7 @@ async fn failed_note_write_leaves_the_old_note_whole() {
     let s = spec(MAIN, MAIN_CH, 100, &[]);
     assert_eq!(
         ingest(&allow(), &inbox, &msg(&w, &s)).await,
-        Outcome::Failed
+        Outcome::Pending // still in .retry, so it is Pending, not Failed
     );
     assert_eq!(fs::read_to_string(note(&inbox, 100)).unwrap(), "old note\n");
 }
@@ -1106,4 +1106,19 @@ async fn reaction_failures_never_change_outcome_cursor_or_retry() {
     assert_eq!(good.3, bad.3);
     assert!(good.4.iter().all(|m| m.len() == 1), "{:?}", good.4);
     assert!(bad.4.iter().all(|m| m.is_empty()), "{:?}", bad.4);
+}
+
+#[tokio::test]
+async fn failed_retry_write_keeps_hourglass_and_retry_entry() {
+    let inbox = scratch("retry-write-fails");
+    let w = World::new(&inbox);
+    let s = spec(MAIN, MAIN_CH, 100, &[("bad.jpg", b"b")]);
+    w.cdn_down.store(true, Ordering::SeqCst);
+    assert_eq!(ingest(&allow(), &inbox, &msg(&w, &s)).await, Outcome::Pending);
+    w.cdn_down.store(false, Ordering::SeqCst);
+    fs::create_dir_all(note(&inbox, 100).with_extension("md.tmp")).unwrap();
+    let h = FakeHistory::new(&w, vec![s.clone()]);
+    catch_up(&allow(), &inbox, &h).await;
+    assert!(in_retry(&inbox, 100));
+    assert_eq!(w.marks(100), vec!["⏳"]);
 }

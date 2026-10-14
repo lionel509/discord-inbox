@@ -131,7 +131,8 @@ pub async fn ingest<M: Inbound>(allow: &Allowlist, inbox: &Path, m: &M) -> Outco
         Ok(false) => return Outcome::Ignored,
         Err(e) => {
             eprintln!("discord-inbox: write {id} failed: {e}");
-            return if pending {
+            // Still recorded in .retry means an earlier note waits on disk: show ⏳, never ⚠️.
+            return if pending || dump::in_retry(inbox, id) {
                 mark(m, PENDING_MARK).await;
                 Outcome::Pending
             } else {
