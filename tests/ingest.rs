@@ -1013,6 +1013,33 @@ async fn pending_gets_hourglass_then_tick_on_retry() {
 }
 
 #[tokio::test]
+async fn failed_unreact_still_adds_tick_beside_hourglass() {
+    // Pins the accepted trade-off: when Discord refuses the unreact of ⏳, the
+    // ✅ is still added, so ✅ always means the note is saved (README).
+    let inbox = scratch("unreact-fails-tick");
+    let w = World::new(&inbox);
+    let s = spec(MAIN, MAIN_CH, 100, &[("bad.jpg", b"b")]);
+    w.cdn_down.store(true, Ordering::SeqCst);
+    assert_eq!(ingest(&allow(), &inbox, &msg(&w, &s)).await, Outcome::Pending);
+    assert_eq!(w.marks(100), vec!["⏳"]);
+    w.cdn_down.store(false, Ordering::SeqCst);
+    w.unreact_fails.store(true, Ordering::SeqCst);
+    let h = FakeHistory::new(&w, vec![s.clone()]);
+    catch_up(&allow(), &inbox, &h).await;
+    assert_eq!(w.marks(100), vec!["⏳", "✅"]);
+    assert!(note(&inbox, 100).is_file());
+    assert!(retry_entries(&inbox).is_empty());
+    assert_eq!(
+        w.ops_for(100),
+        vec![
+            ("react", "⏳".to_string()),
+            ("unreact", "⏳".to_string()),
+            ("react", "✅".to_string())
+        ]
+    );
+}
+
+#[tokio::test]
 async fn failed_write_gets_warning_then_tick_when_it_works() {
     let inbox = scratch("warn-tick");
     let w = World::new(&inbox);
