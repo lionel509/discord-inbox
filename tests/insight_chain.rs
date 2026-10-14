@@ -282,6 +282,25 @@ fn scaledown_first_then_haiku() {
     assert_eq!(got.merchant, "Haiku Mart");
 }
 
+/// The key file counts only when it has a non-empty line. An empty or blank key file is no key:
+/// no curl process, and Haiku answers.
+#[test]
+fn empty_key_file_means_no_scaledown() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let cap = init();
+    std::env::remove_var("DISCORD_INBOX_INSIGHT");
+    let s = Duration::from_secs(1);
+    let total = Duration::from_secs(3);
+    let empty = cap.join("empty_key");
+    fs::write(&empty, "  \n").unwrap();
+    std::env::set_var("DISCORD_INBOX_OPENROUTER_KEY", &empty);
+    let _ = fs::remove_file(cap.join("curl.args"));
+    let got = insight::ask_chain("TRADER JOES", s, total).expect("haiku insight");
+    assert_eq!(got.merchant, "Haiku Mart");
+    assert!(!cap.join("curl.args").exists(), "curl ran with an empty key file");
+    std::env::set_var("DISCORD_INBOX_OPENROUTER_KEY", cap.join("openrouter_key"));
+}
+
 /// Runs the built Vision helper on a committed synthetic receipt image (image on stdin, text on stdout).
 fn vision_reads(fixture: &str) -> String {
     use std::io::Write;
