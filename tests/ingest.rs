@@ -112,12 +112,17 @@ struct World {
     inbox: PathBuf,
     cdn_down: AtomicBool,
     react_fails: AtomicBool,
+    unreact_fails: AtomicBool,
     reply_fails: AtomicBool,
     /// msg id -> (downloads, reacts)
     calls: Mutex<HashMap<u64, (usize, usize)>>,
     note_at_react: Mutex<HashMap<u64, bool>>,
     /// (msg id, text) for every reply attempt, failed or not.
     replies: Mutex<Vec<(u64, String)>>,
+    /// msg id -> the bot's reactions now on that message (the Discord-side state).
+    marks: Mutex<HashMap<u64, Vec<String>>>,
+    /// Every react/unreact attempt in order: (msg id, "react"|"unreact", emoji).
+    ops: Mutex<Vec<(u64, &'static str, String)>>,
 }
 
 impl World {
@@ -126,10 +131,13 @@ impl World {
             inbox: inbox.to_path_buf(),
             cdn_down: AtomicBool::new(false),
             react_fails: AtomicBool::new(false),
+            unreact_fails: AtomicBool::new(false),
             reply_fails: AtomicBool::new(false),
             calls: Mutex::new(HashMap::new()),
             note_at_react: Mutex::new(HashMap::new()),
             replies: Mutex::new(Vec::new()),
+            marks: Mutex::new(HashMap::new()),
+            ops: Mutex::new(Vec::new()),
         })
     }
     fn replies_for(&self, id: u64) -> Vec<String> {
@@ -139,6 +147,18 @@ impl World {
             .iter()
             .filter(|(m, _)| *m == id)
             .map(|(_, t)| t.clone())
+            .collect()
+    }
+    fn marks(&self, id: u64) -> Vec<String> {
+        self.marks.lock().unwrap().get(&id).cloned().unwrap_or_default()
+    }
+    fn ops_for(&self, id: u64) -> Vec<(&'static str, String)> {
+        self.ops
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, _, _)| *m == id)
+            .map(|(_, k, e)| (*k, e.clone()))
             .collect()
     }
     fn add_download(&self, id: u64) {
@@ -193,18 +213,47 @@ impl Inbound for FakeMsg {
         }
         Ok(bytes.clone())
     }
-    async fn react(&self) -> Result<(), String> {
+    async fn react(&self, emoji: &str) -> Result<(), String> {
         self.w.add_react(self.spec.id);
-        let at = note(&self.w.inbox, self.spec.id).is_file();
         self.w
-            .note_at_react
+            .ops
             .lock()
             .unwrap()
-            .insert(self.spec.id, at);
+            .push((self.spec.id, "react", emoji.to_string()));
+        if emoji == "✅" {
+            let at = note(&self.w.inbox, self.spec.id).is_file();
+            self.w
+                .note_at_react
+                .lock()
+                .unwrap()
+                .insert(self.spec.id, at);
+        }
         if self.w.react_fails.load(Ordering::SeqCst) {
             return Err("react 500".to_string());
         }
+        let mut marks = self.w.marks.lock().unwrap();
+        let v = marks.entry(self.spec.id).or_default();
+        if !v.iter().any(|e| e == emoji) {
+            v.push(emoji.to_string());
+        }
         Ok(())
+    }
+    async fn unreact(&self, emoji: &str) -> Result<(), String> {
+        self.w
+            .ops
+            .lock()
+            .unwrap()
+            .push((self.spec.id, "unreact", emoji.to_string()));
+        if self.w.unreact_fails.load(Ordering::SeqCst) {
+            return Err("unreact 500".to_string());
+        }
+        if let Some(v) = self.w.marks.lock().unwrap().get_mut(&self.spec.id) {
+            v.retain(|e| e != emoji);
+        }
+        Ok(())
+    }
+    fn own_reactions(&self) -> Vec<String> {
+        self.w.marks(self.spec.id)
     }
     async fn reply(&self, text: &str) -> Result<(), String> {
         self.w
@@ -368,7 +417,7 @@ async fn failed_download_still_writes_the_note_and_queues_a_retry() {
         Outcome::Pending
     );
     assert_eq!(w.downloads(100), 2, "keeps going after a failure");
-    assert_eq!(w.reacts(100), 0);
+    assert_eq!(w.marks(100), vec!["⏳"]);
     assert!(
         att(&inbox, 100, 2, "good.txt").is_file(),
         "the file after a failed one is saved"
@@ -407,7 +456,8 @@ async fn next_start_retries_and_completes_the_note() {
     assert!(note(&inbox, 200).is_file());
     assert_eq!(retry_entries(&inbox), vec![(MAIN_CH, 100)]);
     assert_eq!(read_cursor(&inbox, MAIN_CH), Some(200));
-    assert_eq!(w.total_reacts(), 1);
+    assert_eq!(w.marks(100), vec!["⏳"]);
+    assert_eq!(w.marks(200), vec!["✅"]);
 
     w.cdn_down.store(false, Ordering::SeqCst);
     catch_up(&allow(), &inbox, &h).await;
@@ -415,7 +465,7 @@ async fn next_start_retries_and_completes_the_note() {
     let second = fs::read_to_string(note(&inbox, 100)).unwrap();
     assert!(!second.contains("pending"), "{second}");
     assert!(att(&inbox, 100, 1, "bad.jpg").is_file());
-    assert_eq!(w.reacts(100), 1);
+    assert_eq!(w.marks(100), vec!["✅"]);
     assert_eq!(w.reacts(200), 1);
     assert_eq!(
         w.total_downloads(),
@@ -442,12 +492,14 @@ async fn cursor_stops_before_a_message_that_was_not_recorded() {
     assert_eq!(read_cursor(&inbox, MAIN_CH), Some(100));
     assert!(note(&inbox, 100).is_file());
     assert!(note(&inbox, 300).is_file());
-    assert_eq!(w.total_reacts(), 2);
+    assert_eq!(w.marks(200), vec!["⚠\u{FE0F}"]);
+    assert_eq!(w.marks(100), vec!["✅"]);
+    assert_eq!(w.marks(300), vec!["✅"]);
 
     fs::remove_dir(note(&inbox, 200)).unwrap();
     catch_up(&allow(), &inbox, &h).await;
     assert!(note(&inbox, 200).is_file());
-    assert_eq!(w.reacts(200), 1);
+    assert_eq!(w.marks(200), vec!["✅"]);
     assert_eq!(
         w.reacts(300),
         1,
@@ -714,6 +766,7 @@ async fn invariants_hold_for_random_histories() {
         for s in msgs.iter().filter(|s| s.author == STRANGER) {
             assert_eq!(w.downloads(s.id), 0, "round {round}: I2 download {}", s.id);
             assert_eq!(w.reacts(s.id), 0, "round {round}: I2 react {}", s.id);
+            assert!(w.marks(s.id).is_empty(), "round {round}: I2 mark {}", s.id);
             assert!(!in_retry(&inbox, s.id), "round {round}: I2 retry {}", s.id);
             assert!(
                 names_for(&inbox, s.id).is_empty(),
@@ -725,25 +778,30 @@ async fn invariants_hold_for_random_histories() {
             !inbox.join(".cursor-7009").exists(),
             "round {round}: I2 cursor for stranger channel"
         );
-        // I3: a react means the note is complete.
+        // I3: the mark is the latest outcome, and a message never carries two.
         for s in &msgs {
-            if w.reacts(s.id) > 0 {
-                assert!(
-                    note(&inbox, s.id).is_file(),
-                    "round {round}: I3 no note for reacted {}",
-                    s.id
-                );
-                assert!(
-                    !in_retry(&inbox, s.id),
-                    "round {round}: I3 retry left for reacted {}",
-                    s.id
-                );
-                let text = fs::read_to_string(note(&inbox, s.id)).unwrap();
-                assert!(
-                    !text.contains("pending"),
-                    "round {round}: I3 pending note reacted {}",
-                    s.id
-                );
+            let marks = w.marks(s.id);
+            let n = note(&inbox, s.id);
+            let tag = format!("round {round}: I3 {}", s.id);
+            assert!(marks.len() <= 1, "{tag}: marks {marks:?}");
+            let one = marks.first().map(String::as_str);
+            if one == Some("✅") {
+                assert!(n.is_file() && !in_retry(&inbox, s.id), "{tag}: tick");
+                let text = fs::read_to_string(&n).unwrap();
+                assert!(!text.contains("pending"), "{tag}: pending note ticked");
+            }
+            if one == Some("⏳") {
+                assert!(in_retry(&inbox, s.id), "{tag}: hourglass not queued");
+            }
+            if one == Some("⚠\u{FE0F}") {
+                assert!(!n.is_file(), "{tag}: warning with a note");
+            }
+            if s.author != STRANGER {
+                if n.is_file() && !in_retry(&inbox, s.id) {
+                    assert_eq!(marks, vec!["✅"], "{tag}: complete but unticked");
+                } else if in_retry(&inbox, s.id) {
+                    assert_eq!(marks, vec!["⏳"], "{tag}: queued but no hourglass");
+                }
             }
         }
     }
@@ -824,7 +882,7 @@ async fn pending_download_keeps_ocr_and_retry_semantics() {
         ingest(&allow(), &inbox, &msg(&w, &s)).await,
         Outcome::Pending
     );
-    assert_eq!(w.reacts(320), 0);
+    assert_eq!(w.marks(320), vec!["⏳"]);
     assert!(in_retry(&inbox, 320));
     let text = fs::read_to_string(note(&inbox, 320)).unwrap();
     assert_eq!(text.matches("## OCR").count(), 1, "{text}");
@@ -836,7 +894,7 @@ async fn pending_download_keeps_ocr_and_retry_semantics() {
 
     w.cdn_down.store(false, Ordering::SeqCst);
     assert_eq!(ingest(&allow(), &inbox, &msg(&w, &s)).await, Outcome::Saved);
-    assert_eq!(w.reacts(320), 1);
+    assert_eq!(w.marks(320), vec!["✅"]);
     let text = fs::read_to_string(note(&inbox, 320)).unwrap();
     assert_eq!(text.matches("## OCR").count(), 2, "{text}");
     assert!(!in_retry(&inbox, 320));
@@ -887,12 +945,13 @@ async fn no_reply_when_nothing_to_say() {
     let stranger = spec(STRANGER, STRANGER_CH, 103, &[("receipt.png", b"receipt")]);
     assert_eq!(ingest(&allow(), &inbox, &msg(&w, &stranger)).await, Outcome::Ignored);
     assert!(w.replies_for(103).is_empty());
-    assert_eq!(w.reacts(103), 0);
+    assert!(w.marks(103).is_empty());
 
     w.cdn_down.store(true, Ordering::SeqCst);
     let pending = spec(MAIN, MAIN_CH, 104, &[("bad.jpg", b"b"), ("receipt.png", b"receipt")]);
     assert_eq!(ingest(&allow(), &inbox, &msg(&w, &pending)).await, Outcome::Pending);
     assert!(w.replies_for(104).is_empty());
+    assert_eq!(w.marks(104), vec!["⏳"]);
 
     w.cdn_down.store(false, Ordering::SeqCst);
     let hist = FakeHistory::new(&w, vec![pending.clone()]);
@@ -926,4 +985,98 @@ async fn reply_without_model_or_on_send_failure_changes_nothing() {
         fs::read(note(&inbox_c, 105)).unwrap(),
         fs::read(note(&inbox_b, 105)).unwrap()
     );
+}
+
+#[tokio::test]
+async fn pending_gets_hourglass_then_tick_on_retry() {
+    let inbox = scratch("hourglass-tick");
+    let w = World::new(&inbox);
+    let s = spec(MAIN, MAIN_CH, 100, &[("bad.jpg", b"b")]);
+    w.cdn_down.store(true, Ordering::SeqCst);
+    assert_eq!(ingest(&allow(), &inbox, &msg(&w, &s)).await, Outcome::Pending);
+    assert_eq!(w.marks(100), vec!["⏳"]);
+    assert!(in_retry(&inbox, 100));
+    w.cdn_down.store(false, Ordering::SeqCst);
+    // The retry runs on a fetched message, which carries the bot's own reactions.
+    let h = FakeHistory::new(&w, vec![s.clone()]);
+    catch_up(&allow(), &inbox, &h).await;
+    assert_eq!(w.marks(100), vec!["✅"]);
+    assert!(retry_entries(&inbox).is_empty());
+    assert_eq!(
+        w.ops_for(100),
+        vec![
+            ("react", "⏳".to_string()),
+            ("unreact", "⏳".to_string()),
+            ("react", "✅".to_string())
+        ]
+    );
+}
+
+#[tokio::test]
+async fn failed_write_gets_warning_then_tick_when_it_works() {
+    let inbox = scratch("warn-tick");
+    let w = World::new(&inbox);
+    let s = spec(MAIN, MAIN_CH, 100, &[]);
+    fs::create_dir_all(note(&inbox, 100)).unwrap();
+    assert_eq!(ingest(&allow(), &inbox, &msg(&w, &s)).await, Outcome::Failed);
+    assert_eq!(w.marks(100), vec!["⚠\u{FE0F}"]);
+    assert!(!note(&inbox, 100).is_file());
+    assert!(!in_retry(&inbox, 100));
+    fs::remove_dir(note(&inbox, 100)).unwrap();
+    assert_eq!(ingest(&allow(), &inbox, &msg(&w, &s)).await, Outcome::Saved);
+    assert_eq!(w.marks(100), vec!["✅"]);
+}
+
+#[tokio::test]
+async fn failed_write_with_failed_download_is_queued_with_hourglass() {
+    let inbox = scratch("warn-pending");
+    let w = World::new(&inbox);
+    w.cdn_down.store(true, Ordering::SeqCst);
+    let s = spec(MAIN, MAIN_CH, 100, &[("bad.jpg", b"b")]);
+    fs::create_dir_all(note(&inbox, 100)).unwrap();
+    assert_eq!(ingest(&allow(), &inbox, &msg(&w, &s)).await, Outcome::Pending);
+    assert_eq!(w.marks(100), vec!["⏳"]);
+    assert!(in_retry(&inbox, 100));
+    assert!(!note(&inbox, 100).is_file());
+}
+
+/// One run of the three scenarios; returns what disk and outcomes looked like.
+async fn run_scenarios(name: &str, fail: bool) -> (Vec<Outcome>, Vec<(u64, u64)>, Option<u64>, Vec<bool>, Vec<Vec<String>>) {
+    let inbox = scratch(name);
+    let w = World::new(&inbox);
+    let h = FakeHistory::new(
+        &w,
+        vec![
+            spec(MAIN, MAIN_CH, 100, &[("bad.jpg", b"b")]),
+            spec(MAIN, MAIN_CH, 200, &[]),
+            spec(MAIN, MAIN_CH, 300, &[]),
+        ],
+    );
+    w.react_fails.store(fail, Ordering::SeqCst);
+    w.unreact_fails.store(fail, Ordering::SeqCst);
+    let mut outs = Vec::new();
+    w.cdn_down.store(true, Ordering::SeqCst);
+    fs::create_dir_all(note(&inbox, 200)).unwrap();
+    outs.push(ingest(&allow(), &inbox, &msg(&w, &spec(MAIN, MAIN_CH, 100, &[("bad.jpg", b"b")]))).await);
+    outs.push(ingest(&allow(), &inbox, &msg(&w, &spec(MAIN, MAIN_CH, 200, &[]))).await);
+    catch_up(&allow(), &inbox, &h).await;
+    w.cdn_down.store(false, Ordering::SeqCst);
+    fs::remove_dir(note(&inbox, 200)).unwrap();
+    catch_up(&allow(), &inbox, &h).await;
+    outs.push(ingest(&allow(), &inbox, &msg(&w, &spec(MAIN, MAIN_CH, 300, &[]))).await);
+    let notes = [100, 200, 300].iter().map(|i| note(&inbox, *i).is_file()).collect();
+    let marks = [100, 200, 300].iter().map(|i| w.marks(*i)).collect();
+    (outs, retry_entries(&inbox), read_cursor(&inbox, MAIN_CH), notes, marks)
+}
+
+#[tokio::test]
+async fn reaction_failures_never_change_outcome_cursor_or_retry() {
+    let good = run_scenarios("react-ok", false).await;
+    let bad = run_scenarios("react-fail", true).await;
+    assert_eq!(good.0, bad.0);
+    assert_eq!(good.1, bad.1);
+    assert_eq!(good.2, bad.2);
+    assert_eq!(good.3, bad.3);
+    assert!(good.4.iter().all(|m| m.len() == 1), "{:?}", good.4);
+    assert!(bad.4.iter().all(|m| m.is_empty()), "{:?}", bad.4);
 }
