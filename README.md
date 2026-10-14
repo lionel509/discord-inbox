@@ -14,7 +14,7 @@ A receipt DM gets a reply in the same DM, sent after the ✅: the OCR text with 
 2. Token: `security add-generic-password -s discord-inbox -a discord-inbox -w`
 3. Discord developer portal: bot token, Message Content Intent off. The bot uses DM intents only.
 
-Env overrides: `DISCORD_INBOX_ALLOWED_IDS_FILE`, `DISCORD_INBOX_DIR`, `DISCORD_INBOX_INSIGHT` (the full model command; empty skips the model), `DISCORD_INBOX_BUDGET` (path template where `{month}` becomes the message's `YYYY-MM`; the note needs one line containing "budget" with a `$amount`, and spending lines `YYYY-MM-DD … $amount`).
+Env overrides: `DISCORD_INBOX_ALLOWED_IDS_FILE`, `DISCORD_INBOX_DIR`, `DISCORD_INBOX_INSIGHT` (the full model command, split on spaces; put a quoted part in `"..."` if it has a space; empty skips the model), `DISCORD_INBOX_BUDGET` (path template where `{month}` becomes the message's `YYYY-MM`; the note needs one line containing "budget" with a `$amount`, and spending lines `YYYY-MM-DD … $amount`).
 
 ## Run and test
 

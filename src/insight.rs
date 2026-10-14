@@ -11,12 +11,45 @@ pub const DISCORD_MAX: usize = 2000;
 const PROMPT_CHARS: usize = 4000;
 const DEFAULT_CMD: &[&str] = &["ollama", "run", "qwen3.5:4b", "--think=false", "--nowordwrap"];
 
-/// `$DISCORD_INBOX_INSIGHT` split on whitespace if set (empty disables the model), else the default `ollama run`.
+/// `$DISCORD_INBOX_INSIGHT` split into words if set (empty disables the model), else the default `ollama run`.
 pub fn command() -> Vec<String> {
     match std::env::var("DISCORD_INBOX_INSIGHT") {
-        Ok(v) => v.split_ascii_whitespace().map(str::to_string).collect(),
+        Ok(v) => split_words(&v),
         Err(_) => DEFAULT_CMD.iter().map(|s| s.to_string()).collect(),
     }
+}
+
+/// Splits on ASCII whitespace. A `"..."` or `'...'` run is one word and keeps its spaces, so a path
+/// with a space is quoted: `"/Users/me/Discord Inbox/bin/model" --flag`.
+fn split_words(s: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let mut have = false;
+    let mut quote: Option<char> = None;
+    for c in s.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => cur.push(c),
+            None if c == '"' || c == '\'' => {
+                quote = Some(c);
+                have = true;
+            }
+            None if c.is_ascii_whitespace() => {
+                if have {
+                    words.push(std::mem::take(&mut cur));
+                    have = false;
+                }
+            }
+            None => {
+                cur.push(c);
+                have = true;
+            }
+        }
+    }
+    if have {
+        words.push(cur);
+    }
+    words
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,8 +82,11 @@ pub fn parse(output: &str) -> Option<Insight> {
         let Some((key, value)) = line.split_once(':') else {
             continue;
         };
-        let key = key.trim().to_ascii_lowercase();
-        let value = value.trim();
+        // Models often bold or bullet their labels: `**receipt:** yes`, `- receipt: yes`.
+        let key = key
+            .trim_matches(|c: char| c.is_whitespace() || "-*#>_`".contains(c))
+            .to_ascii_lowercase();
+        let value = value.trim_matches(|c: char| c.is_whitespace() || c == '*');
         match key.as_str() {
             "receipt" => receipt = Some(matches!(value.chars().next(), Some('y' | 'Y'))),
             "merchant" => merchant = value.to_string(),
@@ -82,7 +118,9 @@ pub fn ask(cmd: &[String], ocr: &str, timeout: Duration) -> Option<Insight> {
     parse(&out)
 }
 
-/// Masks each run of 12 or more digits (single spaces or dashes allowed between digits) except its last four.
+/// Masks each run of 12 or more digits (single spaces, dashes or line breaks allowed between digits)
+/// except its last four. A line break can bridge digits on neighbouring lines, so a long number split
+/// by OCR is masked too; the cost is that a 12+ digit run across two lines is masked even if it is not a card.
 pub fn mask_cards(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
@@ -98,7 +136,7 @@ pub fn mask_cards(text: &str) -> String {
             if j < chars.len() && chars[j].is_ascii_digit() {
                 j += 1;
             } else if j + 1 < chars.len()
-                && (chars[j] == ' ' || chars[j] == '-')
+                && matches!(chars[j], ' ' | '-' | '\n')
                 && chars[j + 1].is_ascii_digit()
             {
                 j += 2;
@@ -173,18 +211,19 @@ fn date_end(line: &str) -> Option<usize> {
         .map(|i| i + 10)
 }
 
-/// `(budget, spent)` in dollars. Budget: the first money token on the first line containing "budget".
-/// Spent: the first money token after the date on each dated line, summed. Undated lines don't count.
+/// `(budget, spent)` in dollars. Budget: the first money token on the first line containing "budget"
+/// that has one (a heading like `# Budget 2026-10` is skipped). Spent: the first money token after the
+/// date on each dated line, summed. Undated lines don't count.
 pub fn parse_budget(text: &str) -> Option<(f64, f64)> {
-    let line = text
+    let (budget, _) = text
         .lines()
-        .find(|l| l.to_ascii_lowercase().contains("budget"))?;
-    let (budget, _) = first_money(line, 0)?;
+        .filter(|l| l.to_ascii_lowercase().contains("budget"))
+        .find_map(|l| first_money(l, 0))?;
     let mut spent: i64 = 0;
     for line in text.lines() {
         if let Some(from) = date_end(line) {
             if let Some((cents, _)) = first_money(line, from) {
-                spent += cents;
+                spent = spent.saturating_add(cents);
             }
         }
     }
@@ -319,5 +358,6 @@ pub async fn compose(msg: &Incoming) -> Option<String> {
     } else {
         None
     };
-    Some(reply_text(&items, budget))
+    // The model's merchant and total are read from the same photo, so mask the whole reply, not only the OCR.
+    Some(mask_cards(&reply_text(&items, budget)))
 }

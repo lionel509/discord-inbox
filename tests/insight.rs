@@ -160,3 +160,60 @@ fn reply_text_fits_discord() {
     let unknown = insight::reply_text(&[("a.png".into(), "t".into(), Some(receipt("S", "unknown", "other")))], None);
     assert!(unknown.starts_with("Receipt: S · unknown · other"), "{unknown}");
 }
+
+#[test]
+fn parse_reads_bold_and_bulleted_labels() {
+    let bold = insight::parse("**receipt:** yes\n**merchant:** Trader Joe's\n**total:** 42.10\n**category:** groceries");
+    assert_eq!(bold, Some(receipt("Trader Joe's", "42.10", "groceries")));
+    let bullet = insight::parse("- receipt: yes\n- merchant: Trader Joe's\n- total: 42.10\n- category: groceries");
+    assert_eq!(bullet, Some(receipt("Trader Joe's", "42.10", "groceries")));
+}
+
+#[test]
+fn mask_cards_bridges_a_line_break() {
+    let out = insight::mask_cards("Card 4111 1111\n1111 1111");
+    assert!(!out.contains("4111"), "{out:?}");
+    assert!(out.ends_with("1111"), "{out:?}");
+    assert_eq!(insight::mask_cards("Total $42.10\n2026"), "Total $42.10\n2026");
+}
+
+#[test]
+fn budget_skips_a_heading_without_money() {
+    let note = "# Budget 2026-10\n\nbudget: $800\n- 2026-10-02 Groceries $45.10\n";
+    assert_eq!(insight::parse_budget(note), Some((800.0, 45.10)));
+}
+
+#[tokio::test]
+async fn model_command_keeps_a_quoted_path_and_masks_its_reply() {
+    dir();
+    // Both checks share one test because DISCORD_INBOX_INSIGHT is process-global.
+    std::env::set_var("DISCORD_INBOX_INSIGHT", "\"/Users/test/Discord Inbox/bin/model\" --flag");
+    assert_eq!(
+        insight::command(),
+        vec!["/Users/test/Discord Inbox/bin/model".to_string(), "--flag".to_string()]
+    );
+
+    // A stub model that echoes a card number in its merchant line, as a photo of a card could.
+    let stub = dir().join("insight_stub.sh");
+    fs::write(
+        &stub,
+        "#!/bin/sh\ncat >/dev/null\nprintf 'receipt: yes\\nmerchant: VISA 4111 1111 1111 1111\\ntotal: 1.00\\ncategory: other\\n'\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    std::env::set_var("DISCORD_INBOX_INSIGHT", stub.to_string_lossy().to_string());
+
+    let msg = discord_inbox::dump::Incoming {
+        msg_id: 1,
+        author_id: 1,
+        received: "2026-10-13T14:03:22Z".into(),
+        content: String::new(),
+        attachments: vec![("photo.jpg".into(), None)],
+        ocr: vec![(0, "TOTAL 4111 1111 1111 1111".into())],
+    };
+    let reply = insight::compose(&msg).await.expect("a reply");
+    assert!(!reply.contains("4111"), "{reply}");
+    assert!(reply.contains("Receipt: VISA"), "{reply}");
+    assert!(reply.contains("1111"), "{reply}");
+}
