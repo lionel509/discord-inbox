@@ -6,7 +6,10 @@ use discord_inbox::dump::{
     write_cursor,
 };
 use discord_inbox::ingest::{catch_up, ingest, History, Inbound, Outcome, PAGE};
-use std::collections::HashMap;
+use discord_inbox::chat::Chat;
+use discord_inbox::ingest::{catch_up_with, ingest_with, Filer};
+use discord_inbox::vaults::{Vaults, TARGETS};
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -93,6 +96,7 @@ struct Spec {
     author: u64,
     channel: u64,
     id: u64,
+    text: String,
     files: Vec<(String, Vec<u8>)>,
 }
 
@@ -101,6 +105,7 @@ fn spec(author: u64, channel: u64, id: u64, files: &[(&str, &[u8])]) -> Spec {
         author,
         channel,
         id,
+        text: "hi".to_string(),
         files: files
             .iter()
             .map(|(n, b)| (n.to_string(), b.to_vec()))
@@ -200,7 +205,7 @@ impl Inbound for FakeMsg {
         RECEIVED.to_string()
     }
     fn content(&self) -> String {
-        "hi".to_string()
+        self.spec.text.clone()
     }
     fn attachment_names(&self) -> Vec<String> {
         self.spec.files.iter().map(|f| f.0.clone()).collect()
@@ -737,6 +742,7 @@ async fn invariants_hold_for_random_histories() {
                 author,
                 channel,
                 id,
+                text: "hi".to_string(),
                 files,
             });
         }
@@ -1127,4 +1133,330 @@ async fn failed_retry_write_keeps_hourglass_and_retry_entry() {
     catch_up(&allow(), &inbox, &h).await;
     assert!(in_retry(&inbox, 100));
     assert_eq!(w.marks(100), vec!["⏳"]);
+}
+
+// ---- Chat replies and vault filing (#31). Temp dirs and a made-up `Private` folder only. ----
+
+/// Answers from a script, the way MiMo would, and records every user prompt it was sent.
+struct FakeChat {
+    answers: Mutex<VecDeque<Result<String, String>>>,
+    prompts: Mutex<Vec<String>>,
+}
+
+impl FakeChat {
+    fn new(answers: Vec<Result<String, String>>) -> Arc<FakeChat> {
+        Arc::new(FakeChat {
+            answers: Mutex::new(answers.into()),
+            prompts: Mutex::new(Vec::new()),
+        })
+    }
+    fn calls(&self) -> usize {
+        self.prompts.lock().unwrap().len()
+    }
+}
+
+impl Chat for FakeChat {
+    fn ask(&self, _system: &str, user: &str) -> Result<String, String> {
+        self.prompts.lock().unwrap().push(user.to_string());
+        self.answers
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Err("script empty".to_string()))
+    }
+}
+
+fn answer(folder: &str, title: &str, tags: &str, reply: &str) -> Result<String, String> {
+    Ok(format!("FOLDER: {folder}\nTITLE: {title}\nTAGS: {tags}\nREPLY:\n{reply}\n"))
+}
+
+fn spec_text(author: u64, channel: u64, id: u64, text: &str, files: &[(&str, &[u8])]) -> Spec {
+    let mut s = spec(author, channel, id, files);
+    s.text = text.to_string();
+    s
+}
+
+/// The vault root is the parent of the scratch Inbox. Every target folder exists, plus `Private` with one file.
+fn vault_root(inbox: &Path) -> PathBuf {
+    let root = inbox.parent().unwrap().to_path_buf();
+    for t in TARGETS.iter() {
+        fs::create_dir_all(root.join(t.folder)).unwrap();
+    }
+    fs::create_dir_all(root.join("Private")).unwrap();
+    fs::write(root.join("Private/note.md"), "private\n").unwrap();
+    root
+}
+
+fn filer(inbox: &Path, chat: &Arc<FakeChat>) -> Filer {
+    Filer {
+        chat: chat.clone(),
+        vaults: Vaults::new(vault_root(inbox)),
+    }
+}
+
+fn root_of(inbox: &Path) -> PathBuf {
+    inbox.parent().unwrap().to_path_buf()
+}
+
+fn files_in(dir: &Path) -> Vec<String> {
+    let mut v: Vec<String> = fs::read_dir(dir)
+        .map(|rd| {
+            rd.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort();
+    v
+}
+
+/// Every regular file under `dir`, recursively.
+fn all_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// A text DM is filed into its folder and answered in one message; no tick is added.
+#[tokio::test]
+async fn text_dm_filed_and_replied_no_tick() {
+    let inbox = scratch("chat-filed");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![answer(
+        "Citadel/Ideas",
+        "Solar fan idea",
+        "electronics",
+        "That is a solar fan project. Filed under Citadel.",
+    )]);
+    let f = filer(&inbox, &chat);
+    let s = spec_text(MAIN, MAIN_CH, 300, "sketch of a solar fan", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    assert!(!note(&inbox, 300).exists(), "note still in Inbox");
+    let folder = root_of(&inbox).join("Citadel/Ideas");
+    let filed = files_in(&folder);
+    assert_eq!(filed, vec!["2026-10-13 Solar fan idea.md"], "{filed:?}");
+    let text = fs::read_to_string(folder.join(&filed[0])).unwrap();
+    assert!(text.contains("sketch of a solar fan") && text.contains("Hub: [[Ideas]]"), "{text}");
+    let replies = w.replies_for(300);
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert!(
+        replies[0].starts_with("Filed: Citadel/Ideas/2026-10-13 Solar fan idea.md"),
+        "{}",
+        replies[0]
+    );
+    assert!(replies[0].contains("That is a solar fan project"), "{}", replies[0]);
+    assert!(w.marks(300).is_empty(), "{:?}", w.marks(300));
+    assert_eq!(w.reacts(300), 0);
+    assert_eq!(chat.calls(), 1);
+}
+
+/// A filed note is never answered or filed again, by a second live pass or by catch-up, and catch-up moves past it.
+#[tokio::test]
+async fn filed_note_is_skipped_on_second_pass_and_catch_up() {
+    let inbox = scratch("chat-skip");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![answer("Citadel/Ideas", "Solar fan idea", "electronics", "Filed.")]);
+    let f = filer(&inbox, &chat);
+    let s = spec_text(MAIN, MAIN_CH, 310, "sketch of a solar fan", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Skipped);
+    let hist = FakeHistory::new(&w, vec![s.clone()]);
+    catch_up_with(&allow(), &inbox, &hist, &f).await;
+    assert_eq!(chat.calls(), 1, "a filed note was answered again");
+    assert_eq!(w.replies_for(310).len(), 1);
+    assert_eq!(files_in(&root_of(&inbox).join("Citadel/Ideas")).len(), 1, "filed again");
+    assert_eq!(read_cursor(&inbox, MAIN_CH), Some(310), "catch-up stopped at a filed note");
+}
+
+/// The model failing means today's behaviour: the note stays in Inbox and gets the tick.
+#[tokio::test]
+async fn chat_failure_falls_back_to_tick() {
+    let inbox = scratch("chat-fail");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![Err("http 404".to_string())]);
+    let f = filer(&inbox, &chat);
+    let s = spec_text(MAIN, MAIN_CH, 320, "hello there", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    assert!(note(&inbox, 320).is_file(), "note left Inbox without a filing");
+    assert_eq!(w.marks(320), vec!["✅"]);
+    assert!(w.replies_for(320).is_empty());
+    assert!(files_in(&root_of(&inbox).join("Citadel/Ideas")).is_empty());
+    assert_eq!(chat.calls(), 1);
+}
+
+/// `Private`, or any path-like folder, is not a target: the note stays in Inbox and the reply says so. No tick.
+#[tokio::test]
+async fn off_list_folder_keeps_note_in_inbox_but_replies() {
+    let inbox = scratch("chat-private");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![
+        answer("Private", "Private thing", "", "Kept it here."),
+        answer("../Private", "Private thing", "", "Kept it here too."),
+    ]);
+    let f = filer(&inbox, &chat);
+    let root = root_of(&inbox);
+    let before = files_in(&root.join("Private"));
+    for id in [330u64, 331] {
+        let s = spec_text(MAIN, MAIN_CH, id, "my knee hurts", &[]);
+        assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+        assert!(note(&inbox, id).is_file(), "{id} left Inbox");
+        assert!(w.marks(id).is_empty(), "{:?}", w.marks(id));
+        let replies = w.replies_for(id);
+        assert_eq!(replies.len(), 1, "{replies:?}");
+        assert!(replies[0].starts_with("Kept in Inbox"), "{}", replies[0]);
+    }
+    assert_eq!(files_in(&root.join("Private")), before);
+    assert_eq!(fs::read_to_string(root.join("Private/note.md")).unwrap(), "private\n");
+}
+
+/// A failed send falls back to the tick, and the note stays filed (the move already happened).
+#[tokio::test]
+async fn reply_send_failure_falls_back_to_tick_note_stays_filed() {
+    let inbox = scratch("chat-send-fail");
+    let w = World::new(&inbox);
+    w.reply_fails.store(true, Ordering::SeqCst);
+    let chat = FakeChat::new(vec![answer("Citadel/Ideas", "Solar fan idea", "electronics", "Filed.")]);
+    let f = filer(&inbox, &chat);
+    let s = spec_text(MAIN, MAIN_CH, 340, "sketch of a solar fan", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    assert!(!note(&inbox, 340).exists(), "note should be filed");
+    assert_eq!(files_in(&root_of(&inbox).join("Citadel/Ideas")).len(), 1);
+    assert!(dump::filed_to(&inbox, 340).is_some());
+    assert_eq!(w.marks(340), vec!["✅"]);
+    assert_eq!(w.replies_for(340).len(), 1);
+    assert!(!in_retry(&inbox, 340));
+}
+
+/// Receipt: the verdict and the chat reply are one message, card digits masked, and the prompt never had them.
+#[tokio::test]
+async fn receipt_gets_verdict_and_chat_in_one_masked_reply() {
+    let inbox = scratch("chat-receipt");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![answer(
+        "State Street",
+        "Trader Joes groceries",
+        "receipts",
+        "Logged your Trader Joe's run.",
+    )]);
+    let f = filer(&inbox, &chat);
+    let s = spec_text(MAIN, MAIN_CH, 350, "receipt", &[("receipt.png", b"receipt card")]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    let replies = w.replies_for(350);
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    let text = &replies[0];
+    assert!(text.starts_with("Filed: State Street/"), "{text}");
+    assert!(text.contains("Logged your Trader Joe's run."), "{text}");
+    assert!(text.contains("Receipt: Trader Joe's · $12.34 · groceries"), "{text}");
+    assert!(text.contains("**** **** **** 1111") && !text.contains("4111"), "{text}");
+    let prompts = chat.prompts.lock().unwrap().clone();
+    assert!(prompts.iter().all(|p| !p.contains("4111")), "{prompts:?}");
+    assert!(w.marks(350).is_empty(), "{:?}", w.marks(350));
+}
+
+/// A pending DM gets the hourglass first and is not answered early; when the retry completes, the hourglass goes and the DM is filed and answered.
+#[tokio::test]
+async fn retry_completion_clears_hourglass_when_replied() {
+    let inbox = scratch("chat-retry");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![answer("Berkshire", "Photo of a bill", "business", "Saved the bill.")]);
+    let f = filer(&inbox, &chat);
+    let s = spec_text(MAIN, MAIN_CH, 360, "photo of a bill", &[("bad.jpg", b"b")]);
+    w.cdn_down.store(true, Ordering::SeqCst);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Pending);
+    assert_eq!(chat.calls(), 0, "a pending message was answered early");
+    assert_eq!(w.marks(360), vec!["⏳"]);
+    w.cdn_down.store(false, Ordering::SeqCst);
+    let hist = FakeHistory::new(&w, vec![s.clone()]);
+    catch_up_with(&allow(), &inbox, &hist, &f).await;
+    assert!(w.marks(360).is_empty(), "{:?}", w.marks(360));
+    assert!(
+        w.ops_for(360).iter().any(|(k, e)| *k == "unreact" && e == "⏳"),
+        "{:?}",
+        w.ops_for(360)
+    );
+    assert_eq!(w.replies_for(360).len(), 1);
+    assert!(!in_retry(&inbox, 360));
+    assert_eq!(files_in(&root_of(&inbox).join("Berkshire")).len(), 2, "note and attachment");
+}
+
+/// Hostile or random model output never moves anything outside Inbox into a non-target folder, never touches
+/// Private, and every message ends either filed (ledger) or in Inbox, never both and never neither.
+#[tokio::test]
+async fn filing_never_leaves_inbox_except_into_targets() {
+    let inbox = scratch("chat-invariant");
+    let w = World::new(&inbox);
+    let root = root_of(&inbox);
+    let private_before = files_in(&root.join("Private"));
+
+    let mut answers: Vec<Result<String, String>> = [
+        "Private",
+        "../Private",
+        "/tmp",
+        "Citadel/Ideas/../../Private",
+        "Private/note.md",
+        "`Private`",
+        "citadel",
+        "",
+        "Fidelity/Want to Make/../../Private",
+        "Inbox",
+    ]
+    .iter()
+    .map(|f| answer(f, "../../x", "../x, #y", "ok"))
+    .collect();
+    answers.push(answer("State Street", &"A".repeat(10_000), "finance", "ok"));
+    answers.push(Ok(format!("TITLE: {}", "A".repeat(10_000))));
+    answers.push(Ok("FOLDER: ! Todo\nTITLE: /etc/passwd\nREPLY:\nok".to_string()));
+    answers.push(Ok("{\"folder\":\"Private\"}".to_string()));
+    answers.push(Err("timeout".to_string()));
+
+    // Seeded LCG, so the run is the same every time.
+    let mut seed: u64 = 31;
+    let mut next = move || {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (seed >> 33) as usize
+    };
+    let alphabet: &[u8] = b"/.abcPrivate ` :\n-_";
+    for _ in 0..200 {
+        let len = next() % 40;
+        let s: String = (0..len).map(|_| alphabet[next() % alphabet.len()] as char).collect();
+        answers.push(answer(&s, &s, &s, &s));
+    }
+
+    let total = answers.len();
+    let chat = FakeChat::new(answers);
+    let f = filer(&inbox, &chat);
+    for i in 0..total {
+        let id = 400_000 + i as u64;
+        let s = spec_text(MAIN, MAIN_CH, id, "random text", &[]);
+        let out = ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await;
+        assert_eq!(out, Outcome::Saved, "id {id}");
+        assert_eq!(files_in(&root.join("Private")), private_before, "Private changed at id {id}");
+        let filed = dump::filed_to(&inbox, id).is_some();
+        let in_inbox = note(&inbox, id).is_file();
+        assert!(filed ^ in_inbox, "id {id}: filed={filed} in_inbox={in_inbox}");
+        for p in all_files(&root) {
+            let rel = p.strip_prefix(&root).unwrap();
+            if rel.starts_with("Inbox") || rel.starts_with("Private") {
+                continue;
+            }
+            let parent = rel.parent().unwrap().to_string_lossy().into_owned();
+            assert!(
+                TARGETS.iter().any(|t| t.folder == parent),
+                "file outside the targets after id {id}: {}",
+                rel.display()
+            );
+        }
+    }
+    assert_eq!(chat.calls(), total);
 }
