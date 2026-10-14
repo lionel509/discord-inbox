@@ -31,7 +31,13 @@ pub fn is_image(name: &str) -> bool {
 /// Runs the helper on `image` (stdin) and returns its stdout, trimmed. `None` when it can't spawn,
 /// exits non-zero, times out, or prints nothing. Its stderr is discarded, so nothing it says reaches a log.
 pub fn run(cmd: &Path, image: &[u8], timeout: Duration) -> Option<String> {
+    run_args(cmd, &[], image, timeout)
+}
+
+/// `run` with arguments, for any bounded helper that reads its input on stdin (the local model in insight.rs).
+pub fn run_args(cmd: &Path, args: &[String], image: &[u8], timeout: Duration) -> Option<String> {
     let mut child = Command::new(cmd)
+        .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

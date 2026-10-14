@@ -96,6 +96,7 @@ fn mask_cards_invariant_random() {
 
 #[test]
 fn budget_fixture_parses() {
+    dir();
     assert_eq!(insight::parse_budget(BUDGET_OCT), Some((800.0, 58.0)));
     assert_eq!(insight::parse_budget("groceries $10\n- 2026-10-02 x $5\n"), None);
 

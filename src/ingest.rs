@@ -28,6 +28,8 @@ pub trait Inbound: Send + Sync {
         i: usize,
     ) -> impl std::future::Future<Output = Result<Vec<u8>, String>> + Send;
     fn react(&self) -> impl std::future::Future<Output = Result<(), String>> + Send;
+    /// Sends `text` back into the channel this message came from.
+    fn reply(&self, text: &str) -> impl std::future::Future<Output = Result<(), String>> + Send;
 }
 
 /// The Discord history calls the catch-up needs.
@@ -116,6 +118,12 @@ pub async fn ingest<M: Inbound>(allow: &Allowlist, inbox: &Path, m: &M) -> Outco
     }
     if let Err(e) = m.react().await {
         eprintln!("discord-inbox: react on {id} failed: {e}");
+    }
+    // After the tick, so a slow model never delays the ✅. The reply is best-effort and never changes the outcome.
+    if let Some(text) = crate::insight::compose(&incoming).await {
+        if let Err(e) = m.reply(&text).await {
+            eprintln!("discord-inbox: reply on {id} failed: {e}");
+        }
     }
     Outcome::Saved
 }

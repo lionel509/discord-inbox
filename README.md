@@ -4,6 +4,8 @@ A Discord bot that takes DMs from two allowlisted accounts and dumps each one (t
 
 Image attachments (png, jpg, heic, webp, gif, tiff, bmp) are read with Apple Vision on this Mac, and the text goes into the note under `## OCR <file>`. Nothing leaves the machine. If OCR fails, that section is simply missing; the note, the ✅ and the retry don't change. `DISCORD_INBOX_OCR` overrides the helper path.
 
+A receipt DM gets a reply in the same DM, sent after the ✅: the OCR text with card numbers masked to the last four digits, then a one-line verdict from a local model (`ollama run qwen3.5:4b`, receipt / merchant / total / category, capped at 60 s; nothing leaves the Mac), then, when `DISCORD_INBOX_BUDGET` is set, the budget left for that month before this receipt. The bot never writes the budget note, and any part that is missing is simply left out; the note, the ✅ and the retry don't change.
+
 ## Setup
 
 1. Allowlist: one Discord user ID per line, outside the repo.
@@ -12,7 +14,7 @@ Image attachments (png, jpg, heic, webp, gif, tiff, bmp) are read with Apple Vis
 2. Token: `security add-generic-password -s discord-inbox -a discord-inbox -w`
 3. Discord developer portal: bot token, Message Content Intent off. The bot uses DM intents only.
 
-Env overrides: `DISCORD_INBOX_ALLOWED_IDS_FILE`, `DISCORD_INBOX_DIR`.
+Env overrides: `DISCORD_INBOX_ALLOWED_IDS_FILE`, `DISCORD_INBOX_DIR`, `DISCORD_INBOX_INSIGHT` (the full model command; empty skips the model), `DISCORD_INBOX_BUDGET` (path template where `{month}` becomes the message's `YYYY-MM`; the note needs one line containing "budget" with a `$amount`, and spending lines `YYYY-MM-DD … $amount`).
 
 ## Run and test
 

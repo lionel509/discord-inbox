@@ -3,6 +3,7 @@
 //!
 //! Run: `DISCORD_INBOX_DIR=<scratch> cargo run --release --example ocr_demo -- <image>...`
 //! `DISCORD_INBOX_DIR` is required, so the demo never writes to `~/Documents/Inbox`.
+//! Optional: `DISCORD_INBOX_BUDGET` (budget note template) and `DISCORD_INBOX_INSIGHT=` (empty skips the local model).
 //! Use only synthetic images here: the notes are printed to stdout.
 use discord_inbox::allowlist;
 use discord_inbox::dump::{self, note_path};
@@ -46,6 +47,10 @@ impl Inbound for DemoMsg {
         Ok(self.bytes.clone())
     }
     async fn react(&self) -> Result<(), String> {
+        Ok(())
+    }
+    async fn reply(&self, text: &str) -> Result<(), String> {
+        println!("-- reply --\n{text}");
         Ok(())
     }
 }

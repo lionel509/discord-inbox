@@ -107,6 +107,9 @@ impl Inbound for DemoMsg {
         self.world.count(self.id, true);
         Ok(())
     }
+    async fn reply(&self, _text: &str) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 struct DemoHistory {
