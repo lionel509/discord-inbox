@@ -23,6 +23,29 @@ Env overrides: `DISCORD_INBOX_ALLOWED_IDS_FILE`, `DISCORD_INBOX_DIR`, `DISCORD_I
 - `sh examples/demo.sh`: offline demo of the allowlist gate, the Inbox writer, the retry list and the refuse-to-start check. No Discord, no token.
 - `DISCORD_INBOX_DIR=<scratch> cargo run --example ocr_demo -- <image>...`: writes a note per image through the real ingest path and prints it. Use a scratch dir, never your real Inbox.
 
+## Chat replies and filing
+
+Each text DM is sent to `xiaomi/mimo-v2.6-flash` on OpenRouter (zero data retention on, 30 s timeout). The key is read from `~/.config/discord-inbox/openrouter_key` (override: `DISCORD_INBOX_OPENROUTER_KEY_FILE`); with no key the bot starts anyway and chat replies are off. Vault root: `$DISCORD_INBOX_VAULTS_DIR`, default `~/Documents`.
+
+The model picks one folder from a fixed table, matched exactly; its text never becomes part of a path, and a folder that does not exist is never created. Anything else stays in Inbox.
+
+| Folder | For |
+|---|---|
+| `Citadel/Ideas` | software, electronics, robotics, 3D printing, AI tooling, project ideas |
+| `Fidelity/Want to Make` | recipes, cooking, things to make by hand |
+| `BlackRock` | school |
+| `Berkshire` | business, the store, channels |
+| `Goldman` | career |
+| `State Street` | money |
+| `Mirae` | Korean or Chinese study |
+| `! Todo` | tasks and reminders |
+
+A filed note (and its attachments) moves out of Inbox with a hard link, never overwriting; `Inbox/.filed` records `msg_id dest` so a moved note is not ingested or answered again. The reply says `Filed: <folder>/<note>` or `Kept in Inbox`, then the answer, then any receipt verdict.
+
+A tick no longer means "saved". ✅ now means "saved but could not reply" (no key, chat error, or the reply failed to send). A successful reply carries no mark.
+
+Demo: `cargo run --release --example chat_demo [-- --live]` (temp folders only).
+
 ## When a download fails
 
 The note is written anyway. The failed attachment is listed as `sha256: pending`, the message is recorded in `Inbox/.retry`, and it is retried on every start until it completes. While it waits the message carries ⏳; the start that completes it swaps ⏳ for ✅. A message whose note could not be written at all gets ⚠️ and nothing on disk, so resend it; it is also retried from the cursor on the next start, and ⚠️ becomes ✅ if that works. A message shows one mark, except when Discord refuses to remove the old one: that failure is logged, the new mark is still added beside it, so ✅ always means the note is in the vault. If Discord refuses the new mark, the message can be left with none; that is logged too, and no later start restores the mark (the saved note is skipped), so react by hand if you care. A message already waiting in the retry list keeps ⏳ even if a later write fails, because it is owed a retry and its note may already be on disk (a crash right after the retry record can leave none). Otherwise reactions are best-effort: a failed react is logged and changes nothing else. Nothing is dropped.
