@@ -245,6 +245,37 @@ async fn chain_end_to_end() {
     assert!(!reply.contains("4111"), "{reply}");
 }
 
+/// The order is ScaleDown first, then Haiku. Both stubs succeed in (1), so ScaleDown's merchant
+/// is the proof it ran first, and no `claude` process may start.
+#[test]
+fn scaledown_first_then_haiku() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let cap = init();
+    std::env::remove_var("DISCORD_INBOX_INSIGHT");
+    let s = Duration::from_secs(1);
+    let total = Duration::from_secs(3);
+    let key = cap.join("openrouter_key");
+
+    // (1) Key present, both succeed: ScaleDown answers and Haiku is never spawned.
+    std::env::set_var("DISCORD_INBOX_OPENROUTER_KEY", &key);
+    let _ = fs::remove_file(cap.join("claude.env"));
+    let got = insight::ask_chain("TRADER JOES", s, total).expect("scaledown insight");
+    assert_eq!(got.merchant, "Hua Lian");
+    assert!(!cap.join("claude.env").exists(), "haiku was spawned while scaledown answered");
+
+    // (2) No key file: no curl process, and Haiku answers.
+    std::env::set_var("DISCORD_INBOX_OPENROUTER_KEY", cap.join("no-such-key"));
+    let _ = fs::remove_file(cap.join("curl.args"));
+    let got = insight::ask_chain("TRADER JOES", s, total).expect("haiku insight");
+    assert_eq!(got.merchant, "Haiku Mart");
+    assert!(!cap.join("curl.args").exists());
+
+    // (3) Key present, ScaleDown fails: Haiku answers.
+    std::env::set_var("DISCORD_INBOX_OPENROUTER_KEY", &key);
+    let got = insight::ask_chain("TOTAL 123 CURLDOWN", s, total).expect("haiku after scaledown failed");
+    assert_eq!(got.merchant, "Haiku Mart");
+}
+
 /// Runs the built Vision helper on a committed synthetic receipt image (image on stdin, text on stdout).
 fn vision_reads(fixture: &str) -> String {
     use std::io::Write;
