@@ -1,21 +1,37 @@
-//! The reply under a receipt DM: the OCR text with card digits masked, a one-line verdict from a local model, and the budget left for the month. The text goes only into the reply: never a log line, never a file. This module writes nothing; the budget note is read-only.
+//! The reply under a receipt DM: the OCR text with card digits masked, a one-line verdict, and the budget left for the month. The verdict comes from Claude Haiku (direct to Anthropic, never the local router), then ScaleDown Extract on OpenRouter's zero-data-retention endpoint, or from the command in `$DISCORD_INBOX_INSIGHT`. Only masked text reaches either model. The text goes only into the reply: never a log line, never a file. This module writes nothing; the budget note is read-only.
 use crate::dump::Incoming;
+use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// One model call. A cold load of a 4B model is about 5-10 s here.
 pub const TIMEOUT: Duration = Duration::from_secs(60);
 /// Discord's cap on one message, counted in chars.
 pub const DISCORD_MAX: usize = 2000;
 const PROMPT_CHARS: usize = 4000;
-const DEFAULT_CMD: &[&str] = &["ollama", "run", "qwen3.5:4b", "--think=false", "--nowordwrap"];
+/// Claude's own cap inside the chain, so a rate-limited `claude` cannot use up the whole 60 s.
+pub const HAIKU_TIMEOUT: Duration = Duration::from_secs(15);
+const CLAUDE_ARGS: &[&str] = &["-p", "--model", "haiku", "--strict-mcp-config", "--tools", "", "--no-session-persistence"];
+const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
+/// Lowest ScaleDown confidence that counts as a merchant or a total.
+const CONFIDENCE: f64 = 0.5;
 
-/// `$DISCORD_INBOX_INSIGHT` split into words if set (empty disables the model), else the default `ollama run`.
-pub fn command() -> Vec<String> {
+/// Which model answers. Unset `$DISCORD_INBOX_INSIGHT` is the Haiku then ScaleDown chain, empty turns the model off, any other value is the command to run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Model {
+    Off,
+    Cmd(Vec<String>),
+    Chain,
+}
+
+pub fn model() -> Model {
     match std::env::var("DISCORD_INBOX_INSIGHT") {
-        Ok(v) => split_words(&v),
-        Err(_) => DEFAULT_CMD.iter().map(|s| s.to_string()).collect(),
+        Ok(v) => match split_words(&v) {
+            words if words.is_empty() => Model::Off,
+            words => Model::Cmd(words),
+        },
+        Err(_) => Model::Chain,
     }
 }
 
@@ -138,6 +154,159 @@ pub fn ask(cmd: &[String], ocr: &str, timeout: Duration) -> Option<Insight> {
     let (program, args) = cmd.split_first()?;
     let out = crate::ocr::run_args(Path::new(program), args, prompt(ocr).as_bytes(), timeout)?;
     parse(&out)
+}
+
+/// `$DISCORD_INBOX_CLAUDE` if set, else `~/.local/bin/claude`.
+pub fn claude_path() -> Option<PathBuf> {
+    env_or_home("DISCORD_INBOX_CLAUDE", ".local/bin/claude")
+}
+
+/// `$DISCORD_INBOX_OPENROUTER_KEY` if set, else `~/.config/discord-inbox/openrouter_key`.
+pub fn key_path() -> Option<PathBuf> {
+    env_or_home("DISCORD_INBOX_OPENROUTER_KEY", ".config/discord-inbox/openrouter_key")
+}
+
+/// `$DISCORD_INBOX_CURL` if set, else `/usr/bin/curl`.
+pub fn curl_path() -> PathBuf {
+    std::env::var_os("DISCORD_INBOX_CURL")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/usr/bin/curl"))
+}
+
+fn env_or_home(var: &str, rel: &str) -> Option<PathBuf> {
+    match std::env::var_os(var).filter(|v| !v.is_empty()) {
+        Some(p) => Some(PathBuf::from(p)),
+        None => std::env::var_os("HOME").map(|h| PathBuf::from(h).join(rel)),
+    }
+}
+
+/// One model call for whichever model is configured. `Off` spawns nothing.
+pub fn ask_model(model: &Model, ocr: &str, timeout: Duration) -> Option<Insight> {
+    match model {
+        Model::Off => None,
+        Model::Cmd(cmd) => ask(cmd, ocr, timeout),
+        Model::Chain => ask_chain(ocr, HAIKU_TIMEOUT, timeout),
+    }
+}
+
+/// Haiku with its own cap, then ScaleDown with whatever is left of `total`. `None` when both fail.
+pub fn ask_chain(ocr: &str, haiku: Duration, total: Duration) -> Option<Insight> {
+    let start = Instant::now();
+    if let Some(i) = ask_haiku(ocr, haiku.min(total)) {
+        return Some(i);
+    }
+    eprintln!("discord-inbox: haiku gave no insight, trying scaledown");
+    let left = total.saturating_sub(start.elapsed());
+    if left.is_zero() {
+        return None;
+    }
+    ask_scaledown(ocr, left)
+}
+
+/// `claude -p --model haiku` on the prompt. `env -u` clears `ANTHROPIC_BASE_URL`, so the local router is never used.
+pub fn ask_haiku(ocr: &str, timeout: Duration) -> Option<Insight> {
+    let bin = claude_path()?;
+    let mut args: Vec<String> = vec![
+        "-u".into(),
+        "ANTHROPIC_BASE_URL".into(),
+        bin.to_string_lossy().into_owned(),
+    ];
+    args.extend(CLAUDE_ARGS.iter().map(|s| s.to_string()));
+    let out = crate::ocr::run_args(Path::new("/usr/bin/env"), &args, prompt(ocr).as_bytes(), timeout)?;
+    parse(&out)
+}
+
+/// ScaleDown Extract through OpenRouter. curl reads the key from its file, so the key is in neither argv nor the body.
+/// No key file means `None` with no process spawned.
+pub fn ask_scaledown(ocr: &str, timeout: Duration) -> Option<Insight> {
+    let key = key_path().filter(|p| p.is_file())?;
+    let secs = timeout.as_secs().max(1).to_string();
+    let args: Vec<String> = [
+        "-s",
+        "--fail",
+        "--max-time",
+        secs.as_str(),
+        "--variable",
+        &format!("KEY@{}", key.display()),
+        "--expand-header",
+        "Authorization: Bearer {{KEY:trim}}",
+        "-H",
+        "Content-Type: application/json",
+        "--data-binary",
+        "@-",
+        OPENROUTER_URL,
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let out = crate::ocr::run_args(&curl_path(), &args, scaledown_request(ocr).as_bytes(), timeout)?;
+    parse_scaledown(&out)
+}
+
+/// The ScaleDown Extract request body: the OCR text (first 4000 chars) and the entities to extract.
+/// `provider.zdr` pins a zero-retention endpoint.
+pub fn scaledown_request(ocr: &str) -> String {
+    let text: String = ocr.chars().take(PROMPT_CHARS).collect();
+    json!({
+        "model": "scaledown/extract",
+        "messages": [{"role": "user", "content": text}],
+        "provider": {"zdr": true, "options": {"scaledown": {"entities": {
+            "merchant": "the name of the store or business that issued this receipt",
+            "total": "the final amount paid: the grand total after tax, as printed",
+            "receipt": {"labels": [
+                {"name": "yes", "rubric": "the text is a purchase receipt, bill or invoice listing items and amounts paid"},
+                {"name": "no", "rubric": "the text is not a receipt: a chat, a document, a sign, a card or anything else"}
+            ]},
+            "category": {"labels": [
+                {"name": "groceries", "rubric": "supermarket, grocery or food market shopping"},
+                {"name": "dining", "rubric": "restaurant, cafe, bubble tea, takeout or delivery"},
+                {"name": "games", "rubric": "video games, game stores, arcades, in-game purchases"},
+                {"name": "household", "rubric": "home goods, cleaning, furniture, hardware, pharmacy"},
+                {"name": "transport", "rubric": "fuel, transit, taxi, rideshare, parking, tolls"},
+                {"name": "school", "rubric": "tuition, textbooks, school supplies, campus fees"},
+                {"name": "other", "rubric": "none of the other categories fit"}
+            ]}
+        }}}}
+    })
+    .to_string()
+}
+
+/// Reads the ScaleDown response: `choices[0].message.content` is a JSON string with `entities`.
+/// `None` when the call failed or the content is not that JSON.
+pub fn parse_scaledown(body: &str) -> Option<Insight> {
+    let v: Value = serde_json::from_str(body).ok()?;
+    let content = v.pointer("/choices/0/message/content")?.as_str()?;
+    let result: Value = serde_json::from_str(content).ok()?;
+    let entities = result.get("entities")?.as_array()?;
+    // The most confident entity of one type, as (text, confidence).
+    let best = |ty: &str| -> Option<(String, f64)> {
+        entities
+            .iter()
+            .filter(|e| e.get("type").and_then(Value::as_str) == Some(ty))
+            .filter_map(|e| {
+                let text = e.get("text")?.as_str()?.trim().to_string();
+                Some((text, e.get("confidence")?.as_f64()?))
+            })
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+    };
+    let confident = |ty: &str| best(ty).filter(|(_, c)| *c >= CONFIDENCE).map(|(t, _)| t);
+    let merchant = confident("merchant").unwrap_or_default();
+    let total = confident("total")
+        .map(|t| t.strip_prefix('$').unwrap_or(&t).trim().to_string())
+        .unwrap_or_default();
+    let receipt = match best("receipt") {
+        Some((text, _)) => matches!(text.chars().next(), Some('y' | 'Y')),
+        // No classification came back: a found total is the evidence.
+        None => !total.is_empty(),
+    };
+    let category = confident("category").unwrap_or_default().to_ascii_lowercase();
+    Some(Insight {
+        receipt,
+        merchant: or_unknown(merchant),
+        total: or_unknown(total),
+        category: or_unknown(category),
+    })
 }
 
 /// Masks each run of 12 or more digits (single spaces, dashes or line breaks allowed between digits)
@@ -355,7 +524,7 @@ pub async fn compose(msg: &Incoming) -> Option<String> {
     if msg.ocr.is_empty() {
         return None;
     }
-    let cmd = command();
+    let configured = model();
     let mut items: Vec<(String, String, Option<Insight>)> = Vec::new();
     for (i, text) in &msg.ocr {
         let file = msg
@@ -363,11 +532,11 @@ pub async fn compose(msg: &Incoming) -> Option<String> {
             .get(*i)
             .map(|a| a.0.clone())
             .unwrap_or_default();
-        let insight = if cmd.is_empty() {
+        let insight = if configured == Model::Off {
             None
         } else {
-            let (c, t) = (cmd.clone(), mask_cards(text));
-            let got = tokio::task::spawn_blocking(move || ask(&c, &t, TIMEOUT))
+            let (m, t) = (configured.clone(), mask_cards(text));
+            let got = tokio::task::spawn_blocking(move || ask_model(&m, &t, TIMEOUT))
                 .await
                 .ok()
                 .flatten();

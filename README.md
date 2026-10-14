@@ -4,7 +4,7 @@ A Discord bot that takes DMs from two allowlisted accounts and dumps each one (t
 
 Image attachments (png, jpg, heic, webp, gif, tiff, bmp) are read with Apple Vision on this Mac, and the text goes into the note under `## OCR <file>`. Nothing leaves the machine. If OCR fails, that section is simply missing; the note, the ✅ and the retry don't change. `DISCORD_INBOX_OCR` overrides the helper path.
 
-A receipt DM gets a reply in the same DM, sent after the ✅: the OCR text with card numbers masked to the last four digits, then a one-line verdict from a local model (`ollama run qwen3.5:4b`, receipt / merchant / total / category, capped at 60 s; nothing leaves the Mac), then, when `DISCORD_INBOX_BUDGET` is set, the budget left for that month before this receipt. The bot never writes the budget note, and any part that is missing is simply left out; the note, the ✅ and the retry don't change.
+A receipt DM gets a reply in the same DM, sent after the ✅: the OCR text with card numbers masked to the last four digits, then a one-line verdict (receipt / merchant / total / category, capped at 60 s): Claude Haiku first, called directly to Anthropic and never through the local router, then ScaleDown Extract on OpenRouter's zero-data-retention endpoint if Haiku gives none. Card digits are masked before either model sees the text. Then, when `DISCORD_INBOX_BUDGET` is set, the budget left for that month before this receipt. The bot never writes the budget note, and any part that is missing is simply left out; the note, the ✅ and the retry don't change.
 
 ## Setup
 
@@ -14,7 +14,7 @@ A receipt DM gets a reply in the same DM, sent after the ✅: the OCR text with 
 2. Token: `security add-generic-password -s discord-inbox -a discord-inbox -w`
 3. Discord developer portal: bot token, Message Content Intent off. The bot uses DM intents only.
 
-Env overrides: `DISCORD_INBOX_ALLOWED_IDS_FILE`, `DISCORD_INBOX_DIR`, `DISCORD_INBOX_INSIGHT` (the full model command, split on spaces; put a quoted part in `"..."` if it has a space; empty skips the model), `DISCORD_INBOX_BUDGET` (path template where `{month}` becomes the message's `YYYY-MM`; the note needs one line containing "budget" with a `$amount`, and spending lines `YYYY-MM-DD … $amount`).
+Env overrides: `DISCORD_INBOX_ALLOWED_IDS_FILE`, `DISCORD_INBOX_DIR`, `DISCORD_INBOX_INSIGHT` (unset runs the Haiku then ScaleDown chain; empty skips the model; any other value is the full model command, split on spaces, with a quoted part in `"..."` if it has a space), `DISCORD_INBOX_CLAUDE`, `DISCORD_INBOX_CURL` and `DISCORD_INBOX_OPENROUTER_KEY` (paths: the Claude CLI, curl, and the OpenRouter key file, which defaults to `~/.config/discord-inbox/openrouter_key`; no key file means no ScaleDown call), `DISCORD_INBOX_BUDGET` (path template where `{month}` becomes the message's `YYYY-MM`; the note needs one line containing "budget" with a `$amount`, and spending lines `YYYY-MM-DD … $amount`).
 
 ## Run and test
 
