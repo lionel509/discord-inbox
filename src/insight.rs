@@ -28,7 +28,7 @@ pub enum Model {
 pub fn model() -> Model {
     match std::env::var("DISCORD_INBOX_INSIGHT") {
         Ok(v) => match split_words(&v) {
-            words if words.is_empty() => Model::Off,
+            words if words.iter().all(|w| w.is_empty()) => Model::Off,
             words => Model::Cmd(words),
         },
         Err(_) => Model::Chain,
@@ -196,7 +196,12 @@ pub fn ask_chain(ocr: &str, haiku: Duration, total: Duration) -> Option<Insight>
     if let Some(i) = ask_haiku(ocr, haiku.min(total)) {
         return Some(i);
     }
-    eprintln!("discord-inbox: haiku gave no insight, trying scaledown");
+    eprintln!("discord-inbox: haiku gave no insight");
+    if key_path().filter(|p| p.is_file()).is_none() {
+        eprintln!("discord-inbox: no openrouter key file, skipping scaledown");
+        return None;
+    }
+    eprintln!("discord-inbox: trying scaledown");
     let left = total.saturating_sub(start.elapsed());
     if left.is_zero() {
         return None;
@@ -532,7 +537,7 @@ pub async fn compose(msg: &Incoming) -> Option<String> {
             .get(*i)
             .map(|a| a.0.clone())
             .unwrap_or_default();
-        let insight = if configured == Model::Off {
+        let insight = if configured == Model::Off || text.trim().is_empty() {
             None
         } else {
             let (m, t) = (configured.clone(), mask_cards(text));
