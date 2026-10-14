@@ -366,3 +366,38 @@ fn quoted_empty_insight_is_off() {
     }
     std::env::remove_var("DISCORD_INBOX_INSIGHT");
 }
+
+/// B1 and B2: a ScaleDown answer with no receipt label and no total is a failure, not a verdict,
+/// so Haiku answers. An explicit "no" receipt label stays a verdict.
+#[test]
+fn scaledown_without_verdict_falls_through_to_haiku() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let cap = init();
+    std::env::remove_var("DISCORD_INBOX_INSIGHT");
+    std::env::set_var("DISCORD_INBOX_OPENROUTER_KEY", cap.join("openrouter_key"));
+    let s = Duration::from_secs(1);
+    let total = Duration::from_secs(3);
+
+    // Parser: no receipt label and no total gives no insight at all.
+    assert_eq!(insight::parse_scaledown(&body_with(vec![])), None);
+    assert_eq!(insight::parse_scaledown(&body_with(vec![ent("Hua Lian", "merchant", 0.93)])), None);
+    let no = insight::parse_scaledown(&body_with(vec![ent("no", "receipt", 0.9)])).expect("explicit no");
+    assert!(!no.receipt);
+
+    // Chain, B1: empty entities, so Haiku answers.
+    fs::write(cap.join("openrouter.json"), body_with(vec![])).unwrap();
+    let b1 = insight::ask_chain("TRADER JOES", s, total);
+    // Chain, B2: merchant only, so Haiku answers.
+    fs::write(cap.join("openrouter.json"), body_with(vec![ent("Hua Lian", "merchant", 0.93)])).unwrap();
+    let b2 = insight::ask_chain("HUA LIAN 2 MILK", s, total);
+    // Chain: an explicit "no" receipt is a verdict, and Haiku is not spawned.
+    fs::write(cap.join("openrouter.json"), body_with(vec![ent("no", "receipt", 0.9)])).unwrap();
+    let _ = fs::remove_file(cap.join("claude.env"));
+    let c = insight::ask_chain("A CHAT MESSAGE", s, total);
+    fs::write(cap.join("openrouter.json"), openrouter_body()).unwrap();
+
+    assert_eq!(b1.expect("haiku after empty scaledown").merchant, "Haiku Mart");
+    assert_eq!(b2.expect("haiku after merchant-only scaledown").merchant, "Haiku Mart");
+    assert!(!c.expect("explicit no verdict").receipt);
+    assert!(!cap.join("claude.env").exists(), "haiku spawned after an explicit no");
+}
