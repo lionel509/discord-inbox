@@ -58,6 +58,14 @@ impl Inbound for LiveMsg {
             .map(|_| ())
             .map_err(|e| e.to_string())
     }
+    async fn reply(&self, text: &str) -> Result<(), String> {
+        self.msg
+            .channel_id
+            .say(&self.http, text)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
 }
 
 /// The Discord history calls, adapted to the lib's `History`.
