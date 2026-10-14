@@ -245,12 +245,36 @@ async fn chain_end_to_end() {
     assert!(!reply.contains("4111"), "{reply}");
 }
 
+/// Runs the built Vision helper on a committed synthetic receipt image (image on stdin, text on stdout).
+fn vision_reads(fixture: &str) -> String {
+    use std::io::Write;
+    let img = fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(fixture)).unwrap();
+    let mut child = std::process::Command::new(env!("DISCORD_INBOX_VISION"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("the Vision helper did not build or start");
+    child.stdin.take().unwrap().write_all(&img).unwrap();
+    let out = child.wait_with_output().unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// Review finding 1 and 2: the built helper reads a synthetic Traditional-Chinese receipt (store name,
+/// 總計 line, amount), and a synthetic English receipt still gives its TOTAL line and amount.
 #[test]
 fn vision_helper_reads_chinese() {
-    let swift = include_str!("../src/vision.swift");
-    assert!(swift.contains("zh-Hant"), "vision.swift lists no zh-Hant");
-    assert!(swift.contains("zh-Hans"), "vision.swift lists no zh-Hans");
-    assert!(Path::new(env!("DISCORD_INBOX_VISION")).is_file(), "the Vision helper did not build");
+    let zh = vision_reads("receipt_zh.png");
+    assert!(zh.contains("華聯"), "store name lost: {zh}");
+    assert!(zh.contains("總計"), "總計 line lost: {zh}");
+    assert!(zh.contains("9.70"), "amount lost: {zh}");
+}
+
+#[test]
+fn vision_helper_reads_english_receipt() {
+    let en = vision_reads("receipt_en.png");
+    assert!(en.contains("TOTAL"), "TOTAL line lost: {en}");
+    assert!(en.contains("9.70"), "amount lost: {en}");
 }
 
 /// Review finding 1: a photo whose OCR text is blank must not reach either model.
