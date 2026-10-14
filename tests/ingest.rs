@@ -35,7 +35,7 @@ fn ocr_stub() -> &'static Path {
         let path = std::env::temp_dir().join(format!("di-ocr-stub-{}", std::process::id()));
         let body = r#"#!/bin/sh
 in=$(cat)
-case "$in" in *receipt*) printf 'TRADER JOES\nTOTAL  12.34\nVISA 1234\n' ;; *) exit 1 ;; esac
+case "$in" in *card*) printf 'TRADER JOES\nTOTAL  12.34\nVISA 4111 1111 1111 1111\n' ;; *down*) printf 'MODELDOWN\nTOTAL  1.00\n' ;; *receipt*) printf 'TRADER JOES\nTOTAL  12.34\nVISA 1234\n' ;; *) exit 1 ;; esac
 "#;
         fs::write(&path, body).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
@@ -44,9 +44,35 @@ case "$in" in *receipt*) printf 'TRADER JOES\nTOTAL  12.34\nVISA 1234\n' ;; *) e
     })
 }
 
+/// Stands in for the local model: reads the prompt on stdin. Set once, with a budget note, for the whole binary.
+fn insight_stub() {
+    static STUB: OnceLock<()> = OnceLock::new();
+    STUB.get_or_init(|| {
+        let pid = std::process::id();
+        let path = std::env::temp_dir().join(format!("di-insight-stub-{pid}"));
+        let body = r#"#!/bin/sh
+in=$(cat)
+case "$in" in
+  *MODELDOWN*) exit 1 ;;
+  *TRADER*) printf '%s\n' "receipt: yes" "merchant: Trader Joe's" "total: 12.34" "category: groceries" ;;
+  *) printf 'receipt: no\n' ;;
+esac
+"#;
+        fs::write(&path, body).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        let budget = std::env::temp_dir().join(format!("di-budget-{pid}"));
+        let _ = fs::remove_dir_all(&budget);
+        fs::create_dir_all(&budget).unwrap();
+        fs::write(budget.join("2026-10.md"), "budget: $800\n- 2026-10-02 Groceries $45.10\n| 2026-10-05 | Lunch | $12.90 |\n").unwrap();
+        std::env::set_var("DISCORD_INBOX_INSIGHT", &path);
+        std::env::set_var("DISCORD_INBOX_BUDGET", budget.join("{month}.md"));
+    });
+}
+
 /// A fresh scratch dir; returns its `Inbox` path, which is NOT created.
 fn scratch(name: &str) -> PathBuf {
     ocr_stub();
+    insight_stub();
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let dir = std::env::temp_dir().join(format!("di-ingest-{}-{name}-{n}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
@@ -86,9 +112,12 @@ struct World {
     inbox: PathBuf,
     cdn_down: AtomicBool,
     react_fails: AtomicBool,
+    reply_fails: AtomicBool,
     /// msg id -> (downloads, reacts)
     calls: Mutex<HashMap<u64, (usize, usize)>>,
     note_at_react: Mutex<HashMap<u64, bool>>,
+    /// (msg id, text) for every reply attempt, failed or not.
+    replies: Mutex<Vec<(u64, String)>>,
 }
 
 impl World {
@@ -97,9 +126,20 @@ impl World {
             inbox: inbox.to_path_buf(),
             cdn_down: AtomicBool::new(false),
             react_fails: AtomicBool::new(false),
+            reply_fails: AtomicBool::new(false),
             calls: Mutex::new(HashMap::new()),
             note_at_react: Mutex::new(HashMap::new()),
+            replies: Mutex::new(Vec::new()),
         })
+    }
+    fn replies_for(&self, id: u64) -> Vec<String> {
+        self.replies
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, _)| *m == id)
+            .map(|(_, t)| t.clone())
+            .collect()
     }
     fn add_download(&self, id: u64) {
         self.calls.lock().unwrap().entry(id).or_insert((0, 0)).0 += 1;
@@ -163,6 +203,17 @@ impl Inbound for FakeMsg {
             .insert(self.spec.id, at);
         if self.w.react_fails.load(Ordering::SeqCst) {
             return Err("react 500".to_string());
+        }
+        Ok(())
+    }
+    async fn reply(&self, text: &str) -> Result<(), String> {
+        self.w
+            .replies
+            .lock()
+            .unwrap()
+            .push((self.spec.id, text.to_string()));
+        if self.w.reply_fails.load(Ordering::SeqCst) {
+            return Err("reply 500".to_string());
         }
         Ok(())
     }
@@ -789,4 +840,90 @@ async fn pending_download_keeps_ocr_and_retry_semantics() {
     let text = fs::read_to_string(note(&inbox, 320)).unwrap();
     assert_eq!(text.matches("## OCR").count(), 2, "{text}");
     assert!(!in_retry(&inbox, 320));
+}
+
+/// A receipt DM gets exactly one reply, after the tick; re-ingest and catch-up add none.
+#[tokio::test]
+async fn receipt_dm_replies_once_after_tick() {
+    let inbox = scratch("reply-once");
+    let w = World::new(&inbox);
+    let s = spec(MAIN, MAIN_CH, 100, &[("receipt.png", b"receipt")]);
+    assert_eq!(ingest(&allow(), &inbox, &msg(&w, &s)).await, Outcome::Saved);
+    assert_eq!(w.reacts(100), 1);
+    let replies = w.replies_for(100);
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    let text = &replies[0];
+    assert!(text.contains("Receipt: Trader Joe's · $12.34 · groceries"), "{text}");
+    assert!(text.contains("Budget left before this: $742.00 of $800.00 (2026-10)"), "{text}");
+    assert!(text.contains("TRADER JOES"), "{text}");
+    assert_eq!(ingest(&allow(), &inbox, &msg(&w, &s)).await, Outcome::Skipped);
+    let hist = FakeHistory::new(&w, vec![s.clone()]);
+    catch_up(&allow(), &inbox, &hist).await;
+    assert_eq!(w.replies_for(100).len(), 1);
+}
+
+/// Card digits never reach the reply: only the last four survive.
+#[tokio::test]
+async fn reply_masks_card_digits() {
+    let inbox = scratch("reply-mask");
+    let w = World::new(&inbox);
+    let s = spec(MAIN, MAIN_CH, 101, &[("receipt.png", b"receipt card")]);
+    assert_eq!(ingest(&allow(), &inbox, &msg(&w, &s)).await, Outcome::Saved);
+    let replies = w.replies_for(101);
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert!(replies[0].contains("**** **** **** 1111"), "{}", replies[0]);
+    assert!(!replies[0].contains("4111"), "{}", replies[0]);
+}
+
+/// Nothing to say means no reply: plain text, strangers, a pending receipt.
+#[tokio::test]
+async fn no_reply_when_nothing_to_say() {
+    let inbox = scratch("reply-none");
+    let w = World::new(&inbox);
+    let good = spec(MAIN, MAIN_CH, 102, &[("good.txt", b"hello")]);
+    assert_eq!(ingest(&allow(), &inbox, &msg(&w, &good)).await, Outcome::Saved);
+    assert!(w.replies_for(102).is_empty());
+
+    let stranger = spec(STRANGER, STRANGER_CH, 103, &[("receipt.png", b"receipt")]);
+    assert_eq!(ingest(&allow(), &inbox, &msg(&w, &stranger)).await, Outcome::Ignored);
+    assert!(w.replies_for(103).is_empty());
+    assert_eq!(w.reacts(103), 0);
+
+    w.cdn_down.store(true, Ordering::SeqCst);
+    let pending = spec(MAIN, MAIN_CH, 104, &[("bad.jpg", b"b"), ("receipt.png", b"receipt")]);
+    assert_eq!(ingest(&allow(), &inbox, &msg(&w, &pending)).await, Outcome::Pending);
+    assert!(w.replies_for(104).is_empty());
+
+    w.cdn_down.store(false, Ordering::SeqCst);
+    let hist = FakeHistory::new(&w, vec![pending.clone()]);
+    catch_up(&allow(), &inbox, &hist).await;
+    assert_eq!(w.replies_for(104).len(), 1);
+}
+
+/// With the model down the reply is OCR only, and a failed send changes neither the note nor the tick.
+#[tokio::test]
+async fn reply_without_model_or_on_send_failure_changes_nothing() {
+    let inbox_a = scratch("reply-model-down");
+    let w_a = World::new(&inbox_a);
+    let down = spec(MAIN, MAIN_CH, 106, &[("receipt.png", b"receipt down")]);
+    assert_eq!(ingest(&allow(), &inbox_a, &msg(&w_a, &down)).await, Outcome::Saved);
+    let text = &w_a.replies_for(106)[0];
+    assert!(text.contains("MODELDOWN"), "{text}");
+    assert!(!text.contains("Receipt:") && !text.contains("Budget"), "{text}");
+
+    let inbox_b = scratch("reply-clean");
+    let w_b = World::new(&inbox_b);
+    let plain = spec(MAIN, MAIN_CH, 105, &[("receipt.png", b"receipt")]);
+    assert_eq!(ingest(&allow(), &inbox_b, &msg(&w_b, &plain)).await, Outcome::Saved);
+
+    let inbox_c = scratch("reply-send-fails");
+    let w_c = World::new(&inbox_c);
+    w_c.reply_fails.store(true, Ordering::SeqCst);
+    assert_eq!(ingest(&allow(), &inbox_c, &msg(&w_c, &plain)).await, Outcome::Saved);
+    assert_eq!(w_c.reacts(105), 1);
+    assert!(!in_retry(&inbox_c, 105));
+    assert_eq!(
+        fs::read(note(&inbox_c, 105)).unwrap(),
+        fs::read(note(&inbox_b, 105)).unwrap()
+    );
 }
