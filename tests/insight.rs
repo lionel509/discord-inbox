@@ -189,8 +189,8 @@ async fn model_command_keeps_a_quoted_path_and_masks_its_reply() {
     // Both checks share one test because DISCORD_INBOX_INSIGHT is process-global.
     std::env::set_var("DISCORD_INBOX_INSIGHT", "\"/Users/test/Discord Inbox/bin/model\" --flag");
     assert_eq!(
-        insight::command(),
-        vec!["/Users/test/Discord Inbox/bin/model".to_string(), "--flag".to_string()]
+        insight::model(),
+        insight::Model::Cmd(vec!["/Users/test/Discord Inbox/bin/model".to_string(), "--flag".to_string()])
     );
 
     // A stub model that echoes a card number in its merchant line, as a photo of a card could.
