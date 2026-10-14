@@ -1,6 +1,8 @@
 use discord_inbox::allowlist::{self, Allowlist};
 use discord_inbox::dump;
-use discord_inbox::ingest::{catch_up, ingest, History, Inbound, PAGE};
+use discord_inbox::chat::{self, OpenRouter};
+use discord_inbox::ingest::{catch_up_with, ingest_with, Filer, History, Inbound, PAGE};
+use discord_inbox::vaults::Vaults;
 use serenity::all::{
     ChannelId, Client, Context, EventHandler, GatewayIntents, GetMessages, Http, Message,
     MessageId, ReactionType, Ready, UserId,
@@ -134,30 +136,33 @@ impl History for Live {
 struct Handler {
     allow: Allowlist,
     inbox: PathBuf,
+    filer: Filer,
 }
 
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, _: Ready) {
         eprintln!("discord-inbox: connected");
-        catch_up(
+        catch_up_with(
             &self.allow,
             &self.inbox,
             &Live {
                 http: ctx.http.clone(),
             },
+            &self.filer,
         )
         .await;
     }
 
     async fn message(&self, ctx: Context, msg: Message) {
-        let _ = ingest(
+        let _ = ingest_with(
             &self.allow,
             &self.inbox,
             &LiveMsg {
                 http: ctx.http.clone(),
                 msg,
             },
+            &self.filer,
         )
         .await;
     }
@@ -222,9 +227,24 @@ async fn main() -> ExitCode {
         Err(e) => return fail(format!("keychain item discord-inbox not readable: {e}")),
     };
 
+    let filer = match OpenRouter::from_key_file(&chat::key_path()) {
+        Some(c) => Filer {
+            chat: Arc::new(c),
+            vaults: Vaults::new(Vaults::default_root()),
+        },
+        None => {
+            eprintln!("discord-inbox: no openrouter key, chat replies off");
+            Filer::off()
+        }
+    };
+
     // 3. DMs only: no guild intents, no message content intent.
     let mut client = match Client::builder(&token, GatewayIntents::DIRECT_MESSAGES)
-        .event_handler(Handler { allow, inbox })
+        .event_handler(Handler {
+            allow,
+            inbox,
+            filer,
+        })
         .await
     {
         Ok(c) => c,
