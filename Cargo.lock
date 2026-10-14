@@ -334,6 +334,7 @@ name = "discord-inbox"
 version = "0.1.0"
 dependencies = [
  "security-framework",
+ "serde_json",
  "serenity",
  "sha2",
  "tokio",

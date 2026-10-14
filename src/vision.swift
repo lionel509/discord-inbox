@@ -6,6 +6,9 @@ let data = FileHandle.standardInput.readDataToEndOfFile()
 let request = VNRecognizeTextRequest()
 request.recognitionLevel = .accurate
 request.usesLanguageCorrection = true
+// Receipts here are Traditional or Simplified Chinese with English mixed in; the default list is English only.
+request.automaticallyDetectsLanguage = true
+request.recognitionLanguages = ["zh-Hant", "zh-Hans", "en-US"]
 do {
     try VNImageRequestHandler(data: data, options: [:]).perform([request])
 } catch {
