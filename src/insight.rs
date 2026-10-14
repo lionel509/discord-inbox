@@ -75,10 +75,32 @@ pub fn prompt(ocr: &str) -> String {
 }
 
 /// Reads `key: value` lines. `receipt` is required; the rest default to "unknown".
+/// Drop terminal escape sequences (`ESC [ ... final`) that `ollama run` emits even when piped.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if c == '\u{1b}' {
+            if it.peek() == Some(&'[') {
+                it.next();
+                while let Some(n) = it.next() {
+                    if ('\u{40}'..='\u{7e}').contains(&n) {
+                        break;
+                    }
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 pub fn parse(output: &str) -> Option<Insight> {
     let mut receipt = None;
     let (mut merchant, mut total, mut category) = (String::new(), String::new(), String::new());
-    for line in output.lines() {
+    let clean = strip_ansi(output);
+    for line in clean.lines() {
         let Some((key, value)) = line.split_once(':') else {
             continue;
         };
@@ -137,7 +159,7 @@ pub fn mask_cards(text: &str) -> String {
                 j += 1;
             } else if {
                 let mut k = j;
-                while k < chars.len() && k - j < 3 && matches!(chars[k], ' ' | '-' | '\n' | '\r') {
+                while k < chars.len() && k - j < 8 && matches!(chars[k], ' ' | '-' | '\u{2013}' | '\u{2014}' | '\n' | '\r' | '\t') {
                     k += 1;
                 }
                 k > j && k < chars.len() && chars[k].is_ascii_digit()
