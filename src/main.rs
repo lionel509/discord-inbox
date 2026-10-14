@@ -3,7 +3,7 @@ use discord_inbox::dump;
 use discord_inbox::ingest::{catch_up, ingest, History, Inbound, PAGE};
 use serenity::all::{
     ChannelId, Client, Context, EventHandler, GatewayIntents, GetMessages, Http, Message,
-    MessageId, Ready, UserId,
+    MessageId, ReactionType, Ready, UserId,
 };
 use serenity::async_trait;
 use std::fs;
@@ -51,12 +51,29 @@ impl Inbound for LiveMsg {
             .await
             .map_err(|e| e.to_string())
     }
-    async fn react(&self) -> Result<(), String> {
+    async fn react(&self, emoji: &str) -> Result<(), String> {
         self.msg
-            .react(&self.http, '✅')
+            .react(&self.http, ReactionType::Unicode(emoji.to_string()))
             .await
             .map(|_| ())
             .map_err(|e| e.to_string())
+    }
+    async fn unreact(&self, emoji: &str) -> Result<(), String> {
+        self.msg
+            .delete_reaction(&self.http, None, ReactionType::Unicode(emoji.to_string()))
+            .await
+            .map_err(|e| e.to_string())
+    }
+    fn own_reactions(&self) -> Vec<String> {
+        self.msg
+            .reactions
+            .iter()
+            .filter(|r| r.me)
+            .filter_map(|r| match &r.reaction_type {
+                ReactionType::Unicode(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect()
     }
     async fn reply(&self, text: &str) -> Result<(), String> {
         self.msg

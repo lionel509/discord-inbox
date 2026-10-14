@@ -46,8 +46,14 @@ impl Inbound for DemoMsg {
     async fn download(&self, _i: usize) -> Result<Vec<u8>, String> {
         Ok(self.bytes.clone())
     }
-    async fn react(&self) -> Result<(), String> {
+    async fn react(&self, _emoji: &str) -> Result<(), String> {
         Ok(())
+    }
+    async fn unreact(&self, _emoji: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn own_reactions(&self) -> Vec<String> {
+        Vec::new()
     }
     async fn reply(&self, text: &str) -> Result<(), String> {
         println!("-- reply --\n{text}");

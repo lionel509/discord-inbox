@@ -11,7 +11,9 @@
 //! Without them the demo uses stand-in IDs and says so.
 use discord_inbox::allowlist::{self, Allowlist};
 use discord_inbox::dump::{self, read_cursor, retry_entries, sha256_hex};
-use discord_inbox::ingest::{catch_up, ingest, History, Inbound, Outcome, PAGE};
+use discord_inbox::ingest::{
+    catch_up, ingest, History, Inbound, Outcome, FAILED_MARK, PAGE, PENDING_MARK, SAVED_MARK,
+};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -27,6 +29,20 @@ const THIRD_CH: u64 = 7009;
 
 fn show(path: &Path, tmp: &str) -> String {
     path.display().to_string().replace(tmp, "<tmp>")
+}
+
+/// The mark a message carries, in Lionel's terms. Empty list means no mark.
+fn mark_text(marks: &[String]) -> String {
+    let has = |m: &str| marks.iter().any(|x| x == m);
+    if has(SAVED_MARK) {
+        format!("{SAVED_MARK} (logged in the vault)")
+    } else if has(PENDING_MARK) {
+        format!("{PENDING_MARK} (cached, waiting to be logged)")
+    } else if has(FAILED_MARK) {
+        format!("{FAILED_MARK} (could not be written)")
+    } else {
+        "(no mark)".to_string()
+    }
 }
 
 fn plural(n: usize, word: &str) -> String {
@@ -45,6 +61,7 @@ fn id_from_env(var: &str, fallback: u64) -> (u64, bool) {
 struct World {
     cdn_down: AtomicBool,
     calls: Mutex<HashMap<u64, (usize, usize)>>,
+    marks: Mutex<HashMap<u64, Vec<String>>>,
 }
 
 impl World {
@@ -59,6 +76,9 @@ impl World {
     }
     fn downloads(&self, id: u64) -> usize {
         self.calls.lock().unwrap().get(&id).map_or(0, |c| c.0)
+    }
+    fn marks(&self, id: u64) -> Vec<String> {
+        self.marks.lock().unwrap().get(&id).cloned().unwrap_or_default()
     }
     fn reacts(&self, id: u64) -> usize {
         self.calls.lock().unwrap().get(&id).map_or(0, |c| c.1)
@@ -103,9 +123,23 @@ impl Inbound for DemoMsg {
         }
         Ok(bytes.clone())
     }
-    async fn react(&self) -> Result<(), String> {
+    async fn react(&self, emoji: &str) -> Result<(), String> {
         self.world.count(self.id, true);
+        let mut marks = self.world.marks.lock().unwrap();
+        let v = marks.entry(self.id).or_default();
+        if !v.iter().any(|e| e == emoji) {
+            v.push(emoji.to_string());
+        }
         Ok(())
+    }
+    async fn unreact(&self, emoji: &str) -> Result<(), String> {
+        if let Some(v) = self.world.marks.lock().unwrap().get_mut(&self.id) {
+            v.retain(|e| e != emoji);
+        }
+        Ok(())
+    }
+    fn own_reactions(&self) -> Vec<String> {
+        self.world.marks(self.id)
     }
     async fn reply(&self, _text: &str) -> Result<(), String> {
         Ok(())
@@ -250,7 +284,7 @@ async fn main() {
     let expected = [Outcome::Saved, Outcome::Pending, Outcome::Ignored];
     for ((label, m), want) in live.iter().zip(expected.iter()) {
         let got = ingest(&allow, &inbox, *m).await;
-        println!("{label}: {got:?}");
+        println!("{label}: {got:?} -> {}", mark_text(&world.marks(m.id)));
         if got != *want {
             problems.push(format!("{label}: {got:?}, expected {want:?}"));
         }
@@ -264,7 +298,14 @@ async fn main() {
         alt_id,
         msgs: vec![main_msg.clone(), alt_msg.clone()],
     };
+    let alt_before = world.marks(alt_msg.id);
     catch_up(&allow, &inbox, &history).await;
+    let alt_after = world.marks(alt_msg.id);
+    println!("alt: {} -> {}", mark_text(&alt_before), mark_text(&alt_after));
+    for old in alt_before.iter().filter(|m| !alt_after.contains(m)) {
+        println!("  {old} removed from alt's message");
+    }
+    println!("main: {} (unchanged)", mark_text(&world.marks(main_msg.id)));
     println!("retry list: {} entries", retry_entries(&inbox).len());
 
     let listing = |dir: &Path| -> Vec<String> {
@@ -325,12 +366,15 @@ async fn main() {
     {
         problems.push("the alt attachments are not both on disk".into());
     }
-    if world.reacts(main_msg.id) != 1 || world.reacts(alt_msg.id) != 1 {
+    if world.marks(main_msg.id) != ["✅"] || world.marks(alt_msg.id) != ["✅"] {
         problems.push(format!(
-            "reactions main={} alt={}, expected 1 and 1",
-            world.reacts(main_msg.id),
-            world.reacts(alt_msg.id)
+            "marks main={:?} alt={:?}, expected ✅ and ✅",
+            world.marks(main_msg.id),
+            world.marks(alt_msg.id)
         ));
+    }
+    if !world.marks(third_msg.id).is_empty() {
+        problems.push("the ignored sender got a mark".into());
     }
     if read_cursor(&inbox, MAIN_CH) != Some(main_msg.id) {
         problems.push(format!("main cursor is {:?}", read_cursor(&inbox, MAIN_CH)));
@@ -380,6 +424,40 @@ async fn main() {
             String::from_utf8_lossy(&bytes),
             sha256_hex(&bytes)
         );
+    }
+
+    // The retry fails again: the CDN is still down, so the mark stays on ⏳.
+    println!();
+    println!("== next start, CDN still down ==");
+    world.cdn_down.store(true, Ordering::SeqCst);
+    let fourth_msg = demo_msg(
+        &world,
+        alt_id,
+        ALT_CH,
+        1427000000000000004,
+        "2026-10-13T14:09:45Z",
+        "one more scan",
+        &[("bad-scan.jpg", b"scan bytes")],
+    );
+    let first = ingest(&allow, &inbox, &fourth_msg).await;
+    println!("fourth: {first:?} -> {}", mark_text(&world.marks(fourth_msg.id)));
+    let before_retry = world.marks(fourth_msg.id);
+    let history = DemoHistory {
+        main_id,
+        alt_id,
+        msgs: vec![main_msg.clone(), alt_msg.clone(), fourth_msg.clone()],
+    };
+    catch_up(&allow, &inbox, &history).await;
+    let after_retry = world.marks(fourth_msg.id);
+    println!(
+        "fourth retry: {} -> {}",
+        mark_text(&before_retry),
+        mark_text(&after_retry)
+    );
+    if first != Outcome::Pending || after_retry != [PENDING_MARK.to_string()] {
+        problems.push(format!(
+            "fourth: {first:?} and marks {after_retry:?}, expected Pending and ⏳ to stay"
+        ));
     }
 
     fs::remove_dir_all(&tmp).unwrap();
