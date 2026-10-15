@@ -1,6 +1,7 @@
 use crate::allowlist::Allowlist;
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub struct Incoming {
@@ -261,6 +262,14 @@ fn drop_inbox_copy(p: &Path) {
     }
 }
 
+/// Writes `text` to a brand-new file at `path`. A stale temp file goes first; a planted symlink is removed
+/// as a link, never followed. `create_new` is O_EXCL, so nothing is ever written through an existing path.
+fn write_new(path: &Path, text: &str) -> std::io::Result<()> {
+    let _ = fs::remove_file(path);
+    let mut f = fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+    f.write_all(text.as_bytes())
+}
+
 /// Moves a message's note and attachments from Inbox into `dest_dir/name` and records it in the
 /// `.filed` ledger. Hard links, so an existing file is never overwritten and a clash leaves Inbox
 /// untouched. Same volume only: a cross-volume link fails and is rolled back.
@@ -296,14 +305,14 @@ pub fn file_away(
             fs::hard_link(&src, &to)?;
             made.push(to);
         }
-        fs::write(&tmp, text)?;
+        write_new(&tmp, &text)?;
         fs::hard_link(&tmp, &dest)?;
         made.push(dest.clone());
         fs::remove_file(&tmp)?;
         let mut ledger_text = fs::read_to_string(&ledger).unwrap_or_default();
         ledger_text.push_str(&format!("{} {}\n", msg.msg_id, dest.display()));
         let ledger_tmp = inbox.join(format!("{FILED}.tmp"));
-        fs::write(&ledger_tmp, ledger_text)?;
+        write_new(&ledger_tmp, &ledger_text)?;
         fs::rename(&ledger_tmp, &ledger)
     })();
     if let Err(e) = linked {
