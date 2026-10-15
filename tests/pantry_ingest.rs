@@ -115,4 +115,6 @@ async fn out_of_dm_drops_row() {
     assert!(reply.starts_with("Dropped cod"), "{reply}");
     let note = fs::read_to_string(root.join("Fidelity/Pantry/On Hand.md")).unwrap();
     assert!(!note.contains("| cod |"), "{note}");
+    let kept = fs::read_dir(&inbox).unwrap().filter_map(|e| fs::read_to_string(e.unwrap().path()).ok()).any(|t| t.contains("out of cod"));
+    assert!(kept, "the raw command message stays in the Inbox");
 }

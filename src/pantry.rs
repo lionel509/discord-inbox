@@ -88,7 +88,8 @@ pub fn command(content: &str) -> Option<Command> {
         return Some(Command::Restock { date, all });
     }
     if let Some(rest) = t.strip_prefix("out of ") {
-        if t.ends_with('?') {
+        // Any '?' in the trailing punctuation ("milk?", "milk?!") makes it a question.
+        if t.trim_end().rsplit(|c: char| !c.is_ascii_punctuation()).next().is_some_and(|tail| tail.contains('?')) {
             return None;
         }
         let item = out_text(rest);
@@ -117,7 +118,8 @@ fn whole_food(part: &str) -> Option<&'static str> {
         return None;
     }
     let stem = part.strip_suffix('s');
-    FOODS.iter().find(|(word, _)| *word == part || Some(*word) == stem).map(|(_, canon)| *canon)
+    let stem_es = part.strip_suffix("es");
+    FOODS.iter().find(|(word, _)| *word == part || Some(*word) == stem || Some(*word) == stem_es).map(|(_, canon)| *canon)
 }
 
 /// The canonical foods an `out of` text names: whole food items split on `,` and ` and `.
@@ -125,7 +127,11 @@ fn whole_food(part: &str) -> Option<&'static str> {
 fn out_parts(item: &str) -> Option<Vec<&'static str>> {
     let mut out: Vec<&'static str> = Vec::new();
     for piece in item.split(',').flat_map(|p| p.split(" and ")) {
-        let canon = whole_food(piece.trim())?;
+        let piece = piece.trim();
+        if piece.is_empty() || piece == "and" {
+            continue;
+        }
+        let canon = whole_food(piece)?;
         if !out.contains(&canon) {
             out.push(canon);
         }
@@ -297,7 +303,8 @@ pub fn upsert(rows: &mut Vec<Row>, new: Vec<Row>) {
     for n in new {
         match rows.iter_mut().find(|r| r.item.eq_ignore_ascii_case(&n.item)) {
             Some(r) => {
-                if n.bought >= r.bought {
+                let older = matches!((NaiveDate::parse_from_str(&n.bought, "%Y-%m-%d"), NaiveDate::parse_from_str(&r.bought, "%Y-%m-%d")), (Ok(a), Ok(b)) if a < b);
+                if !older {
                     r.qty = n.qty;
                     r.store = n.store;
                     r.bought = n.bought;

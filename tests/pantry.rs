@@ -371,3 +371,36 @@ fn upsert_keeps_the_newer_purchase_date() {
     pantry::upsert(&mut rows, vec![row("2026-10-01")]);
     assert_eq!(rows[0].bought, "2026-10-08");
 }
+
+#[test]
+fn out_of_accepts_oxford_comma_and_es_plurals_and_refuses_question_bang() {
+    assert!(matches!(pantry::command("out of eggs, milk, and bread"), Some(Command::OutOf(_))));
+    assert!(matches!(pantry::command("out of tomatoes"), Some(Command::OutOf(_))));
+    assert_eq!(pantry::command("out of milk?!"), None);
+    let r = root("outoxford");
+    put(&r, &format!("{SPLIT}/Costco Split — 2026-10-02.md"), &split_note(&[("EGGS", "Lionel"), ("MILK", "Lionel"), ("BREAD", "Lionel"), ("TOMATO", "Lionel")]));
+    pantry::restock(&r, "2026-10-02", false).unwrap();
+    pantry::run(&r, pantry::command("out of eggs, milk, and bread").unwrap(), "2026-10-15").unwrap();
+    pantry::run(&r, pantry::command("out of tomatoes").unwrap(), "2026-10-15").unwrap();
+    let note = read(&r);
+    for f in ["eggs", "milk", "bread", "tomato"] {
+        assert!(!note.contains(&format!("| {f} |")), "{note}");
+    }
+}
+
+#[test]
+fn out_of_milk_keeps_a_row_sharing_its_initial() {
+    let r = root("outinitial");
+    put(&r, &format!("{SPLIT}/Costco Split — 2026-10-02.md"), &split_note(&[("MILK", "Lionel"), ("MUSHROOM", "Lionel")]));
+    pantry::restock(&r, "2026-10-02", false).unwrap();
+    pantry::run(&r, pantry::command("out of milk").unwrap(), "2026-10-15").unwrap();
+    let note = read(&r);
+    assert!(!note.contains("| milk |") && note.contains("| mushroom |"), "{note}");
+}
+
+#[test]
+fn upsert_refreshes_a_row_whose_bought_cell_is_not_iso() {
+    let mut rows = vec![Row { item: "cod".into(), qty: "".into(), store: "A".into(), bought: "Oct 2".into() }];
+    pantry::upsert(&mut rows, vec![Row { item: "cod".into(), qty: "".into(), store: "B".into(), bought: "2026-10-05".into() }]);
+    assert_eq!(rows[0].store, "B");
+}
