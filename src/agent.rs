@@ -38,7 +38,14 @@ pub fn answer(chat: &dyn Chat, lookup: &Lookup, question: &str) -> Result<Answer
     let mut limited: Option<&'static str> = None;
     loop {
         let allow = limited.is_none();
-        let reply = chat.ask_tools(&messages, &tools, allow)?;
+        let mut reply = chat.ask_tools(&messages, &tools, allow)?;
+        if !allow && matches!(reply.turn, Turn::Calls(_)) {
+            // The provider ignored tool_choice "none": ask once more with the tools key left out.
+            let again = chat.ask_tools(&messages, &[], false)?;
+            usage.prompt += reply.usage.prompt;
+            usage.completion += reply.usage.completion;
+            reply = again;
+        }
         usage.prompt += reply.usage.prompt;
         usage.completion += reply.usage.completion;
         match reply.turn {

@@ -236,3 +236,21 @@ fn one_round_of_many_calls_cannot_exceed_max_calls() {
     assert_eq!(tools.len(), 10, "every tool_call_id still gets a reply");
     assert_eq!(tools[9]["content"], "error: lookup limit reached");
 }
+
+#[test]
+fn tool_call_after_limit_retries_without_tools() {
+    struct Stubborn;
+    impl Chat for Stubborn {
+        fn ask(&self, _: &str, _: &str) -> Result<String, String> { Err("unused".into()) }
+        fn ask_tools(&self, _m: &[Value], t: &[Value], _a: bool) -> Result<Reply, String> {
+            let turn = if t.is_empty() { Turn::Text("done".into()) } else {
+                Turn::Calls(vec![ToolCall { id: "c".into(), name: "list_folder".into(), arguments: r#"{"folder":"Private"}"#.into() }])
+            };
+            Ok(Reply { turn, usage: Usage::default() })
+        }
+    }
+    let (lk, _) = lookup("stubborn");
+    let r = answer(&Stubborn, &lk, "q").unwrap();
+    assert_eq!(r.text, "done");
+    assert!(r.limited.is_some());
+}
