@@ -20,12 +20,16 @@ fn body_after<'a>(src: &'a str, start: &str) -> &'a str {
 fn main_rs_is_glue_over_the_lib() {
     let src = main_rs();
     assert!(
-        body_after(&src, "async fn message(").contains("ingest("),
-        "message must call ingest"
+        body_after(&src, "async fn message(").contains("ingest_with("),
+        "message must call ingest_with (the Filer-taking lib entry, plan step 6)"
     );
     assert!(
-        body_after(&src, "async fn ready(").contains("catch_up("),
-        "ready must call catch_up"
+        body_after(&src, "async fn ready(").contains("catch_up_with("),
+        "ready must call catch_up_with (the Filer-taking lib entry, plan step 6)"
+    );
+    assert!(
+        !body_after(&src, "async fn message(").contains("Filer::off"),
+        "message must use the live Filer built in main, never Filer::off"
     );
     for banned in [
         "write_note",

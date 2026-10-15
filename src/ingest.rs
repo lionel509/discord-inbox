@@ -1,7 +1,12 @@
 //! Decision logic for one DM and for the startup catch-up. main.rs only adapts serenity to `Inbound` and `History`. The live path never moves a cursor; only `catch_up` does, and only over messages that are on disk or in `.retry`.
 use crate::allowlist::Allowlist;
 use crate::dump::{self, Incoming};
-use std::path::Path;
+use crate::chat::{Chat, NoChat};
+use crate::redact::sensitive;
+use crate::vaults::{self, Decision, Vaults};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex as StdMutex};
 
 pub const PAGE: usize = 100;
 
@@ -39,6 +44,68 @@ async fn mark<M: Inbound>(m: &M, want: &str) {
             eprintln!("discord-inbox: react {want} on {id} failed: {e}");
         }
     }
+}
+
+/// Clears all three marks, best-effort. Logs only for a mark the message was known to carry.
+async fn clear<M: Inbound>(m: &M) {
+    let id = m.msg_id();
+    let have = m.own_reactions();
+    let same = |a: &str, b: &str| a.replace('\u{FE0F}', "") == b.replace('\u{FE0F}', "");
+    for stale in [SAVED_MARK, PENDING_MARK, FAILED_MARK] {
+        let seen = have.iter().any(|h| same(h, stale));
+        if let Err(e) = m.unreact(stale).await {
+            if seen {
+                eprintln!("discord-inbox: unreact {stale} on {id} failed: {e}");
+            }
+        }
+    }
+}
+
+/// The chat model and the vault folders it may file into. `off()` keeps today's behaviour.
+pub struct Filer {
+    pub chat: Arc<dyn Chat>,
+    pub vaults: Vaults,
+}
+
+impl Filer {
+    pub fn off() -> Filer {
+        Filer {
+            chat: Arc::new(NoChat),
+            vaults: Vaults::new(PathBuf::new()),
+        }
+    }
+}
+
+async fn chat_decision(filer: &Filer, msg: &Incoming) -> Result<Decision, String> {
+    let system = vaults::system_prompt();
+    let ocr: Vec<String> = msg.ocr.iter().map(|(_, t)| sensitive(t)).collect();
+    let user = vaults::user_prompt(&sensitive(&msg.content), &ocr);
+    let chat = filer.chat.clone();
+    let text = tokio::task::spawn_blocking(move || chat.ask(&system, &user))
+        .await
+        .map_err(|e| e.to_string())??;
+    Ok(vaults::parse_decision(&filer.vaults, &text))
+}
+
+/// One reply: where it went, the chat answer, then the receipt verdict if any. Masked and capped.
+pub fn combine(filed: Option<&str>, chat: &str, verdict: Option<&str>) -> String {
+    let mut out = match filed {
+        Some(f) => format!("Filed: {f}"),
+        None => "Kept in Inbox".to_string(),
+    };
+    out.push_str("\n\n");
+    out.push_str(chat);
+    if let Some(v) = verdict {
+        out.push_str("\n\n");
+        out.push_str(v);
+    }
+    let out = sensitive(&out);
+    if out.chars().count() > crate::insight::DISCORD_MAX {
+        let mut cut: String = out.chars().take(1999).collect();
+        cut.push('…');
+        return cut;
+    }
+    out
 }
 
 /// One message, as the decision logic sees it.
@@ -86,14 +153,38 @@ pub trait History: Send + Sync {
 
 /// Gate, download, write and react for one message. Used by the live event and by the catch-up.
 pub async fn ingest<M: Inbound>(allow: &Allowlist, inbox: &Path, m: &M) -> Outcome {
+    ingest_with(allow, inbox, m, &Filer::off()).await
+}
+
+/// One async lock per message id, process-wide. The live event and the catch-up can both reach one DM; each
+/// takes its id's lock around the whole ingest, so the second waits and then sees the first's result.
+/// One empty entry per id stays for the process lifetime: a few bytes per DM.
+static IN_FLIGHT: StdMutex<BTreeMap<u64, Arc<tokio::sync::Mutex<()>>>> = StdMutex::new(BTreeMap::new());
+
+fn id_lock(msg_id: u64) -> Arc<tokio::sync::Mutex<()>> {
+    let mut map = IN_FLIGHT.lock().unwrap_or_else(|p| p.into_inner());
+    map.entry(msg_id).or_default().clone()
+}
+
+pub async fn ingest_with<M: Inbound>(
+    allow: &Allowlist,
+    inbox: &Path,
+    m: &M,
+    filer: &Filer,
+) -> Outcome {
     // Gate first: a sender not on the allowlist gets no download, write, reaction or log line.
     if !allow.contains(m.author_id()) {
         return Outcome::Ignored;
     }
 
     let id = m.msg_id();
+    // Held to the end of this call. A second caller for the same id waits here, then re-runs the skip check below.
+    let lock = id_lock(id);
+    let _one = lock.lock().await;
     let received = m.received();
-    if dump::note_saved(&dump::note_path(inbox, &received, id)) && !dump::in_retry(inbox, id) {
+    if (dump::note_saved(&dump::note_path(inbox, &received, id)) || dump::filed_to(inbox, id).is_some())
+        && !dump::in_retry(inbox, id)
+    {
         return Outcome::Skipped;
     }
 
@@ -153,11 +244,44 @@ pub async fn ingest<M: Inbound>(allow: &Allowlist, inbox: &Path, m: &M) -> Outco
     if let Err(e) = dump::remove_retry(inbox, id) {
         eprintln!("discord-inbox: retry clear for {id} failed: {e}");
     }
-    mark(m, SAVED_MARK).await;
-    // After the tick, so a slow model never delays the ✅. The reply is best-effort and never changes the outcome.
-    if let Some(text) = crate::insight::compose(&incoming).await {
-        if let Err(e) = m.reply(&text).await {
-            eprintln!("discord-inbox: reply on {id} failed: {e}");
+    match chat_decision(filer, &incoming).await {
+        Err(e) => {
+            eprintln!("discord-inbox: chat for {id} failed: {e}");
+            mark(m, SAVED_MARK).await;
+            if let Some(text) = crate::insight::compose(&incoming).await {
+                if let Err(e) = m.reply(&text).await {
+                    eprintln!("discord-inbox: reply on {id} failed: {e}");
+                }
+            }
+        }
+        Ok(d) => {
+            let filed: Option<String> = d.target.and_then(|t| {
+                let dir = filer.vaults.dest_dir(t)?;
+                let name = vaults::note_name(&incoming.received, &d.title);
+                match dump::file_away(
+                    inbox,
+                    &incoming,
+                    &dir,
+                    &name,
+                    &vaults::front_extra(t, &d.tags),
+                    &vaults::hub_line(t),
+                ) {
+                    Ok(_) => Some(format!("{}/{}", t.folder, name)),
+                    Err(e) => {
+                        eprintln!("discord-inbox: file {id} failed: {e}");
+                        None
+                    }
+                }
+            });
+            let verdict = crate::insight::compose(&incoming).await;
+            let text = combine(filed.as_deref(), &d.reply, verdict.as_deref());
+            match m.reply(&text).await {
+                Ok(()) => clear(m).await,
+                Err(e) => {
+                    eprintln!("discord-inbox: reply on {id} failed: {e}");
+                    mark(m, SAVED_MARK).await;
+                }
+            }
         }
     }
     Outcome::Saved
@@ -165,10 +289,14 @@ pub async fn ingest<M: Inbound>(allow: &Allowlist, inbox: &Path, m: &M) -> Outco
 
 /// Startup catch-up: first the retry list, then each allowlisted DM channel from its own cursor.
 pub async fn catch_up<H: History>(allow: &Allowlist, inbox: &Path, h: &H) {
+    catch_up_with(allow, inbox, h, &Filer::off()).await
+}
+
+pub async fn catch_up_with<H: History>(allow: &Allowlist, inbox: &Path, h: &H, filer: &Filer) {
     for (channel, id) in dump::retry_entries(inbox) {
         match h.fetch(channel, id).await {
             Ok(m) => {
-                let _ = ingest(allow, inbox, &m).await;
+                let _ = ingest_with(allow, inbox, &m, filer).await;
             }
             Err(e) => eprintln!("discord-inbox: retry {id} not fetchable: {e}"),
         }
@@ -197,7 +325,7 @@ pub async fn catch_up<H: History>(allow: &Allowlist, inbox: &Path, h: &H) {
             };
             page.sort_by_key(|m| m.msg_id());
             for m in &page {
-                match ingest(allow, inbox, m).await {
+                match ingest_with(allow, inbox, m, filer).await {
                     Outcome::Failed => blocked = true,
                     Outcome::Ignored => {}
                     Outcome::Skipped | Outcome::Saved | Outcome::Pending => {

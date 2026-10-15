@@ -1,6 +1,7 @@
 use crate::allowlist::Allowlist;
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub struct Incoming {
@@ -71,9 +72,10 @@ pub fn note_path(inbox: &Path, received: &str, msg_id: u64) -> PathBuf {
     inbox.join(format!("{}.md", stem(received, msg_id)))
 }
 
-/// Writes attachments first, then the note, so a note on disk always has its files.
-pub fn write_note(inbox: &Path, msg: &Incoming) -> std::io::Result<PathBuf> {
-    fs::create_dir_all(inbox)?;
+/// The note text for a message, plus the attachment file names it lists, in order.
+/// `front_extra` goes after `lane: dump` in the frontmatter, `lead` right after the closing `---`.
+/// Both empty gives the plain note `write_note` has always written.
+fn note_text(msg: &Incoming, front_extra: &str, lead: &str) -> (String, Vec<String>) {
     let base = stem(&msg.received, msg.msg_id);
 
     let mut entries = Vec::new();
@@ -81,10 +83,7 @@ pub fn write_note(inbox: &Path, msg: &Incoming) -> std::io::Result<PathBuf> {
     for (i, (name, bytes)) in msg.attachments.iter().enumerate() {
         let file = format!("{base}_{}_{}", i + 1, sanitize(name));
         match bytes {
-            Some(b) => {
-                fs::write(inbox.join(&file), b)?;
-                entries.push(format!("  - file: {file}\n    sha256: {}\n", sha256_hex(b)));
-            }
+            Some(b) => entries.push(format!("  - file: {file}\n    sha256: {}\n", sha256_hex(b))),
             None => entries.push(format!("  - file: {file}\n    sha256: pending\n")),
         }
         files.push(file);
@@ -95,16 +94,31 @@ pub fn write_note(inbox: &Path, msg: &Incoming) -> std::io::Result<PathBuf> {
     } else {
         format!("attachments:\n{}", entries.concat())
     };
+    // Every note on disk, Inbox or filed, is redacted here: the body and the OCR text.
+    let content = crate::redact::sensitive(&msg.content);
     let mut text = format!(
-        "---\nreceived: {}\nfrom: {}\nmsg_id: {}\nlane: dump\n{attachments}---\n{}\n",
-        msg.received, msg.author_id, msg.msg_id, msg.content
+        "---\nreceived: {}\nfrom: {}\nmsg_id: {}\nlane: dump\n{front_extra}{attachments}---\n{lead}{content}\n",
+        msg.received, msg.author_id, msg.msg_id
     );
-    for (i, t) in &msg.ocr {
+    for (i, raw) in &msg.ocr {
         if let Some(f) = files.get(*i) {
+            let t = crate::redact::sensitive(raw);
             // Longer than any tilde run in the text, so no line of it can close the fence early.
             let longest = t.split(|c: char| c != '~').map(str::len).max().unwrap_or(0);
             let fence = "~".repeat(3.max(longest + 1));
             text.push_str(&format!("\n## OCR {f}\n\n{fence}text\n{t}\n{fence}\n"));
+        }
+    }
+    (text, files)
+}
+
+/// Writes attachments first, then the note, so a note on disk always has its files.
+pub fn write_note(inbox: &Path, msg: &Incoming) -> std::io::Result<PathBuf> {
+    fs::create_dir_all(inbox)?;
+    let (text, files) = note_text(msg, "", "");
+    for (file, (_, bytes)) in files.iter().zip(&msg.attachments) {
+        if let Some(b) = bytes {
+            fs::write(inbox.join(file), b)?;
         }
     }
 
@@ -229,6 +243,94 @@ pub fn remove_retry(inbox: &Path, msg_id: u64) -> std::io::Result<()> {
         return fs::remove_file(inbox.join(RETRY));
     }
     write_retry(inbox, &left)
+}
+
+const FILED: &str = ".filed";
+
+/// The folder a message was filed into, from the `.filed` ledger. Junk lines are skipped.
+pub fn filed_to(inbox: &Path, msg_id: u64) -> Option<String> {
+    let text = fs::read_to_string(inbox.join(FILED)).ok()?;
+    text.lines().rev().find_map(|line| {
+        let (id, dest) = line.split_once(' ')?;
+        (id.parse::<u64>().ok()? == msg_id).then(|| dest.to_string())
+    })
+}
+
+/// Removes an Inbox copy that is already filed. A missing file is fine: duplicates are harmless.
+fn drop_inbox_copy(p: &Path) {
+    if let Err(e) = fs::remove_file(p) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            eprintln!("discord-inbox: could not remove {}: {e}", p.display());
+        }
+    }
+}
+
+/// Writes `text` to a brand-new file at `path`. A stale temp file goes first; a planted symlink is removed
+/// as a link, never followed. `create_new` is O_EXCL, so nothing is ever written through an existing path.
+fn write_new(path: &Path, text: &str) -> std::io::Result<()> {
+    let _ = fs::remove_file(path);
+    let mut f = fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+    f.write_all(text.as_bytes())
+}
+
+/// Moves a message's note and attachments from Inbox into `dest_dir/name` and records it in the
+/// `.filed` ledger. Hard links, so an existing file is never overwritten and a clash leaves Inbox
+/// untouched. Same volume only: a cross-volume link fails and is rolled back.
+pub fn file_away(
+    inbox: &Path,
+    msg: &Incoming,
+    dest_dir: &Path,
+    name: &str,
+    front_extra: &str,
+    lead: &str,
+) -> std::io::Result<PathBuf> {
+    let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    if !dest_dir.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("no folder {}", dest_dir.display()),
+        ));
+    }
+    let (text, files) = note_text(msg, front_extra, lead);
+    let dest = dest_dir.join(name);
+    let tmp = dest_dir.join(format!(".{name}.tmp"));
+    let ledger = inbox.join(FILED);
+
+    // Every link this call creates goes here, so a failure removes exactly what it added.
+    let mut made: Vec<PathBuf> = Vec::new();
+    let linked = (|| -> std::io::Result<()> {
+        for file in &files {
+            let src = inbox.join(file);
+            if !src.is_file() {
+                continue; // a pending attachment has no file yet
+            }
+            let to = dest_dir.join(file);
+            fs::hard_link(&src, &to)?;
+            made.push(to);
+        }
+        write_new(&tmp, &text)?;
+        fs::hard_link(&tmp, &dest)?;
+        made.push(dest.clone());
+        fs::remove_file(&tmp)?;
+        let mut ledger_text = fs::read_to_string(&ledger).unwrap_or_default();
+        ledger_text.push_str(&format!("{} {}\n", msg.msg_id, dest.display()));
+        let ledger_tmp = inbox.join(format!("{FILED}.tmp"));
+        write_new(&ledger_tmp, &ledger_text)?;
+        fs::rename(&ledger_tmp, &ledger)
+    })();
+    if let Err(e) = linked {
+        for p in &made {
+            let _ = fs::remove_file(p);
+        }
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    for file in &files {
+        drop_inbox_copy(&inbox.join(file));
+    }
+    drop_inbox_copy(&note_path(inbox, &msg.received, msg.msg_id));
+    Ok(dest)
 }
 
 #[cfg(test)]

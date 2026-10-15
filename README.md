@@ -4,7 +4,7 @@ A Discord bot that takes DMs from two allowlisted accounts and dumps each one (t
 
 Image attachments (png, jpg, heic, webp, gif, tiff, bmp) are read with Apple Vision on this Mac, and the text goes into the note under `## OCR <file>`. Nothing leaves the machine. If OCR fails, that section is simply missing; the note, the ✅ and the retry don't change. `DISCORD_INBOX_OCR` overrides the helper path.
 
-A receipt DM gets a reply in the same DM, sent after the ✅: the OCR text with card numbers masked to the last four digits, then a one-line verdict (receipt / merchant / total / category, capped at 60 s): ScaleDown Extract on OpenRouter's zero-data-retention endpoint first, when the key file exists and is not empty, then Claude Haiku, called directly to Anthropic and never through the local router, if ScaleDown gives none. With no key file (or an empty one) the verdict is Haiku alone, and if neither gives one there is no verdict line. Card digits are masked before either model sees the text. Then, when `DISCORD_INBOX_BUDGET` is set, the budget left for that month before this receipt. The bot never writes the budget note, and any part that is missing is simply left out; the note, the ✅ and the retry don't change.
+A receipt DM gets a reply in the same DM, sent after the ✅: the OCR text with card numbers masked to the last four digits, then a one-line verdict (receipt / merchant / total / category, capped at 60 s): ScaleDown Extract on OpenRouter's zero-data-retention endpoint first, when the key file exists and is not empty, then Claude Haiku, called directly to Anthropic and never through the local router, if ScaleDown gives none. With no key file (or an empty one) the verdict is Haiku alone, and if neither gives one there is no verdict line. Sensitive values are redacted by one deterministic pass (`src/redact.rs`, no model) before either model sees the text, and again before the reply goes back to Discord. See Privacy below. Then, when `DISCORD_INBOX_BUDGET` is set, the budget left for that month before this receipt. The bot never writes the budget note, and any part that is missing is simply left out; the note, the ✅ and the retry don't change.
 
 ## Setup
 
@@ -22,6 +22,40 @@ Env overrides: `DISCORD_INBOX_ALLOWED_IDS_FILE`, `DISCORD_INBOX_DIR`, `DISCORD_I
 - `cargo test`: unit tests, plus integration tests that check refuse-to-start.
 - `sh examples/demo.sh`: offline demo of the allowlist gate, the Inbox writer, the retry list and the refuse-to-start check. No Discord, no token.
 - `DISCORD_INBOX_DIR=<scratch> cargo run --example ocr_demo -- <image>...`: writes a note per image through the real ingest path and prints it. Use a scratch dir, never your real Inbox.
+
+## Chat replies and filing
+
+Each text DM is sent to `xiaomi/mimo-v2.6-flash` on OpenRouter (zero data retention on, 30 s timeout). The key is read from `~/.config/discord-inbox/openrouter_key` (override: `DISCORD_INBOX_OPENROUTER_KEY_FILE`); with no key the bot starts anyway and chat replies are off. Vault root: `$DISCORD_INBOX_VAULTS_DIR`, default `~/Documents`.
+
+The model picks one folder from a fixed table, matched exactly; its text never becomes part of a path, and a folder that does not exist is never created. Anything else stays in Inbox.
+
+| Folder | For |
+|---|---|
+| `Citadel/Ideas` | software, electronics, robotics, 3D printing, AI tooling, project ideas |
+| `Fidelity/Want to Make` | recipes, cooking, things to make by hand |
+| `BlackRock` | school |
+| `Berkshire` | business, the store, channels |
+| `Goldman` | career |
+| `State Street` | money |
+| `Mirae` | Korean or Chinese study |
+| `! Todo` | tasks and reminders |
+
+A filed note (and its attachments) moves out of Inbox with a hard link, never overwriting; `Inbox/.filed` records `msg_id dest` so a moved note is not ingested or answered again. The reply says `Filed: <folder>/<note>` or `Kept in Inbox`, then the answer, then any receipt verdict.
+
+A tick no longer means "saved". ✅ now means "saved but could not reply" (no key, chat error, or the reply failed to send). A successful reply carries no mark.
+
+Demo: `cargo run --release --example chat_demo [-- --live]` (temp folders only).
+
+## Privacy
+
+One function, `redact::sensitive`, runs on every text that is written to disk, sent to a model, or sent back to Discord. It masks, in code and with no model:
+
+- card numbers, to the last four digits (`mask_cards`). A digit run right after `order`, `station`, `cashier`, `invoice`, `transaction`, `ref` or `reference` is a store number and is kept, unless it is a 13 to 19 digit Luhn-valid card.
+- US SSNs (`###-##-####`), to `***-**-1234`.
+- bank account and routing numbers after `account`, `acct`, `routing` or `ABA`: 6 to 17 digits, all but the last four masked.
+- secrets: `sk-`, `ghp_`, `github_pat_`, `xox[abpr]-`, `AKIA` keys, `Bearer` tokens of 20+ characters (the word `Bearer` is kept), and `password`, `passwd` or `pwd` values after `=` or `:` (the label is kept). Each secret becomes `[redacted]`.
+
+Totals, dates, phone numbers and order numbers are left alone (`tests/redact.rs` pins a receipt and an order line). It is a pattern pass, not a guarantee: a secret in another shape gets through.
 
 ## When a download fails
 
