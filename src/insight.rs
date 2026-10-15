@@ -78,7 +78,7 @@ pub struct Insight {
 
 /// The prompt sent on stdin: the instructions, a blank line, then the OCR text (first 4000 chars).
 pub fn prompt(ocr: &str) -> String {
-    let text: String = ocr.chars().take(PROMPT_CHARS).collect();
+    let text: String = crate::redact::sensitive(ocr).chars().take(PROMPT_CHARS).collect();
     format!(
         "You classify text read from a photo. Reply with exactly these four lines and nothing else:\n\
          receipt: yes or no\n\
@@ -261,7 +261,7 @@ pub fn ask_scaledown(ocr: &str, timeout: Duration) -> Option<Insight> {
 /// The ScaleDown Extract request body: the OCR text (first 4000 chars) and the entities to extract.
 /// `provider.zdr` pins a zero-retention endpoint.
 pub fn scaledown_request(ocr: &str) -> String {
-    let text: String = ocr.chars().take(PROMPT_CHARS).collect();
+    let text: String = crate::redact::sensitive(ocr).chars().take(PROMPT_CHARS).collect();
     json!({
         "model": "scaledown/extract",
         "messages": [{"role": "user", "content": text}],
@@ -571,7 +571,7 @@ pub async fn compose(msg: &Incoming) -> Option<String> {
         let insight = if configured == Model::Off || text.trim().is_empty() {
             None
         } else {
-            let (m, t) = (configured.clone(), mask_cards(text));
+            let (m, t) = (configured.clone(), crate::redact::sensitive(text));
             let got = tokio::task::spawn_blocking(move || ask_model(&m, &t, TIMEOUT))
                 .await
                 .ok()
@@ -585,7 +585,7 @@ pub async fn compose(msg: &Incoming) -> Option<String> {
             }
             got
         };
-        items.push((file, mask_cards(text), insight));
+        items.push((file, crate::redact::sensitive(text), insight));
     }
     let any_receipt = items
         .iter()
@@ -596,5 +596,5 @@ pub async fn compose(msg: &Incoming) -> Option<String> {
         None
     };
     // The model's merchant and total are read from the same photo, so mask the whole reply, not only the OCR.
-    Some(mask_cards(&reply_text(&items, budget)))
+    Some(crate::redact::sensitive(&reply_text(&items, budget)))
 }

@@ -94,12 +94,15 @@ fn note_text(msg: &Incoming, front_extra: &str, lead: &str) -> (String, Vec<Stri
     } else {
         format!("attachments:\n{}", entries.concat())
     };
+    // Every note on disk, Inbox or filed, is redacted here: the body and the OCR text.
+    let content = crate::redact::sensitive(&msg.content);
     let mut text = format!(
-        "---\nreceived: {}\nfrom: {}\nmsg_id: {}\nlane: dump\n{front_extra}{attachments}---\n{lead}{}\n",
-        msg.received, msg.author_id, msg.msg_id, msg.content
+        "---\nreceived: {}\nfrom: {}\nmsg_id: {}\nlane: dump\n{front_extra}{attachments}---\n{lead}{content}\n",
+        msg.received, msg.author_id, msg.msg_id
     );
-    for (i, t) in &msg.ocr {
+    for (i, raw) in &msg.ocr {
         if let Some(f) = files.get(*i) {
+            let t = crate::redact::sensitive(raw);
             // Longer than any tilde run in the text, so no line of it can close the fence early.
             let longest = t.split(|c: char| c != '~').map(str::len).max().unwrap_or(0);
             let fence = "~".repeat(3.max(longest + 1));

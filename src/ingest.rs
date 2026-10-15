@@ -2,7 +2,7 @@
 use crate::allowlist::Allowlist;
 use crate::dump::{self, Incoming};
 use crate::chat::{Chat, NoChat};
-use crate::insight::mask_cards;
+use crate::redact::sensitive;
 use crate::vaults::{self, Decision, Vaults};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -78,8 +78,8 @@ impl Filer {
 
 async fn chat_decision(filer: &Filer, msg: &Incoming) -> Result<Decision, String> {
     let system = vaults::system_prompt();
-    let ocr: Vec<String> = msg.ocr.iter().map(|(_, t)| mask_cards(t)).collect();
-    let user = vaults::user_prompt(&mask_cards(&msg.content), &ocr);
+    let ocr: Vec<String> = msg.ocr.iter().map(|(_, t)| sensitive(t)).collect();
+    let user = vaults::user_prompt(&sensitive(&msg.content), &ocr);
     let chat = filer.chat.clone();
     let text = tokio::task::spawn_blocking(move || chat.ask(&system, &user))
         .await
@@ -99,7 +99,7 @@ pub fn combine(filed: Option<&str>, chat: &str, verdict: Option<&str>) -> String
         out.push_str("\n\n");
         out.push_str(v);
     }
-    let out = mask_cards(&out);
+    let out = sensitive(&out);
     if out.chars().count() > crate::insight::DISCORD_MAX {
         let mut cut: String = out.chars().take(1999).collect();
         cut.push('…');

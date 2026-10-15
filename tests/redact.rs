@@ -80,13 +80,13 @@ fn app_disk_inbox_note_masks_body_and_ocr() {
         author_id: 1,
         received: "2026-10-14T12:00:00Z".into(),
         content: "paid card 4111 1111 1111 1111, SSN 123-45-6789".into(),
-        attachments: vec![],
+        attachments: vec![("receipt.png".into(), Some(b"img".to_vec()))],
         ocr: vec![(0, "VISA 4111 1111 1111 1111 TOTAL $9.70".into())],
     };
     let path = write_note(&inbox, &msg).unwrap();
     let text = fs::read_to_string(&path).unwrap();
     assert!(!text.contains("4111 1111"), "{text}");
-    assert!(!text.contains("6789"), "{text}");
+    assert!(!text.contains("123-45-6789"), "{text}");
     assert!(text.contains("**** **** **** 1111"), "{text}");
     assert!(text.contains("***-**-6789"), "{text}");
     assert!(text.contains("TOTAL $9.70"), "{text}");
@@ -100,7 +100,7 @@ fn app_disk_filed_note_masks_body_and_ocr() {
         author_id: 1,
         received: "2026-10-14T12:05:00Z".into(),
         content: "sketch, key sk-proj-abcdefghijklmnopqrstuv12".into(),
-        attachments: vec![],
+        attachments: vec![("receipt.png".into(), Some(b"img".to_vec()))],
         ocr: vec![(0, "password=hunter22 TOTAL $9.70".into())],
     };
     write_note(&inbox, &msg).unwrap();
@@ -118,7 +118,7 @@ fn app_disk_filed_note_masks_body_and_ocr() {
 fn app_model_mimo_request_body_masks_card_and_ssn() {
     let body = chat::request_body("system", "card 4111 1111 1111 1111 ssn 123-45-6789").to_string();
     assert!(!body.contains("4111 1111"), "{body}");
-    assert!(!body.contains("6789"), "{body}");
+    assert!(!body.contains("123-45-6789"), "{body}");
     assert!(body.contains("***-**-6789"), "{body}");
 }
 

@@ -74,8 +74,8 @@ pub fn request_body(system: &str, user: &str) -> serde_json::Value {
     serde_json::json!({
         "model": MODEL,
         "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
+            {"role": "system", "content": crate::redact::sensitive(system)},
+            {"role": "user", "content": crate::redact::sensitive(user)},
         ],
         "provider": {"zdr": true},
         "max_tokens": 500,
