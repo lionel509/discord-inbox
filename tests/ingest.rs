@@ -1584,8 +1584,8 @@ async fn question_is_answered_not_filed() {
     assert!(w.marks(330).is_empty(), "{:?}", w.marks(330));
     assert_eq!(chat.calls(), 2);
     let prompts = chat.prompts.lock().unwrap().clone();
-    assert!(prompts[1].contains("- [ ] Eggs"), "{}", prompts[1]);
-    assert!(prompts[1].contains("masking tape"), "{}", prompts[1]);
+    assert!(prompts[1].contains("what is on my Costco list?"), "{}", prompts[1]);
+    assert!(!prompts[1].contains("- [ ] Eggs"), "the notes are read by the tools, not bundled (#49): {}", prompts[1]);
     assert!(!prompts[1].to_lowercase().contains("private"), "{}", prompts[1]);
 }
 
@@ -1789,14 +1789,20 @@ async fn lookup_reads_the_iou_ledger() {
     let rec = root.join("State Street/Assets/Receivables");
     fs::create_dir_all(&rec).unwrap();
     fs::write(rec.join("Who Owes Me.md"), "| Who | Owes |\n| William | $12.00 |\n").unwrap();
+    let mut before = Vec::new();
+    tree_of(&root, &inbox, &mut before);
+    before.sort();
 
     let s = spec_text(MAIN, MAIN_CH, 380, "how much does willam owe me", &[]);
     assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
     let prompts = chat.prompts.lock().unwrap().clone();
     assert_eq!(chat.calls(), 2);
     assert!(prompts[1].contains("how much does willam owe me"), "{}", prompts[1]);
-    assert!(!prompts[1].contains("Notes:"), "the lookup bundle is gone (#49): {}", prompts[1]);
     assert_eq!(w.replies_for(380), vec!["William owes you $12.00.".to_string()]);
+    let mut after = Vec::new();
+    tree_of(&root, &inbox, &mut after);
+    after.sort();
+    assert_eq!(after, before, "the lookup filed or wrote something under the vault (#49)");
 }
 
 /// No ledger file: the lookup still runs over the running notes (#45).
@@ -1812,7 +1818,9 @@ async fn lookup_works_without_the_iou_ledger() {
     let s = spec_text(MAIN, MAIN_CH, 381, "how much does willam owe me", &[]);
     assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
     assert_eq!(w.replies_for(381), vec!["No record of that.".to_string()]);
-    assert!(chat.prompts.lock().unwrap()[1].contains("how much does willam owe me"));
+    let prompts = chat.prompts.lock().unwrap().clone();
+    assert!(prompts[1].contains("how much does willam owe me"), "{}", prompts[1]);
+    assert!(!prompts[1].contains("Notes:"), "the tools read the notes now, not a bundle (#49): {}", prompts[1]);
 }
 
 /// A long DM sent as `message.txt` with an empty body is routed on the file's text, never answered as a lookup (#46 scope add).
