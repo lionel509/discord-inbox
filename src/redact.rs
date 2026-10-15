@@ -323,7 +323,7 @@ fn secret_at(c: &[char], i: usize) -> Option<(usize, usize)> {
         let sep_end = if q < c.len() && (c[q] == '=' || c[q] == ':') {
             q + 1
         } else if PASSWORD_LABELS.contains(label) && word_at(c, q, "is") {
-            q + 2
+            { let s = spaces(c, q + 2); if c.get(s) == Some(&':') { s + 1 } else { q + 2 } }
         } else {
             continue;
         };
