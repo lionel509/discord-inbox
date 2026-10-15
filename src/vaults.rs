@@ -5,7 +5,7 @@
 //! the table, and `dest_dir` refuses anything that is not a real folder directly
 //! under the vault root. `running_path` does the same for the running notes (#40).
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct Target {
     pub key: &'static str,
@@ -97,6 +97,11 @@ impl Vaults {
         RUNNING.iter().find(|r| norm(r.key) == n)
     }
 
+    /// The vault root every folder is read from (#49: the lookup tools are rooted here).
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// The real folder `root/<folder>`, or `None`. Never creates anything; a
     /// symlink that resolves anywhere other than `root/<folder>` is refused.
     pub fn dest_dir(&self, t: &Target) -> Option<PathBuf> {
@@ -157,7 +162,7 @@ pub fn system_prompt() -> String {
         "You file one message from the owner into his vault and reply to it.\n\
          Pick the folder whose key fits best. Keys:\n",
     );
-    s.push_str("Answer — the message asks a question or wants something looked up, with or without a question mark (\"whats on my costco list\", \"where did I put my passport\"): answer it, file nothing\n");
+    s.push_str("Answer — the message asks a question or wants something looked up, with or without a question mark (\"whats on my costco list\", \"where did I put my passport\"): answer it, file nothing; a request for ideas or advice from his notes is also Answer (\"with the ingredients in my pantry what can i make with cod\"): answer it, file nothing\n");
     for t in TARGETS.iter() {
         s.push_str(&format!("{} — {}\n", t.key, t.hint));
     }
@@ -189,16 +194,24 @@ pub fn user_prompt(content: &str, ocr: &[String]) -> String {
 /// `(system, user)` for the second ask that answers a question from the
 /// bot's own notes. `notes` is `(label, redacted text)` pairs (#40).
 pub fn answer_prompt(question: &str, notes: &[(String, String)]) -> (String, String) {
+    let shopping = RUNNING[0].path;
     let system = format!(
         "{PERSONA}\n\n\
-         You answer one question from the owner using only his notes below. \
+         You answer one question from the owner. You can look in his notes with three read-only tools: \
+         search_notes(query, folder) finds notes by words, read_note(path) reads one note, list_folder(path) lists a folder. \
+         Paths look like \"Fidelity/Pantry/Pantry.md\". The vaults are: BlackRock (school), State Street (money; the IOU ledger is \"{LEDGER}\", the shopping list is \"{shopping}\"), \
+         Berkshire (business), Goldman (career), Fidelity (kitchen: recipes, pantry), Citadel (projects), Mirae (languages), Bridgewater (audits), Inbox (recent messages), ! Todo (tasks). \
+         Start with a search or a hub note like \"<Vault>/Home.md\", use at most a few lookups, then answer. \
          Names in the question may be misspelled (\"willam\" = William). \
          List the items you find. If the notes do not hold the answer, say so in one sentence. \
-         1 to 4 sentences, in the user's language. Never include card numbers."
+         1 to 6 sentences, in the user's language. Never include card numbers."
     );
-    let mut user = format!("{question}\n\nNotes:\n");
-    for (label, text) in notes {
-        user.push_str(&format!("### {label}\n{text}\n\n"));
+    let mut user = question.to_string();
+    if !notes.is_empty() {
+        user.push_str("\n\nNotes:\n");
+        for (label, text) in notes {
+            user.push_str(&format!("### {label}\n{text}\n\n"));
+        }
     }
     (system, user.chars().take(LOOKUP_CHARS).collect())
 }

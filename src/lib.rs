@@ -1,8 +1,10 @@
+pub mod agent;
 pub mod allowlist;
 pub mod chat;
 pub mod dump;
 pub mod ingest;
 pub mod insight;
+pub mod tools;
 pub mod vaults;
 pub mod when;
 pub mod ocr;

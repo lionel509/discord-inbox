@@ -403,7 +403,7 @@ pub fn lookup_notes(inbox: &Path, allowed: &[PathBuf], running: &[PathBuf], cap:
     lookup_notes_with(inbox, allowed, running, &[], cap)
 }
 
-/// `lookup_notes` plus `extra` files (the IOU ledger, #45) read right after the running notes, whole up to 4 000 chars.
+/// `lookup_notes` plus `extra` files (the IOU ledger, #45) read right after the running notes, whole up to 4 000 chars. (no longer called by ingest since #49; the tools in `tools.rs` read the notes now)
 pub fn lookup_notes_with(inbox: &Path, allowed: &[PathBuf], running: &[PathBuf], extra: &[PathBuf], cap: usize) -> Vec<(String, String)> {
     use std::collections::HashSet;
     let roots: Vec<PathBuf> = allowed.iter().filter_map(|a| a.canonicalize().ok()).collect();

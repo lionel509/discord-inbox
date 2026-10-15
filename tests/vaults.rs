@@ -355,3 +355,20 @@ fn system_prompt_lists_answer_first_and_names_questions_without_mark() {
     assert!(a < p.find("Shopping List — ").unwrap());
     assert!(p.contains("whats on my costco list"), "{p}");
 }
+
+// ---- #49: the agentic answer prompt names the tools and the vaults ----
+
+#[test]
+fn answer_prompt_names_tools_and_vaults() {
+    let (system, user) = vaults::answer_prompt("what can i make with my cod", &[]);
+    for want in ["search_notes", "read_note", "Fidelity", "Who Owes Me.md"] {
+        assert!(system.contains(want), "{want}: {system}");
+    }
+    assert_eq!(user, "what can i make with my cod");
+}
+
+#[test]
+fn system_prompt_calls_pantry_ideas_an_answer() {
+    let sys = vaults::system_prompt();
+    assert!(sys.contains("a request for ideas or advice from his notes is also Answer"), "{sys}");
+}
