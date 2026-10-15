@@ -69,18 +69,23 @@ pub fn extract_content(body: &str) -> Result<String, String> {
     Ok(text.to_string())
 }
 
+/// The OpenRouter request. Zero data retention is on (`provider.zdr`), so a provider that cannot promise it 404s.
+pub fn request_body(system: &str, user: &str) -> serde_json::Value {
+    serde_json::json!({
+        "model": MODEL,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "provider": {"zdr": true},
+        "max_tokens": 500,
+        "temperature": 0.3,
+    })
+}
+
 impl Chat for OpenRouter {
     fn ask(&self, system: &str, user: &str) -> Result<String, String> {
-        let body = serde_json::json!({
-            "model": MODEL,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "provider": {"zdr": true},
-            "max_tokens": 500,
-            "temperature": 0.3,
-        });
+        let body = request_body(system, user);
         let resp = self
             .client
             .post(URL)
