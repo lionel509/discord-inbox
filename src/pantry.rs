@@ -91,26 +91,68 @@ pub fn command(content: &str) -> Option<Command> {
         if t.ends_with('?') {
             return None;
         }
-        let item = rest.trim().trim_end_matches(|c: char| c.is_ascii_punctuation()).trim().to_string();
-        if (1..=40).contains(&item.chars().count()) {
+        let item = out_text(rest);
+        if (1..=40).contains(&item.chars().count()) && out_parts(&item).is_some() {
             return Some(Command::OutOf(item));
         }
     }
     None
 }
 
-/// The canonical food named in `text`: the first whole word that is a FOODS entry, or that entry plus a trailing `s`.
+/// `out of` text without a leading article or trailing punctuation.
+fn out_text(rest: &str) -> String {
+    let mut s = rest.trim().trim_end_matches(|c: char| c.is_ascii_punctuation()).trim().to_lowercase();
+    for art in ["the ", "my ", "some "] {
+        if let Some(r) = s.strip_prefix(art) {
+            s = r.to_string();
+            break;
+        }
+    }
+    s
+}
+
+/// The canonical food for one whole item name (`eggs`, `egg`, `tomatoes`), or None for anything longer.
+fn whole_food(part: &str) -> Option<&'static str> {
+    if part.is_empty() || !part.chars().all(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    let stem = part.strip_suffix('s');
+    FOODS.iter().find(|(word, _)| *word == part || Some(*word) == stem).map(|(_, canon)| *canon)
+}
+
+/// The canonical foods an `out of` text names: whole food items split on `,` and ` and `.
+/// None when any piece is not a single food word, so "orange juice" never drops the orange row.
+fn out_parts(item: &str) -> Option<Vec<&'static str>> {
+    let mut out: Vec<&'static str> = Vec::new();
+    for piece in item.split(',').flat_map(|p| p.split(" and ")) {
+        let canon = whole_food(piece.trim())?;
+        if !out.contains(&canon) {
+            out.push(canon);
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+/// The canonical food named in `text`: the first whole word that is a FOODS entry, or that entry plus `s` or `es`.
 pub fn food(text: &str) -> Option<&'static str> {
     let lower = text.to_ascii_lowercase();
     for w in lower.split(|c: char| !c.is_ascii_alphabetic()).filter(|w| !w.is_empty()) {
         let stem = w.strip_suffix('s');
+        let stem_es = w.strip_suffix("es");
         for (word, canon) in FOODS {
-            if *word == w || Some(*word) == stem {
+            if *word == w || Some(*word) == stem || Some(*word) == stem_es {
                 return Some(*canon);
             }
         }
     }
     None
+}
+
+/// Receipt lines that name a payment, not a food: "APPLE PAY" must not read as apple.
+fn is_tender_line(line: &str) -> bool {
+    line.to_ascii_lowercase()
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .any(|w| matches!(w, "pay" | "visa" | "mastercard" | "amex" | "debit" | "credit" | "tender" | "change"))
 }
 
 fn is_share(s: &str) -> bool {
@@ -205,6 +247,9 @@ fn ocr_lines(note: &str) -> Vec<&str> {
 pub fn receipt_items(note: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for line in ocr_lines(note) {
+        if is_tender_line(line) {
+            continue;
+        }
         if let Some(c) = food(line) {
             if !out.iter().any(|x| x.as_str() == c) {
                 out.push(c.to_string());
@@ -247,14 +292,16 @@ pub fn parse_note(text: &str) -> Vec<Row> {
     rows
 }
 
-/// Same item (any case) replaces qty, store and bought in place; otherwise appends. Oldest first.
+/// Same item (any case) replaces qty, store and bought in place, unless the new purchase is older; otherwise appends. Oldest first.
 pub fn upsert(rows: &mut Vec<Row>, new: Vec<Row>) {
     for n in new {
         match rows.iter_mut().find(|r| r.item.eq_ignore_ascii_case(&n.item)) {
             Some(r) => {
-                r.qty = n.qty;
-                r.store = n.store;
-                r.bought = n.bought;
+                if n.bought >= r.bought {
+                    r.qty = n.qty;
+                    r.store = n.store;
+                    r.bought = n.bought;
+                }
             }
             None => rows.push(n),
         }
@@ -376,8 +423,9 @@ fn restock_at(root: &Path, date: &str, all: bool, today: &str) -> Result<Report,
             .collect();
         paths.sort();
         let prefix = format!("{date} ");
-        let mut titles: Vec<String> = Vec::new();
-        let mut items: Vec<String> = Vec::new();
+        let mut filed = 0usize;
+        // (canonical food, title of the note it came from). First note to name a food wins.
+        let mut found: Vec<(String, String)> = Vec::new();
         let mut costco = false;
         for p in paths {
             let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -389,14 +437,14 @@ fn restock_at(root: &Path, date: &str, all: bool, today: &str) -> Result<Report,
             let text = fs::read_to_string(&p).unwrap_or_default();
             let ocr = ocr_lines(&text);
             costco |= ocr.iter().any(|l| l.to_lowercase().contains("costco"));
+            filed += 1;
             for c in receipt_items(&text) {
-                if !items.contains(&c) {
-                    items.push(c);
+                if !found.iter().any(|(f, _)| *f == c) {
+                    found.push((c, title.to_string()));
                 }
             }
-            titles.push(title.to_string());
         }
-        if titles.is_empty() {
+        if filed == 0 {
             return Err(format!("no split note or receipt filed for {date}. Say `restock YYYY-MM-DD` for another day."));
         }
         if costco && !all {
@@ -404,9 +452,16 @@ fn restock_at(root: &Path, date: &str, all: bool, today: &str) -> Result<Report,
                 "that looks like a Costco receipt and there is no split note for {date} yet. Write the split first, then say restock (or `restock all` if it was a solo trip)."
             ));
         }
-        let store = titles.join(", ");
-        let rows: Vec<Row> = items.into_iter().map(|c| Row { item: c, qty: String::new(), store: store.clone(), bought: date.into() }).collect();
-        (rows, store, 0, Vec::new())
+        let mut sources: Vec<String> = Vec::new();
+        let mut rows: Vec<Row> = Vec::new();
+        for (c, title) in found {
+            if !sources.contains(&title) {
+                sources.push(title.clone());
+            }
+            rows.push(Row { item: c, qty: String::new(), store: title, bought: date.into() });
+        }
+        let source = if sources.is_empty() { format!("the receipts filed for {date}") } else { sources.join(", ") };
+        (rows, source, 0, Vec::new())
     };
 
     let mut rows = parse_note(&fs::read_to_string(&note_path).unwrap_or_default());
@@ -425,23 +480,43 @@ fn restock_at(root: &Path, date: &str, all: bool, today: &str) -> Result<Report,
     Ok(Report { source, added, others, unassigned, oldest: oldest(&rows, today) })
 }
 
-/// Drops the item's row. Food names are normalised, anything else is matched as typed.
+/// Drops the row for each food the item names ("eggs and milk"). Anything that is not whole food names is refused.
 pub fn out_of(root: &Path, item: &str, today: &str) -> Result<String, String> {
+    let Some(keys) = out_parts(&out_text(item)) else {
+        return Err("I can only drop whole food items, like `out of eggs and milk`.".into());
+    };
     let _guard = dump::LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let note_path = root.join(PANTRY);
     if fs::symlink_metadata(&note_path).is_err() {
         return Ok("No pantry note yet.".into());
     }
     refuse_link(&note_path)?;
-    let key = food(item).map(str::to_string).unwrap_or_else(|| item.trim().to_lowercase());
     let mut rows = parse_note(&fs::read_to_string(&note_path).map_err(|e| e.to_string())?);
-    let before = rows.len();
-    rows.retain(|r| !r.item.eq_ignore_ascii_case(&key));
-    if rows.len() == before {
-        return Ok(format!("No {key} in the pantry right now."));
+    let mut dropped: Vec<&str> = Vec::new();
+    let mut missing: Vec<&str> = Vec::new();
+    for k in keys {
+        let before = rows.len();
+        rows.retain(|r| !r.item.eq_ignore_ascii_case(k));
+        if rows.len() < before {
+            dropped.push(k);
+        } else {
+            missing.push(k);
+        }
     }
-    write_note(root, &rows, today)?;
-    Ok(format!("Dropped {key} from the pantry 🐾"))
+    if !dropped.is_empty() {
+        write_note(root, &rows, today)?;
+    }
+    let mut reply = if dropped.is_empty() { String::new() } else { format!("Dropped {} from the pantry 🐾", dropped.join(", ")) };
+    if !missing.is_empty() {
+        let m = format!("No {} in the pantry right now.", missing.join(", "));
+        if reply.is_empty() {
+            reply = m;
+        } else {
+            reply.push('\n');
+            reply.push_str(&m);
+        }
+    }
+    Ok(reply)
 }
 
 /// Runs a command against the vault at `root`. `today` is the sender's local date.
