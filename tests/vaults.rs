@@ -191,3 +191,82 @@ fn prompt_is_bounded_and_lists_targets() {
     let user = vaults::user_prompt("hi", &["x".repeat(20_000)]);
     assert!(user.chars().count() <= vaults::PROMPT_CHARS);
 }
+
+// ---- Shopping List, Answer and the bounded lookup bundle (#40). Temp dirs only. ----
+
+#[test]
+fn folder_answer_files_nothing() {
+    let v = no_disk();
+    let d = vaults::parse_decision(&v, "FOLDER: Answer\nTITLE: Costco list\nREPLY:\nHere it is.");
+    assert!(d.answer);
+    assert!(d.target.is_none());
+    assert!(d.running.is_none());
+    let plain = vaults::parse_decision(&v, "FOLDER: Citadel/Ideas\nREPLY:\nok");
+    assert!(!plain.answer);
+}
+
+#[test]
+fn folder_shopping_list_resolves_running_and_state_street_target() {
+    let v = no_disk();
+    let d = vaults::parse_decision(&v, "FOLDER: shopping list\nTITLE: Costco run\nREPLY:\nAdded.");
+    assert_eq!(d.running.map(|r| r.key), Some("Shopping List"));
+    assert_eq!(d.target.map(|t| t.key), Some("State Street"));
+    assert!(!d.answer);
+}
+
+#[test]
+fn running_table_is_one_shopping_list_under_state_street() {
+    assert_eq!(vaults::RUNNING.len(), 1);
+    let r = &vaults::RUNNING[0];
+    assert_eq!(r.key, "Shopping List");
+    assert!(r.path.starts_with("State Street/"), "{}", r.path);
+    assert!(!r.path.contains(".."), "{}", r.path);
+    assert_eq!(r.target_key, "State Street");
+    assert!(no_disk().running("shopping list").is_some());
+    assert!(no_disk().running("Citadel/Ideas").is_none());
+}
+
+#[test]
+fn system_prompt_lists_shopping_list_and_answer() {
+    let sys = vaults::system_prompt();
+    assert!(sys.contains("Shopping List — "), "{sys}");
+    assert!(sys.contains("Answer — "), "{sys}");
+}
+
+#[test]
+fn answer_prompt_user_is_capped_at_lookup_chars() {
+    let notes = vec![("a".to_string(), "x".repeat(20_000))];
+    let (sys, user) = vaults::answer_prompt("q", &notes);
+    assert!(!sys.is_empty());
+    assert!(user.chars().count() <= vaults::LOOKUP_CHARS, "{}", user.chars().count());
+    assert!(user.starts_with("q\n\nNotes:\n### a\n"));
+}
+
+#[test]
+fn running_path_refuses_missing_and_symlink_accepts_regular_file() {
+    let root = tmp("running");
+    let outside = tmp("running-outside");
+    fs::create_dir_all(root.join("State Street/Cash Flow/Spending")).unwrap();
+    let v = Vaults::new(root.clone());
+    let r = v.running("shopping list").expect("running entry");
+    let p = root.join(r.path);
+
+    // Missing: refused, and nothing is created.
+    assert!(v.running_path(r).is_none());
+    assert!(!p.exists());
+    assert!(v.running_paths().is_empty());
+
+    // A symlink to a file outside the vault: refused.
+    fs::write(outside.join("real.md"), "x\n").unwrap();
+    std::os::unix::fs::symlink(outside.join("real.md"), &p).unwrap();
+    assert!(v.running_path(r).is_none());
+    fs::remove_file(&p).unwrap();
+
+    // A regular file at the path: accepted.
+    fs::write(&p, "- [ ] Eggs\n").unwrap();
+    assert_eq!(v.running_path(r), Some(p.clone()));
+    assert_eq!(v.running_paths(), vec![p]);
+
+    // The lookup allow-list covers every target folder and nothing else.
+    assert_eq!(v.allowed_dirs().len(), TARGETS.len());
+}
