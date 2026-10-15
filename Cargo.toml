@@ -10,4 +10,5 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 security-framework = "3"
 sha2 = "0.11"
 serde_json = "1"
+chrono = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }

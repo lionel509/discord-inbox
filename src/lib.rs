@@ -4,5 +4,6 @@ pub mod dump;
 pub mod ingest;
 pub mod insight;
 pub mod vaults;
+pub mod when;
 pub mod ocr;
 pub mod redact;
