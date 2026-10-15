@@ -188,12 +188,12 @@ pub fn tools_body(
     let mut body = serde_json::json!({
         "model": MODEL,
         "messages": msgs,
-        "tool_choice": if allow_tools { "auto" } else { "none" },
         "provider": {"zdr": true},
         "max_tokens": 500,
         "temperature": 0.3,
     });
     if !tools.is_empty() {
+        body["tool_choice"] = serde_json::json!(if allow_tools { "auto" } else { "none" });
         body["tools"] = serde_json::Value::Array(tools.to_vec());
     }
     body

@@ -50,7 +50,10 @@ pub fn answer(chat: &dyn Chat, lookup: &Lookup, question: &str) -> Result<Answer
         usage.completion += reply.usage.completion;
         match reply.turn {
             Turn::Text(text) => return Ok(Answered { text, calls, usage, limited }),
-            Turn::Calls(_) if !allow => return Err("tool call after limit".into()),
+            Turn::Calls(_) if !allow => {
+                let text = "I couldn't check everything I wanted to, so I can't give a full answer.".to_string();
+                return Ok(Answered { text, calls, usage, limited });
+            }
             Turn::Calls(calls_in_round) => {
                 let tool_calls: Vec<Value> = calls_in_round
                     .iter()

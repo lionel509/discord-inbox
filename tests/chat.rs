@@ -113,7 +113,7 @@ fn tools_body_sets_tools_zdr_and_tool_choice_auto() {
 fn tools_body_tool_choice_none_and_no_tools_key_when_empty() {
     let msgs = vec![json!({"role": "user", "content": "q"})];
     let b = chat::tools_body(&msgs, &[], false);
-    assert_eq!(b["tool_choice"], "none");
+    assert!(b.get("tool_choice").is_none());
     assert!(b.get("tools").is_none());
 }
 

@@ -254,3 +254,19 @@ fn tool_call_after_limit_retries_without_tools() {
     assert_eq!(r.text, "done");
     assert!(r.limited.is_some());
 }
+
+#[test]
+fn double_ignored_tool_choice_after_limit_still_answers() {
+    struct Always;
+    impl Chat for Always {
+        fn ask(&self, _: &str, _: &str) -> Result<String, String> { Err("unused".into()) }
+        fn ask_tools(&self, _m: &[Value], _t: &[Value], _a: bool) -> Result<Reply, String> {
+            let turn = Turn::Calls(vec![ToolCall { id: "c".into(), name: "list_folder".into(), arguments: r#"{"folder":"Private"}"#.into() }]);
+            Ok(Reply { turn, usage: Usage::default() })
+        }
+    }
+    let (lk, _) = lookup("always");
+    let r = answer(&Always, &lk, "q").unwrap();
+    assert!(r.limited.is_some());
+    assert!(r.text.contains("couldn't check everything"));
+}
