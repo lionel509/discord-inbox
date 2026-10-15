@@ -101,7 +101,7 @@ fn list_append(filer: &Filer, inbox: &Path, incoming: &Incoming, d: &Decision) -
     match dump::append_running(inbox, incoming, &note, &incoming.received[..10]) {
         Ok(()) => {
             let stem = Path::new(r.path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-            Some(format!("(Added to {stem}.)"))
+            Some(format!("Got it, added to your {stem} 🐾"))
         }
         Err(e) => {
             eprintln!("discord-inbox: append {} failed: {e}", incoming.msg_id);
@@ -160,17 +160,20 @@ async fn typing_while<M: Inbound, F: std::future::Future>(m: &M, work: F) -> F::
 }
 
 /// The reply to a DM with nothing to read (#46).
-pub const BLANK_REPLY: &str = "Got it 🐾 (Saved to your Inbox.)";
+pub const BLANK_REPLY: &str = "Got it 🐾 It's saved in your Inbox.";
 /// How much of a text attachment is read as the message (#46).
 pub const ATTACH_TEXT_CHARS: usize = 20_000;
 
-/// The text of a `.txt` or `.md` attachment, from the bytes that were saved, up to ATTACH_TEXT_CHARS on a char boundary. `None` for other files or non-UTF-8 (#46).
+/// The text of a `.txt` or `.md` attachment, from the bytes that were saved, up to ATTACH_TEXT_CHARS on a char boundary. `None` for other files or binary (a NUL byte); invalid UTF-8 is decoded lossily (#46).
 fn attachment_text(name: &str, bytes: &[u8]) -> Option<String> {
     let lower = name.to_ascii_lowercase();
     if !(lower.ends_with(".txt") || lower.ends_with(".md")) {
         return None;
     }
-    let text = std::str::from_utf8(bytes).ok()?;
+    if bytes.contains(&0) {
+        return None;
+    }
+    let text = String::from_utf8_lossy(bytes);
     Some(text.chars().take(ATTACH_TEXT_CHARS).collect())
 }
 
@@ -359,9 +362,9 @@ pub async fn ingest_with<M: Inbound>(
             };
             mark(m, SAVED_MARK).await;
             let text = if first {
-                Some(reply_text("I couldn't reach the model just now, so this is saved to your Inbox only: not filed, not answered. For the next 10 minutes, other messages that fail get ✅ and no reply.", verdict.as_deref()))
+                Some(reply_text("Sorry, my brain's a little foggy right now 😿 Your message is saved in your Inbox. For the next 10 minutes I'll just ✅ new ones and catch up after.", verdict.as_deref()))
             } else {
-                verdict.map(|v| reply_text("Chat is still failing; saved to Inbox only.", Some(&v)))
+                verdict.map(|v| reply_text("Still a little foggy 😿 This one's saved in your Inbox too.", Some(&v)))
             };
             if let Some(text) = text {
                 if let Err(e) = m.reply(&text).await {
@@ -392,7 +395,7 @@ pub async fn ingest_with<M: Inbound>(
                     Ok(a) => a,
                     Err(e) => {
                         eprintln!("discord-inbox: lookup for {id} failed: {e}");
-                        format!("{}\n\n(I couldn't read your notes just now.)", d.reply)
+                        format!("{}\n\n(I couldn't peek at your notes just now, sorry!)", d.reply)
                     }
                 };
                 let text = reply_text(&body, verdict.as_deref());
@@ -418,7 +421,7 @@ pub async fn ingest_with<M: Inbound>(
                         &vaults::front_extra(t, &d.tags),
                         &vaults::hub_line(t),
                     ) {
-                        Ok(_) => Some(format!("(Saved to {}.)", t.folder)),
+                        Ok(_) => Some(format!("Saved to {} for you 🐾", t.folder)),
                         Err(e) => {
                             eprintln!("discord-inbox: file {id} failed: {e}");
                             None
@@ -427,7 +430,7 @@ pub async fn ingest_with<M: Inbound>(
                 })
             });
             // A target the model picked that did not take the note: say so, in the same one-line shape.
-            let line = filed.or_else(|| d.target.map(|_| "(I couldn't file this, so it's in your Inbox.)".to_string()));
+            let line = filed.or_else(|| d.target.map(|_| "Hmm, I couldn't file that one, so it's safe in your Inbox for now.".to_string()));
             let text = combine(line.as_deref(), &d.reply, verdict.as_deref());
             match m.reply(&text).await {
                 Ok(()) => clear(m).await,
