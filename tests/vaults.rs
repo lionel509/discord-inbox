@@ -372,3 +372,15 @@ fn system_prompt_calls_pantry_ideas_an_answer() {
     let sys = vaults::system_prompt();
     assert!(sys.contains("a request for ideas or advice from his notes is also Answer"), "{sys}");
 }
+
+#[test]
+fn answer_prompt_names_on_hand_staples_and_house_rules() {
+    let (system, _) = vaults::answer_prompt("what can I make", &[]);
+    assert!(system.contains(vaults::PANTRY), "{system}");
+    for s in vaults::STAPLES {
+        assert!(system.contains(s), "{system}");
+    }
+    assert!(system.contains("alcohol"), "{system}");
+    assert!(system.contains("caffeinated"), "{system}");
+    assert!(system.contains("for one"), "{system}");
+}

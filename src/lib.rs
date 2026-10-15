@@ -8,4 +8,5 @@ pub mod tools;
 pub mod vaults;
 pub mod when;
 pub mod ocr;
+pub mod pantry;
 pub mod redact;
