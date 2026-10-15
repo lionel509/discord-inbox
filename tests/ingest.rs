@@ -1195,6 +1195,7 @@ fn filer(inbox: &Path, chat: &Arc<FakeChat>) -> Filer {
     Filer {
         chat: chat.clone(),
         vaults: Vaults::new(vault_root(inbox)),
+        last_notice: Default::default(),
     }
 }
 

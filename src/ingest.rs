@@ -65,6 +65,8 @@ async fn clear<M: Inbound>(m: &M) {
 pub struct Filer {
     pub chat: Arc<dyn Chat>,
     pub vaults: Vaults,
+    /// The chat error last reported to the user; cleared when a chat call succeeds (#40).
+    pub last_notice: std::sync::Mutex<Option<String>>,
 }
 
 impl Filer {
@@ -72,6 +74,7 @@ impl Filer {
         Filer {
             chat: Arc::new(NoChat),
             vaults: Vaults::new(PathBuf::new()),
+            last_notice: Default::default(),
         }
     }
 }
@@ -204,7 +207,7 @@ pub async fn ingest_with<M: Inbound>(
     let lock = id_lock(id);
     let _one = lock.lock().await;
     let received = m.received();
-    if (dump::note_saved(&dump::note_path(inbox, &received, id)) || dump::filed_to(inbox, id).is_some())
+    if (dump::note_saved(&dump::note_path(inbox, &received, id)) || dump::saved_id(inbox, id) || dump::filed_to(inbox, id).is_some())
         && !dump::in_retry(inbox, id)
     {
         return Outcome::Skipped;
@@ -269,19 +272,29 @@ pub async fn ingest_with<M: Inbound>(
     match chat_decision(filer, &incoming).await {
         Err(e) => {
             eprintln!("discord-inbox: chat for {id} failed: {e}");
-            // One reply: the notice, then the receipt verdict if there is one (P4).
             let verdict = crate::insight::compose(&incoming).await;
-            let head = "Kept in Inbox";
-            let body = format!("Chat failed ({e}), so this was saved to Inbox only: not filed, not answered.");
-            let text = combine_head(head, &body, verdict.as_deref());
+            let first = {
+                let mut last = filer.last_notice.lock().unwrap_or_else(|p| p.into_inner());
+                let first = last.as_deref() != Some(e.as_str());
+                *last = Some(e.clone());
+                first
+            };
             mark(m, SAVED_MARK).await;
-            if let Err(e) = m.reply(&text).await {
-                eprintln!("discord-inbox: reply on {id} failed: {e}");
+            let text = if first {
+                Some(combine_head("Kept in Inbox", &format!("Chat failed ({e}), so this was saved to Inbox only: not filed, not answered. Until chat works again, later messages get ✅ and no reply."), verdict.as_deref()))
+            } else {
+                verdict.map(|v| combine_head("Kept in Inbox", "Chat is still failing; saved to Inbox only.", Some(&v)))
+            };
+            if let Some(text) = text {
+                if let Err(e) = m.reply(&text).await {
+                    eprintln!("discord-inbox: reply on {id} failed: {e}");
+                }
             }
         }
         Ok(d) => {
+            *filer.last_notice.lock().unwrap_or_else(|p| p.into_inner()) = None;
             let verdict = crate::insight::compose(&incoming).await;
-            if d.answer {
+            if d.answer || (d.running.is_some() && incoming.content.trim_end().ends_with('?')) {
                 // A question: answer from the bot's own notes, file nothing, keep the Inbox note.
                 let notes = dump::lookup_notes(
                     inbox,

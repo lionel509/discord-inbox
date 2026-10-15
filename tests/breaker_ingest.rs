@@ -151,7 +151,7 @@ fn canned(answers: Vec<Result<String, String>>) -> Arc<Canned> {
 }
 
 fn filer_with(inbox: &Path, chat: Arc<Canned>) -> Filer {
-    Filer { chat, vaults: Vaults::new(vault_root(inbox)) }
+    Filer { chat, vaults: Vaults::new(vault_root(inbox)), last_notice: Default::default() }
 }
 
 fn spec(id: u64, text: &str, received: &str) -> Spec {

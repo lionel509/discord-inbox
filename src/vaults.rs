@@ -138,7 +138,7 @@ impl Vaults {
 /// Trim whitespace and wrapping quotes or backticks from a model-given key.
 fn clean_key(s: &str) -> &str {
     let s = s.trim();
-    s.trim_matches(|c| c == '`' || c == '"' || c == '\'').trim()
+    s.trim_matches(|c: char| matches!(c, '`' | '"' | '\'' | '*' | '.' | ',' | ';' | ':' | '!' | '?')).trim()
 }
 
 pub fn system_prompt() -> String {
@@ -202,19 +202,19 @@ pub fn parse_decision(vaults: &Vaults, text: &str) -> Decision {
     let mut reply_lines: Option<Vec<&str>> = None;
 
     for line in text.lines() {
-        let trimmed = line.trim();
+        let trimmed = line.trim().trim_start_matches('*').trim_start();
         let lower = trimmed.to_lowercase();
         if let Some(lines) = reply_lines.as_mut() {
             lines.push(line);
             continue;
         }
         if lower.starts_with("reply:") {
-            let rest = trimmed["reply:".len()..].trim();
+            let rest = trimmed["reply:".len()..].trim_start_matches('*').trim();
             reply_lines = Some(if rest.is_empty() { Vec::new() } else { vec![rest] });
             continue;
         }
         if let Some(label) = LABELS.iter().find(|l| lower.starts_with(*l)) {
-            let rest = &trimmed[label.len()..];
+            let rest = trimmed[label.len()..].trim_start_matches('*');
             match *label {
                 "folder:" => {
                     if !seen_folder {

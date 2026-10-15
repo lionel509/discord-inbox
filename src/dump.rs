@@ -146,6 +146,12 @@ pub fn note_saved(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() > 0)
 }
 
+/// A non-empty Inbox note for `msg_id` exists under any time stamp (UTC from before #40, or another zone).
+pub fn saved_id(inbox: &Path, msg_id: u64) -> bool {
+    let tail = format!("_{msg_id}.md");
+    fs::read_dir(inbox).map(|rd| rd.flatten().any(|e| e.file_name().to_string_lossy().ends_with(&tail) && e.metadata().is_ok_and(|m| m.is_file() && m.len() > 0))).unwrap_or(false)
+}
+
 /// Serialises every writer of `.cursor-*`, `.retry` and notes. The live event and catch-up can run at once.
 static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -357,7 +363,10 @@ pub fn append_running(inbox: &Path, msg: &Incoming, note: &Path, date: &str) -> 
     }
     let items: Vec<String> = crate::redact::sensitive(&msg.content)
         .lines()
-        .map(|l| l.trim().trim_start_matches(|c| c == '-' || c == '*' || c == ' ').trim().to_string())
+        .map(|l| {
+            let l = l.trim();
+            l.strip_prefix("- [ ] ").or_else(|| l.strip_prefix("- ")).or_else(|| l.strip_prefix("* ")).unwrap_or(l).trim().to_string()
+        })
         .filter(|l| !l.is_empty())
         .collect();
     if items.is_empty() {
@@ -428,7 +437,15 @@ pub fn lookup_notes(inbox: &Path, allowed: &[PathBuf], running: &[PathBuf], cap:
             continue;
         }
         let Ok(raw) = fs::read_to_string(&p) else { continue };
-        let text: String = crate::redact::sensitive(&raw).trim().chars().take(2000).collect();
+        let clean = crate::redact::sensitive(&raw);
+        let clean = clean.trim();
+        // The running note keeps its last 6 000 chars: new items go at the end (#40 review).
+        let text: String = if running.contains(&p) {
+            let n = clean.chars().count();
+            clean.chars().skip(n.saturating_sub(6_000)).collect()
+        } else {
+            clean.chars().take(2_000).collect()
+        };
         if text.is_empty() {
             continue;
         }

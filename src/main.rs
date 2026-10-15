@@ -229,6 +229,7 @@ async fn main() -> ExitCode {
         Some(c) => Filer {
             chat: Arc::new(c),
             vaults: Vaults::new(Vaults::default_root()),
+            last_notice: Default::default(),
         },
         None => {
             eprintln!("discord-inbox: no openrouter key, chat replies off");
