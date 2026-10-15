@@ -941,14 +941,16 @@ async fn reply_masks_card_digits() {
     assert!(!replies[0].contains("4111"), "{}", replies[0]);
 }
 
-/// Nothing to say means no reply: plain text, strangers, a pending receipt.
+/// Nothing to say means no reply: strangers, a pending receipt. A plain DM with the chat off gets the one failure notice (#40).
 #[tokio::test]
 async fn no_reply_when_nothing_to_say() {
     let inbox = scratch("reply-none");
     let w = World::new(&inbox);
     let good = spec(MAIN, MAIN_CH, 102, &[("good.txt", b"hello")]);
     assert_eq!(ingest(&allow(), &inbox, &msg(&w, &good)).await, Outcome::Saved);
-    assert!(w.replies_for(102).is_empty());
+    let notice = w.replies_for(102);
+    assert_eq!(notice.len(), 1, "{notice:?}");
+    assert!(notice[0].contains("Kept in Inbox") && notice[0].contains("chat off"), "{}", notice[0]);
 
     let stranger = spec(STRANGER, STRANGER_CH, 103, &[("receipt.png", b"receipt")]);
     assert_eq!(ingest(&allow(), &inbox, &msg(&w, &stranger)).await, Outcome::Ignored);
@@ -1193,6 +1195,7 @@ fn filer(inbox: &Path, chat: &Arc<FakeChat>) -> Filer {
     Filer {
         chat: chat.clone(),
         vaults: Vaults::new(vault_root(inbox)),
+        last_notice: Default::default(),
     }
 }
 
@@ -1279,7 +1282,7 @@ async fn filed_note_is_skipped_on_second_pass_and_catch_up() {
     assert_eq!(read_cursor(&inbox, MAIN_CH), Some(310), "catch-up stopped at a filed note");
 }
 
-/// The model failing means today's behaviour: the note stays in Inbox and gets the tick.
+/// A failed model call keeps the note in Inbox and says so in one reply (no silent tick, nothing filed).
 #[tokio::test]
 async fn chat_failure_falls_back_to_tick() {
     let inbox = scratch("chat-fail");
@@ -1290,7 +1293,9 @@ async fn chat_failure_falls_back_to_tick() {
     assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
     assert!(note(&inbox, 320).is_file(), "note left Inbox without a filing");
     assert_eq!(w.marks(320), vec!["✅"]);
-    assert!(w.replies_for(320).is_empty());
+    let replies = w.replies_for(320);
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert!(replies[0].contains("Kept in Inbox") && replies[0].contains("http 404"), "{}", replies[0]);
     assert!(files_in(&root_of(&inbox).join("Citadel/Ideas")).is_empty());
     assert_eq!(chat.calls(), 1);
 }
@@ -1504,4 +1509,216 @@ async fn concurrent_duplicate_ingest_replies_once() {
     assert_eq!(replies.len(), 1, "{replies:?}");
     assert!(!replies[0].starts_with("Kept in Inbox"), "{replies:?}");
     assert_eq!(chat.calls(), 1, "the model ran {} times", chat.calls());
+}
+
+// ---- Answer, Shopping List and the failure notice (#40). Temp dirs and a made-up `Private` folder only. ----
+
+/// A failed model call with a receipt still sends exactly one reply (P4): the notice, not a second message.
+#[tokio::test]
+async fn chat_failure_with_receipt_sends_one_reply() {
+    let inbox = scratch("chat-fail-receipt");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![Err("http 500".to_string())]);
+    let f = filer(&inbox, &chat);
+    let s = spec_text(MAIN, MAIN_CH, 325, "receipt for groceries", &[("receipt.jpg", b"receipt bytes")]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    let replies = w.replies_for(325);
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert!(replies[0].contains("Kept in Inbox") && replies[0].contains("http 500"), "{}", replies[0]);
+    assert_eq!(w.marks(325), vec!["✅"]);
+}
+
+/// A question is answered from the bot's own notes and files nothing. The lookup prompt carries the
+/// Shopping List and the Inbox notes, and never the Private folder.
+#[tokio::test]
+async fn question_is_answered_not_filed() {
+    let inbox = scratch("chat-answer");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![
+        answer("Answer", "Costco list lookup", "shopping", "I don't have it"),
+        Ok("Eggs, masking tape".to_string()),
+    ]);
+    let f = filer(&inbox, &chat);
+    let root = root_of(&inbox);
+    let shop = root.join("State Street/Cash Flow/Spending");
+    fs::create_dir_all(&shop).unwrap();
+    fs::create_dir_all(&inbox).unwrap();
+    fs::write(shop.join("Shopping List.md"), "- [ ] Eggs\n").unwrap();
+    fs::write(inbox.join("2026-10-12 tape.md"), "masking tape\n").unwrap();
+    fs::write(inbox.join(".filed"), format!("999 {}\n", root.join("Private/note.md").display())).unwrap();
+
+    let s = spec_text(MAIN, MAIN_CH, 330, "what is on my Costco list?", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    assert!(note(&inbox, 330).is_file(), "question note left Inbox");
+    for t in TARGETS.iter() {
+        assert!(!files_in(&root.join(t.folder)).iter().any(|n| n.ends_with(".md")), "filed into {}", t.folder);
+    }
+
+    let replies = w.replies_for(330);
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert!(replies[0].starts_with("Answered"), "{}", replies[0]);
+    assert!(replies[0].contains("Eggs, masking tape"), "{}", replies[0]);
+    assert!(w.marks(330).is_empty(), "{:?}", w.marks(330));
+    assert_eq!(chat.calls(), 2);
+    let prompts = chat.prompts.lock().unwrap().clone();
+    assert!(prompts[1].contains("- [ ] Eggs"), "{}", prompts[1]);
+    assert!(prompts[1].contains("masking tape"), "{}", prompts[1]);
+    assert!(!prompts[1].to_lowercase().contains("private"), "{}", prompts[1]);
+}
+
+/// If the lookup pass fails, the answer from the first pass is still sent, labelled as unchecked.
+#[tokio::test]
+async fn lookup_failure_still_answers() {
+    let inbox = scratch("chat-answer-fail");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![
+        answer("Answer", "Costco list lookup", "shopping", "model guess"),
+        Err("timeout".to_string()),
+    ]);
+    let f = filer(&inbox, &chat);
+    let s = spec_text(MAIN, MAIN_CH, 331, "what is on my Costco list?", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    let replies = w.replies_for(331);
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert!(replies[0].starts_with("Answered without the vault"), "{}", replies[0]);
+    assert!(replies[0].contains("model guess"), "{}", replies[0]);
+    assert!(note(&inbox, 331).is_file(), "question note left Inbox");
+    assert_eq!(chat.calls(), 2);
+}
+
+/// A list item is appended to the running note, not filed as a new note. The Inbox copy is dropped.
+#[tokio::test]
+async fn list_item_appends_to_running_note() {
+    let inbox = scratch("chat-running");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![answer("Shopping List", "Costco list", "shopping", "Added.")]);
+    let f = filer(&inbox, &chat);
+    let root = root_of(&inbox);
+    let shop = root.join("State Street/Cash Flow/Spending");
+    fs::create_dir_all(&shop).unwrap();
+    let list = shop.join("Shopping List.md");
+    fs::write(&list, "## Costco\n- [ ] Eggs\n\n**Hub:** [[Home]]\n").unwrap();
+
+    let s = spec_text(MAIN, MAIN_CH, 340, "eggs milk from costco", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    let text = fs::read_to_string(&list).unwrap();
+    assert!(text.contains("- [ ] eggs milk from costco *(Discord 2026-10-13)*"), "{text}");
+    assert!(text.find("- [ ] eggs").unwrap() < text.find("**Hub:**").unwrap(), "{text}");
+    assert!(!note(&inbox, 340).exists(), "Inbox copy left behind");
+    assert!(!files_in(&root.join("State Street")).iter().any(|n| n.ends_with(".md")), "filed a new note");
+    assert!(fs::read_to_string(inbox.join(".filed")).unwrap().contains("Shopping List.md"));
+    let replies = w.replies_for(340);
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert!(
+        replies[0].starts_with("Filed: State Street/Cash Flow/Spending/Shopping List.md (appended)"),
+        "{}",
+        replies[0]
+    );
+    assert_eq!(chat.calls(), 1);
+}
+
+/// A list message with an attachment is filed as a note, so the file is kept; the running note is untouched.
+#[tokio::test]
+async fn running_with_attachment_files_a_note() {
+    let inbox = scratch("chat-running-attach");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![answer("Shopping List", "Costco list", "shopping", "Filed.")]);
+    let f = filer(&inbox, &chat);
+    let root = root_of(&inbox);
+    let shop = root.join("State Street/Cash Flow/Spending");
+    fs::create_dir_all(&shop).unwrap();
+    let list = shop.join("Shopping List.md");
+    let before = "## Costco\n- [ ] Eggs\n\n**Hub:** [[Home]]\n";
+    fs::write(&list, before).unwrap();
+
+    let s = spec_text(MAIN, MAIN_CH, 341, "groceries", &[("receipt.txt", b"receipt")]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    assert_eq!(fs::read_to_string(&list).unwrap(), before);
+    assert!(files_in(&root.join("State Street")).contains(&"2026-10-13 Costco list.md".to_string()));
+    let replies = w.replies_for(341);
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert!(replies[0].starts_with("Filed: State Street/2026-10-13 Costco list.md"), "{}", replies[0]);
+}
+
+/// With no running note on disk, a list message is filed as an ordinary note in State Street.
+#[tokio::test]
+async fn running_note_missing_files_a_note() {
+    let inbox = scratch("chat-running-missing");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![answer("Shopping List", "Costco list", "shopping", "Filed.")]);
+    let f = filer(&inbox, &chat);
+    let s = spec_text(MAIN, MAIN_CH, 342, "eggs from costco", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    assert!(files_in(&root_of(&inbox).join("State Street")).contains(&"2026-10-13 Costco list.md".to_string()));
+    let replies = w.replies_for(342);
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert!(replies[0].starts_with("Filed: State Street/2026-10-13 Costco list.md"), "{}", replies[0]);
+}
+
+/// One notice per failure episode: a repeat of the same chat error gets ✅ only, and a success ends the episode.
+#[tokio::test]
+async fn same_chat_error_notices_once_until_chat_works() {
+    let inbox = scratch("chat-once");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![
+        Err("http 401".to_string()),
+        Err("http 401".to_string()),
+        answer("Private", "Note", "misc", "ok"),
+        Err("http 401".to_string()),
+    ]);
+    let f = filer(&inbox, &chat);
+    for id in 340..344 {
+        let s = spec_text(MAIN, MAIN_CH, id, "plain message", &[]);
+        ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await;
+    }
+    let first = w.replies_for(340);
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert!(first[0].contains("Chat failed (http 401)"), "{}", first[0]);
+    assert!(w.replies_for(341).is_empty(), "{:?}", w.replies_for(341));
+    assert_eq!(w.marks(341), vec!["✅"]);
+    let third = w.replies_for(342);
+    assert_eq!(third.len(), 1, "{third:?}");
+    assert!(third[0].contains("ok"), "{}", third[0]);
+    let fourth = w.replies_for(343);
+    assert_eq!(fourth.len(), 1, "{fourth:?}");
+    assert!(fourth[0].contains("Chat failed (http 401)"), "{}", fourth[0]);
+}
+
+/// A question the model routes to a running list is answered, and the list is left alone.
+#[tokio::test]
+async fn question_routed_to_running_list_is_answered() {
+    let inbox = scratch("chat-running-q");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![
+        answer("Shopping List", "Costco run", "shopping", "Added."),
+        Ok("Eggs, masking tape".to_string()),
+    ]);
+    let f = filer(&inbox, &chat);
+    let root = root_of(&inbox);
+    let shop = root.join("State Street/Cash Flow/Spending");
+    fs::create_dir_all(&shop).unwrap();
+    fs::write(shop.join("Shopping List.md"), "- [ ] Eggs\n").unwrap();
+
+    let s = spec_text(MAIN, MAIN_CH, 350, "whats on my costco like list?", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    let text = fs::read_to_string(shop.join("Shopping List.md")).unwrap();
+    assert!(!text.contains("whats on my costco"), "{text}");
+    let replies = w.replies_for(350);
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert!(replies[0].starts_with("Answered"), "{}", replies[0]);
+}
+
+/// Different errors inside the notice gap still give one notice in total.
+#[tokio::test]
+async fn different_errors_inside_gap_notice_once() {
+    let inbox = scratch("chat-gap");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![Err("http 401".to_string()), Err("http 500".to_string())]);
+    let f = filer(&inbox, &chat);
+    for id in 360..362 {
+        let s = spec_text(MAIN, MAIN_CH, id, "plain message", &[]);
+        ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await;
+    }
+    let total = w.replies_for(360).len() + w.replies_for(361).len();
+    assert_eq!(total, 1, "{:?} {:?}", w.replies_for(360), w.replies_for(361));
 }

@@ -1,5 +1,5 @@
 //! Vault targets, the model's decision parser, and the note text helpers. Temp dirs and a made-up `Private` folder only.
-use discord_inbox::vaults::{self, Target, Vaults, TARGETS};
+use discord_inbox::vaults::{self, Target, Vaults, RUNNING, TARGETS};
 use std::fs;
 use std::path::PathBuf;
 
@@ -34,6 +34,8 @@ fn target_matches_exact_and_case_insensitive_keys() {
 #[test]
 fn target_rejects_inbox_private_paths_dotdot_absolute_partial_empty() {
     let v = no_disk();
+    // Round 3: a trailing slash now matches its table key (norm drops "/"); it is still the static table entry, never a path.
+    assert_eq!(v.target("Citadel/Ideas/").map(|t| t.key), Some("Citadel/Ideas"));
     for s in [
         "Inbox",
         "inbox",
@@ -46,7 +48,6 @@ fn target_rejects_inbox_private_paths_dotdot_absolute_partial_empty() {
         "Fidelity/Want to Make/../../Private",
         "Citadel",
         "Ideas",
-        "Citadel/Ideas/",
         "",
         "   ",
     ] {
@@ -190,4 +191,167 @@ fn prompt_is_bounded_and_lists_targets() {
     }
     let user = vaults::user_prompt("hi", &["x".repeat(20_000)]);
     assert!(user.chars().count() <= vaults::PROMPT_CHARS);
+}
+
+// ---- Shopping List, Answer and the bounded lookup bundle (#40). Temp dirs only. ----
+
+#[test]
+fn folder_answer_files_nothing() {
+    let v = no_disk();
+    let d = vaults::parse_decision(&v, "FOLDER: Answer\nTITLE: Costco list\nREPLY:\nHere it is.");
+    assert!(d.answer);
+    assert!(d.target.is_none());
+    assert!(d.running.is_none());
+    let plain = vaults::parse_decision(&v, "FOLDER: Citadel/Ideas\nREPLY:\nok");
+    assert!(!plain.answer);
+}
+
+#[test]
+fn folder_shopping_list_resolves_running_and_state_street_target() {
+    let v = no_disk();
+    let d = vaults::parse_decision(&v, "FOLDER: shopping list\nTITLE: Costco run\nREPLY:\nAdded.");
+    assert_eq!(d.running.map(|r| r.key), Some("Shopping List"));
+    assert_eq!(d.target.map(|t| t.key), Some("State Street"));
+    assert!(!d.answer);
+}
+
+#[test]
+fn running_table_is_one_shopping_list_under_state_street() {
+    assert_eq!(vaults::RUNNING.len(), 1);
+    let r = &vaults::RUNNING[0];
+    assert_eq!(r.key, "Shopping List");
+    assert!(r.path.starts_with("State Street/"), "{}", r.path);
+    assert!(!r.path.contains(".."), "{}", r.path);
+    assert_eq!(r.target_key, "State Street");
+    assert!(no_disk().running("shopping list").is_some());
+    assert!(no_disk().running("Citadel/Ideas").is_none());
+}
+
+#[test]
+fn system_prompt_lists_shopping_list_and_answer() {
+    let sys = vaults::system_prompt();
+    assert!(sys.contains("Shopping List — "), "{sys}");
+    assert!(sys.contains("Answer — "), "{sys}");
+}
+
+#[test]
+fn answer_prompt_user_is_capped_at_lookup_chars() {
+    let notes = vec![("a".to_string(), "x".repeat(20_000))];
+    let (sys, user) = vaults::answer_prompt("q", &notes);
+    assert!(!sys.is_empty());
+    assert!(user.chars().count() <= vaults::LOOKUP_CHARS, "{}", user.chars().count());
+    assert!(user.starts_with("q\n\nNotes:\n### a\n"));
+}
+
+#[test]
+fn running_path_refuses_missing_and_symlink_accepts_regular_file() {
+    let root = tmp("running");
+    let outside = tmp("running-outside");
+    fs::create_dir_all(root.join("State Street/Cash Flow/Spending")).unwrap();
+    let v = Vaults::new(root.clone());
+    let r = v.running("shopping list").expect("running entry");
+    let p = root.join(r.path);
+
+    // Missing: refused, and nothing is created.
+    assert!(v.running_path(r).is_none());
+    assert!(!p.exists());
+    assert!(v.running_paths().is_empty());
+
+    // A symlink to a file outside the vault: refused.
+    fs::write(outside.join("real.md"), "x\n").unwrap();
+    std::os::unix::fs::symlink(outside.join("real.md"), &p).unwrap();
+    assert!(v.running_path(r).is_none());
+    fs::remove_file(&p).unwrap();
+
+    // A regular file at the path: accepted.
+    fs::write(&p, "- [ ] Eggs\n").unwrap();
+    assert_eq!(v.running_path(r), Some(p.clone()));
+    assert_eq!(v.running_paths(), vec![p]);
+
+    // The lookup allow-list covers every target folder and nothing else.
+    assert_eq!(v.allowed_dirs().len(), TARGETS.len());
+}
+
+#[test]
+fn parse_decision_reads_bolded_labels() {
+    let v = no_disk();
+    let d = vaults::parse_decision(&v, "**FOLDER:** Answer\n**REPLY:** hi");
+    assert!(d.answer);
+    assert_eq!(d.reply, "hi");
+}
+
+#[test]
+fn parse_decision_strips_bold_from_folder_key() {
+    let v = no_disk();
+    let d = vaults::parse_decision(&v, "FOLDER: **State Street**\nREPLY:\nok");
+    assert_eq!(d.target.map(|t| t.key), Some("State Street"));
+}
+
+#[test]
+fn folder_label_forms_all_route() {
+    let v = no_disk();
+    for input in [
+        "FOLDER: Shopping List",
+        "**FOLDER:** Shopping List",
+        "__FOLDER:__ Shopping List",
+        "- FOLDER: Shopping List",
+        "FOLDER : Shopping List",
+        "Folder: shopping list.",
+        "FOLDER: **Shopping List**",
+        "FOLDER: \"Shopping List\"",
+    ] {
+        let d = vaults::parse_decision(&v, input);
+        assert_eq!(d.running.map(|r| r.key), Some("Shopping List"), "{input}");
+    }
+}
+
+#[test]
+fn folder_bang_todo_routes_with_or_without_bang() {
+    let v = no_disk();
+    for input in ["FOLDER: ! Todo", "FOLDER: Todo"] {
+        let d = vaults::parse_decision(&v, input);
+        assert_eq!(d.target.map(|t| t.key), Some("! Todo"), "{input}");
+    }
+}
+
+#[test]
+fn folder_path_keys_match_whole_and_partial_names_stay_none() {
+    let v = no_disk();
+    assert_eq!(vaults::parse_decision(&v, "FOLDER: Citadel/Ideas").target.map(|t| t.key), Some("Citadel/Ideas"));
+    assert!(vaults::parse_decision(&v, "FOLDER: Citadel").target.is_none());
+}
+
+#[test]
+fn folder_answer_with_period_and_bold_reply_label() {
+    let v = no_disk();
+    assert!(vaults::parse_decision(&v, "FOLDER: answer.").answer);
+    let d = vaults::parse_decision(&v, "__REPLY:__ Added.");
+    assert_eq!(d.reply, "Added.");
+}
+
+#[test]
+fn loose_line_with_colon_stays_in_reply() {
+    let v = no_disk();
+    let d = vaults::parse_decision(&v, "Note to self: milk");
+    assert_eq!(d.reply, "Note to self: milk");
+}
+
+#[test]
+fn every_target_and_running_key_round_trips() {
+    let v = no_disk();
+    for t in TARGETS.iter() {
+        assert_eq!(v.target(t.key).map(|x| x.key), Some(t.key));
+    }
+    for r in RUNNING.iter() {
+        assert_eq!(v.running(r.key).map(|x| x.key), Some(r.key));
+    }
+}
+
+#[test]
+fn system_prompt_lists_answer_first_and_names_questions_without_mark() {
+    let p = vaults::system_prompt();
+    let a = p.find("Answer — ").expect("Answer line");
+    assert!(a < p.find("Citadel/Ideas — ").unwrap());
+    assert!(a < p.find("Shopping List — ").unwrap());
+    assert!(p.contains("whats on my costco list"), "{p}");
 }

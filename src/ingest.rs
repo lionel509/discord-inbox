@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 
 pub const PAGE: usize = 100;
+pub const NOTICE_GAP: std::time::Duration = std::time::Duration::from_secs(600);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
@@ -65,6 +66,8 @@ async fn clear<M: Inbound>(m: &M) {
 pub struct Filer {
     pub chat: Arc<dyn Chat>,
     pub vaults: Vaults,
+    /// When the last chat-failure notice went out; cleared when a chat call succeeds (#40).
+    pub last_notice: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 impl Filer {
@@ -72,6 +75,7 @@ impl Filer {
         Filer {
             chat: Arc::new(NoChat),
             vaults: Vaults::new(PathBuf::new()),
+            last_notice: Default::default(),
         }
     }
 }
@@ -87,12 +91,34 @@ async fn chat_decision(filer: &Filer, msg: &Incoming) -> Result<Decision, String
     Ok(vaults::parse_decision(&filer.vaults, &text))
 }
 
+/// Appends a list message to its running note. `None` (no running note, attachments, or a failed append) means the caller files it as today.
+fn list_append(filer: &Filer, inbox: &Path, incoming: &Incoming, d: &Decision) -> Option<String> {
+    let r = d.running?;
+    if !incoming.attachments.is_empty() {
+        return None;
+    }
+    let note = filer.vaults.running_path(r)?;
+    match dump::append_running(inbox, incoming, &note, &incoming.received[..10]) {
+        Ok(()) => Some(format!("{} (appended)", r.path)),
+        Err(e) => {
+            eprintln!("discord-inbox: append {} failed: {e}", incoming.msg_id);
+            None
+        }
+    }
+}
+
 /// One reply: where it went, the chat answer, then the receipt verdict if any. Masked and capped.
 pub fn combine(filed: Option<&str>, chat: &str, verdict: Option<&str>) -> String {
-    let mut out = match filed {
+    let head = match filed {
         Some(f) => format!("Filed: {f}"),
         None => "Kept in Inbox".to_string(),
     };
+    combine_head(&head, chat, verdict)
+}
+
+/// `combine` with the first line given as `head` (the notice, the answer label, or the filing).
+pub fn combine_head(head: &str, chat: &str, verdict: Option<&str>) -> String {
+    let mut out = head.to_string();
     out.push_str("\n\n");
     out.push_str(chat);
     if let Some(v) = verdict {
@@ -113,7 +139,7 @@ pub trait Inbound: Send + Sync {
     fn author_id(&self) -> u64;
     fn msg_id(&self) -> u64;
     fn channel_id(&self) -> u64;
-    /// UTC, exactly `YYYY-MM-DDTHH:MM:SSZ`.
+    /// Local time with offset, `YYYY-MM-DDTHH:MM:SS±HH:MM`; dump and vaults slice the first 19 chars.
     fn received(&self) -> String;
     fn content(&self) -> String;
     fn attachment_names(&self) -> Vec<String>;
@@ -182,7 +208,7 @@ pub async fn ingest_with<M: Inbound>(
     let lock = id_lock(id);
     let _one = lock.lock().await;
     let received = m.received();
-    if (dump::note_saved(&dump::note_path(inbox, &received, id)) || dump::filed_to(inbox, id).is_some())
+    if (dump::note_saved(&dump::note_path(inbox, &received, id)) || dump::saved_id(inbox, id) || dump::filed_to(inbox, id).is_some())
         && !dump::in_retry(inbox, id)
     {
         return Outcome::Skipped;
@@ -247,33 +273,82 @@ pub async fn ingest_with<M: Inbound>(
     match chat_decision(filer, &incoming).await {
         Err(e) => {
             eprintln!("discord-inbox: chat for {id} failed: {e}");
+            let verdict = crate::insight::compose(&incoming).await;
+            let first = {
+                let mut last = filer.last_notice.lock().unwrap_or_else(|p| p.into_inner());
+                let first = last.is_none_or(|t| t.elapsed() >= NOTICE_GAP);
+                if first {
+                    *last = Some(std::time::Instant::now());
+                }
+                first
+            };
             mark(m, SAVED_MARK).await;
-            if let Some(text) = crate::insight::compose(&incoming).await {
+            let text = if first {
+                Some(combine_head("Kept in Inbox", &format!("Chat failed ({e}), so this was saved to Inbox only: not filed, not answered. For the next 10 minutes, other messages that fail get ✅ and no reply."), verdict.as_deref()))
+            } else {
+                verdict.map(|v| combine_head("Kept in Inbox", "Chat is still failing; saved to Inbox only.", Some(&v)))
+            };
+            if let Some(text) = text {
                 if let Err(e) = m.reply(&text).await {
                     eprintln!("discord-inbox: reply on {id} failed: {e}");
                 }
             }
         }
         Ok(d) => {
-            let filed: Option<String> = d.target.and_then(|t| {
-                let dir = filer.vaults.dest_dir(t)?;
-                let name = vaults::note_name(&incoming.received, &d.title);
-                match dump::file_away(
+            *filer.last_notice.lock().unwrap_or_else(|p| p.into_inner()) = None;
+            let verdict = crate::insight::compose(&incoming).await;
+            if d.answer || incoming.content.trim_end().ends_with('?') {
+                // A question: answer from the bot's own notes, file nothing, keep the Inbox note.
+                let notes = dump::lookup_notes(
                     inbox,
-                    &incoming,
-                    &dir,
-                    &name,
-                    &vaults::front_extra(t, &d.tags),
-                    &vaults::hub_line(t),
-                ) {
-                    Ok(_) => Some(format!("{}/{}", t.folder, name)),
+                    &filer.vaults.allowed_dirs(),
+                    &filer.vaults.running_paths(),
+                    vaults::LOOKUP_CHARS,
+                );
+                let (system, user) = vaults::answer_prompt(&sensitive(&incoming.content), &notes);
+                let chat = filer.chat.clone();
+                let looked = tokio::task::spawn_blocking(move || chat.ask(&system, &user))
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r);
+                let (head, body) = match looked {
+                    Ok(a) => ("Answered".to_string(), a),
                     Err(e) => {
-                        eprintln!("discord-inbox: file {id} failed: {e}");
-                        None
+                        eprintln!("discord-inbox: lookup for {id} failed: {e}");
+                        (format!("Answered without the vault (lookup failed: {e})"), d.reply.clone())
+                    }
+                };
+                let text = combine_head(&head, &body, verdict.as_deref());
+                match m.reply(&text).await {
+                    Ok(()) => clear(m).await,
+                    Err(e) => {
+                        eprintln!("discord-inbox: reply on {id} failed: {e}");
+                        mark(m, SAVED_MARK).await;
                     }
                 }
+                return Outcome::Saved;
+            }
+            // A list message with no attachment is appended to its running note; otherwise it is filed as today.
+            let filed: Option<String> = list_append(filer, inbox, &incoming, &d).or_else(|| {
+                d.target.and_then(|t| {
+                    let dir = filer.vaults.dest_dir(t)?;
+                    let name = vaults::note_name(&incoming.received, &d.title);
+                    match dump::file_away(
+                        inbox,
+                        &incoming,
+                        &dir,
+                        &name,
+                        &vaults::front_extra(t, &d.tags),
+                        &vaults::hub_line(t),
+                    ) {
+                        Ok(_) => Some(format!("{}/{}", t.folder, name)),
+                        Err(e) => {
+                            eprintln!("discord-inbox: file {id} failed: {e}");
+                            None
+                        }
+                    }
+                })
             });
-            let verdict = crate::insight::compose(&incoming).await;
             let text = combine(filed.as_deref(), &d.reply, verdict.as_deref());
             match m.reply(&text).await {
                 Ok(()) => clear(m).await,

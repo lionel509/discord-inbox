@@ -102,6 +102,7 @@ async fn run(label: &str, chat: Arc<dyn Chat>) -> bool {
     let filer = Filer {
         chat,
         vaults: Vaults::new(root.clone()),
+        last_notice: Default::default(),
     };
     let allow = allowlist::parse(&format!("{SENDER}\n")).expect("demo allowlist");
     let mut ok = true;

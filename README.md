@@ -39,6 +39,12 @@ The model picks one folder from a fixed table, matched exactly; its text never b
 | `State Street` | money |
 | `Mirae` | Korean or Chinese study |
 | `! Todo` | tasks and reminders |
+| `State Street/Cash Flow/Spending/Shopping List.md` (key `Shopping List`) | groceries and things to buy: the message's own lines are appended to this running note, under its `Hub` line |
+| `Answer` (no folder) | a question or a look-up: answered from the bot's own notes, and nothing is filed |
+
+For an `Answer`, the second model call sees at most 12 000 characters: the running note's last 6 000 characters, and the Inbox and filed notes (those whose folder is in the table above), each redacted and cut to 2 000 characters, newest first. Nothing else is read. That text goes to the same zero-retention endpoint.
+
+Filenames and the `received:` line use local time with its UTC offset, so a note dated at 23:06 in New York is dated that day, not the next.
 
 A filed note (and its attachments) moves out of Inbox with a hard link, never overwriting; `Inbox/.filed` records `msg_id dest` so a moved note is not ingested or answered again. The reply says `Filed: <folder>/<note>` or `Kept in Inbox`, then the answer, then any receipt verdict.
 

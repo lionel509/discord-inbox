@@ -146,6 +146,12 @@ pub fn note_saved(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() > 0)
 }
 
+/// A non-empty Inbox note for `msg_id` exists under any time stamp (UTC from before #40, or another zone).
+pub fn saved_id(inbox: &Path, msg_id: u64) -> bool {
+    let tail = format!("_{msg_id}.md");
+    fs::read_dir(inbox).map(|rd| rd.flatten().any(|e| e.file_name().to_string_lossy().ends_with(&tail) && e.metadata().is_ok_and(|m| m.is_file() && m.len() > 0))).unwrap_or(false)
+}
+
 /// Serialises every writer of `.cursor-*`, `.retry` and notes. The live event and catch-up can run at once.
 static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -294,7 +300,6 @@ pub fn file_away(
     let (text, files) = note_text(msg, front_extra, lead);
     let dest = dest_dir.join(name);
     let tmp = dest_dir.join(format!(".{name}.tmp"));
-    let ledger = inbox.join(FILED);
 
     // Every link this call creates goes here, so a failure removes exactly what it added.
     let mut made: Vec<PathBuf> = Vec::new();
@@ -312,11 +317,7 @@ pub fn file_away(
         fs::hard_link(&tmp, &dest)?;
         made.push(dest.clone());
         fs::remove_file(&tmp)?;
-        let mut ledger_text = fs::read_to_string(&ledger).unwrap_or_default();
-        ledger_text.push_str(&format!("{} {}\n", msg.msg_id, dest.display()));
-        let ledger_tmp = inbox.join(format!("{FILED}.tmp"));
-        write_new(&ledger_tmp, &ledger_text)?;
-        fs::rename(&ledger_tmp, &ledger)
+        record_filed(inbox, msg.msg_id, &dest)
     })();
     if let Err(e) = linked {
         for p in &made {
@@ -331,6 +332,135 @@ pub fn file_away(
     }
     drop_inbox_copy(&note_path(inbox, &msg.received, msg.msg_id));
     Ok(dest)
+}
+
+/// Appends `msg_id dest` to the `.filed` ledger. Callers hold `LOCK`.
+fn record_filed(inbox: &Path, msg_id: u64, dest: &Path) -> std::io::Result<()> {
+    let ledger = inbox.join(FILED);
+    let mut text = fs::read_to_string(&ledger).unwrap_or_default();
+    text.push_str(&format!("{} {}\n", msg_id, dest.display()));
+    let tmp = inbox.join(format!("{FILED}.tmp"));
+    write_new(&tmp, &text)?;
+    fs::rename(&tmp, &ledger)
+}
+
+/// Appends the message's own lines (never model text) to an existing running note, before its
+/// `**Hub:**` line when there is one. Records the filing and drops the Inbox copy. Never creates
+/// the note, never follows a symlink, and refuses messages with attachments (those need a note).
+pub fn append_running(inbox: &Path, msg: &Incoming, note: &Path, date: &str) -> std::io::Result<()> {
+    let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    if !msg.attachments.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "attachments need a filed note",
+        ));
+    }
+    if !fs::symlink_metadata(note).map(|m| m.is_file()).unwrap_or(false) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("no running note {}", note.display()),
+        ));
+    }
+    let items: Vec<String> = crate::redact::sensitive(&msg.content)
+        .lines()
+        .map(|l| {
+            let l = l.trim();
+            l.strip_prefix("- [ ] ").or_else(|| l.strip_prefix("- ")).or_else(|| l.strip_prefix("* ")).unwrap_or(l).trim().to_string()
+        })
+        .filter(|l| !l.is_empty())
+        .collect();
+    if items.is_empty() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "nothing to append"));
+    }
+    let mut block = String::new();
+    for item in &items {
+        block.push_str(&format!("- [ ] {item} *(Discord {date})*\n"));
+    }
+
+    let text = fs::read_to_string(note)?;
+    let new_text = match text.find("\n**Hub:**").map(|i| i + 1).or(text.starts_with("**Hub:**").then_some(0)) {
+        Some(at) => format!("{}{}\n{}", &text[..at], block, &text[at..]),
+        None => {
+            let sep = if text.is_empty() || text.ends_with('\n') { "" } else { "\n" };
+            format!("{text}{sep}{block}")
+        }
+    };
+    let parent = note.parent().unwrap_or(Path::new("."));
+    let name = note.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let tmp = parent.join(format!(".{name}.tmp"));
+    write_new(&tmp, &new_text)?;
+    fs::rename(&tmp, note)?;
+
+    record_filed(inbox, msg.msg_id, note)?;
+    drop_inbox_copy(&note_path(inbox, &msg.received, msg.msg_id));
+    Ok(())
+}
+
+/// (label, redacted text) for the notes the bot may read: the running notes, then `Inbox/*.md`
+/// newest first, then `.filed` destinations (last first) that resolve under an `allowed` folder.
+/// Symlinks are never read. Stops before the note that would take the total past `cap` chars.
+pub fn lookup_notes(inbox: &Path, allowed: &[PathBuf], running: &[PathBuf], cap: usize) -> Vec<(String, String)> {
+    use std::collections::HashSet;
+    let roots: Vec<PathBuf> = allowed.iter().filter_map(|a| a.canonicalize().ok()).collect();
+    let mut cands: Vec<PathBuf> = running.to_vec();
+    if let Ok(rd) = fs::read_dir(inbox) {
+        let mut md: Vec<PathBuf> = rd
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                let hidden = p.file_name().map(|n| n.to_string_lossy().starts_with('.')).unwrap_or(true);
+                !hidden && p.extension().is_some_and(|x| x == "md")
+            })
+            .collect();
+        md.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+        cands.extend(md);
+    }
+    if let Ok(text) = fs::read_to_string(inbox.join(FILED)) {
+        for line in text.lines().rev() {
+            let Some((_, dest)) = line.split_once(' ') else { continue };
+            let p = PathBuf::from(dest);
+            let inside = p.canonicalize().map(|c| roots.iter().any(|r| c.starts_with(r))).unwrap_or(false);
+            if inside {
+                cands.push(p);
+            }
+        }
+    }
+
+    let base = inbox.parent().unwrap_or(inbox);
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut out = Vec::new();
+    let mut used = 0usize;
+    for p in cands {
+        if !seen.insert(p.clone()) {
+            continue;
+        }
+        if !fs::symlink_metadata(&p).map(|m| m.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let Ok(raw) = fs::read_to_string(&p) else { continue };
+        let clean = crate::redact::sensitive(&raw);
+        let clean = clean.trim();
+        // The running note keeps its last 6 000 chars: new items go at the end (#40 review).
+        let text: String = if running.contains(&p) {
+            let n = clean.chars().count();
+            clean.chars().skip(n.saturating_sub(6_000)).collect()
+        } else {
+            clean.chars().take(2_000).collect()
+        };
+        if text.is_empty() {
+            continue;
+        }
+        let label = match p.strip_prefix(base) {
+            Ok(rel) => rel.display().to_string(),
+            Err(_) => p.file_name().unwrap_or_default().to_string_lossy().to_string(),
+        };
+        let cost = label.chars().count() + text.chars().count();
+        if used + cost > cap {
+            break;
+        }
+        used += cost;
+        out.push((label, text));
+    }
+    out
 }
 
 #[cfg(test)]

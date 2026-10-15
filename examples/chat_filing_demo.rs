@@ -140,6 +140,7 @@ async fn main() -> ExitCode {
     let filer = Filer {
         chat: stub.clone(),
         vaults: Vaults::new(root.clone()),
+        last_notice: Default::default(),
     };
     let allow = allowlist::parse(&format!("{SENDER}\n")).expect("demo allowlist");
 
