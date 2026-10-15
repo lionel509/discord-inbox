@@ -1,6 +1,7 @@
 //! The agentic lookup loop (#49): the model may call the read-only note tools a few times,
 //! then answers. Every limit is here: the number of calls, the characters of tool output per
-//! DM, and the wall clock. Once one is hit, the last model call has its tools switched off.
+//! DM, and the wall clock. The deadline is checked only before a call starts, so the worst case is about
+//! DEADLINE + two model timeouts (~100 s), not DEADLINE itself. Once one is hit, the last model call has its tools switched off.
 use crate::chat::{Chat, Turn, Usage};
 use crate::tools::Lookup;
 use serde_json::{json, Value};

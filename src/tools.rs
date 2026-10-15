@@ -114,13 +114,13 @@ impl Lookup {
             return None;
         }
         // Models copy the trailing slash from list_folder output; treat "Fidelity/" as "Fidelity".
-        let rel = rel.trim_end_matches(['/', '\\']);
+        let rel = rel.trim_end().trim_end_matches(['/', '\\']).trim_end();
         let parts: Vec<&str> = rel.split(['/', '\\']).collect();
         if parts.iter().any(|p| p.is_empty() || p.starts_with('.')) {
             return None;
         }
         let (first, rest) = parts.split_first()?;
-        let (name, base) = self.roots().into_iter().find(|(n, _)| n == first)?;
+        let (name, base) = self.roots().into_iter().find(|(n, _)| n.eq_ignore_ascii_case(first))?;
         let mut p = base.clone();
         for c in rest {
             p.push(c);
@@ -245,6 +245,7 @@ impl Lookup {
 
     /// Dispatch one model tool call. `arguments` is the raw JSON object the model sent.
     pub fn call(&self, name: &str, arguments: &str) -> Result<String, String> {
+        let arguments = if arguments.trim().is_empty() { "{}" } else { arguments };
         let args: Value = serde_json::from_str(arguments).map_err(|_| "bad arguments".to_string())?;
         if !args.is_object() {
             return Err("bad arguments".into());
