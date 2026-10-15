@@ -116,10 +116,18 @@ pub fn combine(filed: Option<&str>, chat: &str, verdict: Option<&str>) -> String
     combine_head(&head, chat, verdict)
 }
 
-/// `combine` with the first line given as `head` (the notice, the answer label, or the filing).
+/// `combine` with the first line given as `head` (the notice or the filing).
 pub fn combine_head(head: &str, chat: &str, verdict: Option<&str>) -> String {
-    let mut out = head.to_string();
-    out.push_str("\n\n");
+    reply_text(Some(head), chat, verdict)
+}
+
+/// An answer reply is the model's text alone, no status label (#45). `head` is `None` for it.
+fn reply_text(head: Option<&str>, chat: &str, verdict: Option<&str>) -> String {
+    let mut out = String::new();
+    if let Some(h) = head {
+        out.push_str(h);
+        out.push_str("\n\n");
+    }
     out.push_str(chat);
     if let Some(v) = verdict {
         out.push_str("\n\n");
@@ -132,6 +140,27 @@ pub fn combine_head(head: &str, chat: &str, verdict: Option<&str>) -> String {
         return cut;
     }
     out
+}
+
+/// How often "typing" is re-sent while a model call runs. Discord's indicator lasts about 10 s (#45).
+pub const TYPING_EVERY: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// Runs `work`, re-sending the typing indicator every `TYPING_EVERY` until it finishes. Live DMs only: catch-up never types (#45).
+async fn typing_while<M: Inbound, F: std::future::Future>(m: &M, work: F) -> F::Output {
+    if !m.live() {
+        return work.await;
+    }
+    // Sent before the request starts, then again every TYPING_EVERY until the work is done.
+    m.typing().await;
+    tokio::pin!(work);
+    let start = tokio::time::Instant::now() + TYPING_EVERY;
+    let mut every = tokio::time::interval_at(start, TYPING_EVERY);
+    loop {
+        tokio::select! {
+            out = &mut work => return out,
+            _ = every.tick() => m.typing().await,
+        }
+    }
 }
 
 /// One message, as the decision logic sees it.
@@ -155,6 +184,14 @@ pub trait Inbound: Send + Sync {
     fn own_reactions(&self) -> Vec<String>;
     /// Sends `text` back into the channel this message came from.
     fn reply(&self, text: &str) -> impl std::future::Future<Output = Result<(), String>> + Send;
+    /// False for a message replayed from history (catch-up). Only live messages show typing (#45).
+    fn live(&self) -> bool {
+        true
+    }
+    /// Shows "typing" in the message's channel, best-effort. Default: nothing.
+    fn typing(&self) -> impl std::future::Future<Output = ()> + Send {
+        async {}
+    }
 }
 
 /// The Discord history calls the catch-up needs.
@@ -270,7 +307,7 @@ pub async fn ingest_with<M: Inbound>(
     if let Err(e) = dump::remove_retry(inbox, id) {
         eprintln!("discord-inbox: retry clear for {id} failed: {e}");
     }
-    match chat_decision(filer, &incoming).await {
+    match typing_while(m, chat_decision(filer, &incoming)).await {
         Err(e) => {
             eprintln!("discord-inbox: chat for {id} failed: {e}");
             let verdict = crate::insight::compose(&incoming).await;
@@ -299,26 +336,27 @@ pub async fn ingest_with<M: Inbound>(
             let verdict = crate::insight::compose(&incoming).await;
             if d.answer || incoming.content.trim_end().ends_with('?') {
                 // A question: answer from the bot's own notes, file nothing, keep the Inbox note.
-                let notes = dump::lookup_notes(
+                let notes = dump::lookup_notes_with(
                     inbox,
                     &filer.vaults.allowed_dirs(),
                     &filer.vaults.running_paths(),
+                    &filer.vaults.ledger().into_iter().collect::<Vec<_>>(),
                     vaults::LOOKUP_CHARS,
                 );
                 let (system, user) = vaults::answer_prompt(&sensitive(&incoming.content), &notes);
                 let chat = filer.chat.clone();
-                let looked = tokio::task::spawn_blocking(move || chat.ask(&system, &user))
+                let looked = typing_while(m, tokio::task::spawn_blocking(move || chat.ask(&system, &user)))
                     .await
                     .map_err(|e| e.to_string())
                     .and_then(|r| r);
-                let (head, body) = match looked {
-                    Ok(a) => ("Answered".to_string(), a),
+                let body = match looked {
+                    Ok(a) => a,
                     Err(e) => {
                         eprintln!("discord-inbox: lookup for {id} failed: {e}");
-                        (format!("Answered without the vault (lookup failed: {e})"), d.reply.clone())
+                        format!("{}\n\n(I couldn't read your notes just now.)", d.reply)
                     }
                 };
-                let text = combine_head(&head, &body, verdict.as_deref());
+                let text = reply_text(None, &body, verdict.as_deref());
                 match m.reply(&text).await {
                     Ok(()) => clear(m).await,
                     Err(e) => {

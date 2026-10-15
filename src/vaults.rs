@@ -43,6 +43,12 @@ pub static RUNNING: [Running; 1] = [Running {
 
 pub const PROMPT_CHARS: usize = 4000;
 
+/// The IOU ledger (ledger.py output), read by the lookup for an Answer (#45).
+pub const LEDGER: &str = "State Street/Assets/Receivables/Who Owes Me.md";
+
+/// Stormy, the voice of every reply (#45). Private: the public profile never says what the bot does.
+pub const PERSONA: &str = "You're Stormy, Pusheen's little sister: a fluffy gray cat and Lionel's personal assistant. You're warm, a little sassy, and very on top of things. Keep replies short, like a text from a friend who has everything handled. Answer first, then add one small cat-ish touch now and then (a 🐾, a \"purr\", a dramatic sigh about a long list). Don't overdo it. When something fails, say so plainly.";
+
 /// Cap on the vault text sent to the model for an `Answer` (#40).
 pub const LOOKUP_CHARS: usize = 12_000;
 
@@ -110,13 +116,23 @@ impl Vaults {
     /// The running note `root/<path>` when it is an existing regular file at
     /// exactly that place. Never creates anything; a symlink is refused (#40).
     pub fn running_path(&self, r: &Running) -> Option<PathBuf> {
-        let p = self.root.join(r.path);
+        self.regular_file(r.path)
+    }
+
+    /// The IOU ledger `root/LEDGER`, read-only for the lookup (#45). Same rules as `running_path`.
+    pub fn ledger(&self) -> Option<PathBuf> {
+        self.regular_file(LEDGER)
+    }
+
+    /// `root/rel` when it is an existing regular file at exactly that place (no symlink, no other path).
+    fn regular_file(&self, rel: &str) -> Option<PathBuf> {
+        let p = self.root.join(rel);
         let meta = fs::symlink_metadata(&p).ok()?;
         if meta.file_type().is_symlink() || !meta.is_file() {
             return None;
         }
         let real = p.canonicalize().ok()?;
-        let want = self.root.canonicalize().ok()?.join(r.path);
+        let want = self.root.canonicalize().ok()?.join(rel);
         if real != want {
             return None;
         }
@@ -136,7 +152,8 @@ impl Vaults {
 }
 
 pub fn system_prompt() -> String {
-    let mut s = String::from(
+    let mut s = format!("{PERSONA}\n\n");
+    s.push_str(
         "You file one message from the owner into his vault and reply to it.\n\
          Pick the folder whose key fits best. Keys:\n",
     );
@@ -172,10 +189,13 @@ pub fn user_prompt(content: &str, ocr: &[String]) -> String {
 /// `(system, user)` for the second ask that answers a question from the
 /// bot's own notes. `notes` is `(label, redacted text)` pairs (#40).
 pub fn answer_prompt(question: &str, notes: &[(String, String)]) -> (String, String) {
-    let system = "You answer one question from the owner using only his notes below. \
-                  List the items you find. If the notes do not hold the answer, say so in one sentence. \
-                  1 to 4 sentences, in the user's language. Never include card numbers."
-        .to_string();
+    let system = format!(
+        "{PERSONA}\n\n\
+         You answer one question from the owner using only his notes below. \
+         Names in the question may be misspelled (\"willam\" = William). \
+         List the items you find. If the notes do not hold the answer, say so in one sentence. \
+         1 to 4 sentences, in the user's language. Never include card numbers."
+    );
     let mut user = format!("{question}\n\nNotes:\n");
     for (label, text) in notes {
         user.push_str(&format!("### {label}\n{text}\n\n"));

@@ -400,9 +400,15 @@ pub fn append_running(inbox: &Path, msg: &Incoming, note: &Path, date: &str) -> 
 /// newest first, then `.filed` destinations (last first) that resolve under an `allowed` folder.
 /// Symlinks are never read. Stops before the note that would take the total past `cap` chars.
 pub fn lookup_notes(inbox: &Path, allowed: &[PathBuf], running: &[PathBuf], cap: usize) -> Vec<(String, String)> {
+    lookup_notes_with(inbox, allowed, running, &[], cap)
+}
+
+/// `lookup_notes` plus `extra` files (the IOU ledger, #45) read right after the running notes, whole up to 6 000 chars.
+pub fn lookup_notes_with(inbox: &Path, allowed: &[PathBuf], running: &[PathBuf], extra: &[PathBuf], cap: usize) -> Vec<(String, String)> {
     use std::collections::HashSet;
     let roots: Vec<PathBuf> = allowed.iter().filter_map(|a| a.canonicalize().ok()).collect();
     let mut cands: Vec<PathBuf> = running.to_vec();
+    cands.extend(extra.iter().cloned());
     if let Ok(rd) = fs::read_dir(inbox) {
         let mut md: Vec<PathBuf> = rd
             .filter_map(|e| e.ok().map(|e| e.path()))
@@ -443,6 +449,8 @@ pub fn lookup_notes(inbox: &Path, allowed: &[PathBuf], running: &[PathBuf], cap:
         let text: String = if running.contains(&p) {
             let n = clean.chars().count();
             clean.chars().skip(n.saturating_sub(6_000)).collect()
+        } else if extra.contains(&p) {
+            clean.chars().take(6_000).collect()
         } else {
             clean.chars().take(2_000).collect()
         };

@@ -23,6 +23,8 @@ const KEYCHAIN_ACCOUNT: &str = "discord-inbox";
 struct LiveMsg {
     http: Arc<Http>,
     msg: Message,
+    /// false for a message fetched from history by the catch-up (#45).
+    live: bool,
 }
 
 impl Inbound for LiveMsg {
@@ -86,6 +88,14 @@ impl Inbound for LiveMsg {
             .map(|_| ())
             .map_err(|e| e.to_string())
     }
+    fn live(&self) -> bool {
+        self.live
+    }
+    async fn typing(&self) {
+        if let Err(e) = self.msg.channel_id.broadcast_typing(&self.http).await {
+            eprintln!("discord-inbox: typing in {} failed: {e}", self.msg.channel_id);
+        }
+    }
 }
 
 /// The Discord history calls, adapted to the lib's `History`.
@@ -118,6 +128,7 @@ impl History for Live {
             .map(|msg| LiveMsg {
                 http: self.http.clone(),
                 msg,
+                live: false,
             })
             .collect())
     }
@@ -130,6 +141,7 @@ impl History for Live {
         Ok(LiveMsg {
             http: self.http.clone(),
             msg,
+            live: false,
         })
     }
 }
@@ -222,6 +234,7 @@ impl EventHandler for Handler {
             &LiveMsg {
                 http: ctx.http.clone(),
                 msg,
+                live: true,
             },
             &self.filer,
         )
