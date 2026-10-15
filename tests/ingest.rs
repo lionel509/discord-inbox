@@ -1653,3 +1653,56 @@ async fn running_note_missing_files_a_note() {
     assert_eq!(replies.len(), 1, "{replies:?}");
     assert!(replies[0].starts_with("Filed: State Street/2026-10-13 Costco list.md"), "{}", replies[0]);
 }
+
+/// One notice per failure episode: a repeat of the same chat error gets ✅ only, and a success ends the episode.
+#[tokio::test]
+async fn same_chat_error_notices_once_until_chat_works() {
+    let inbox = scratch("chat-once");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![
+        Err("http 401".to_string()),
+        Err("http 401".to_string()),
+        answer("Private", "Note", "misc", "ok"),
+        Err("http 401".to_string()),
+    ]);
+    let f = filer(&inbox, &chat);
+    for id in 340..344 {
+        let s = spec_text(MAIN, MAIN_CH, id, "plain message", &[]);
+        ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await;
+    }
+    let first = w.replies_for(340);
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert!(first[0].contains("Chat failed (http 401)"), "{}", first[0]);
+    assert!(w.replies_for(341).is_empty(), "{:?}", w.replies_for(341));
+    assert_eq!(w.marks(341), vec!["✅"]);
+    let third = w.replies_for(342);
+    assert_eq!(third.len(), 1, "{third:?}");
+    assert!(third[0].contains("ok"), "{}", third[0]);
+    let fourth = w.replies_for(343);
+    assert_eq!(fourth.len(), 1, "{fourth:?}");
+    assert!(fourth[0].contains("Chat failed (http 401)"), "{}", fourth[0]);
+}
+
+/// A question the model routes to a running list is answered, and the list is left alone.
+#[tokio::test]
+async fn question_routed_to_running_list_is_answered() {
+    let inbox = scratch("chat-running-q");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![
+        answer("Shopping List", "Costco run", "shopping", "Added."),
+        Ok("Eggs, masking tape".to_string()),
+    ]);
+    let f = filer(&inbox, &chat);
+    let root = root_of(&inbox);
+    let shop = root.join("State Street/Cash Flow/Spending");
+    fs::create_dir_all(&shop).unwrap();
+    fs::write(shop.join("Shopping List.md"), "- [ ] Eggs\n").unwrap();
+
+    let s = spec_text(MAIN, MAIN_CH, 350, "whats on my costco like list?", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    let text = fs::read_to_string(shop.join("Shopping List.md")).unwrap();
+    assert!(!text.contains("whats on my costco"), "{text}");
+    let replies = w.replies_for(350);
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert!(replies[0].starts_with("Answered"), "{}", replies[0]);
+}

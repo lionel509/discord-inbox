@@ -270,3 +270,18 @@ fn running_path_refuses_missing_and_symlink_accepts_regular_file() {
     // The lookup allow-list covers every target folder and nothing else.
     assert_eq!(v.allowed_dirs().len(), TARGETS.len());
 }
+
+#[test]
+fn parse_decision_reads_bolded_labels() {
+    let v = no_disk();
+    let d = vaults::parse_decision(&v, "**FOLDER:** Answer\n**REPLY:** hi");
+    assert!(d.answer);
+    assert_eq!(d.reply, "hi");
+}
+
+#[test]
+fn parse_decision_strips_bold_from_folder_key() {
+    let v = no_disk();
+    let d = vaults::parse_decision(&v, "FOLDER: **State Street**\nREPLY:\nok");
+    assert_eq!(d.target.map(|t| t.key), Some("State Street"));
+}

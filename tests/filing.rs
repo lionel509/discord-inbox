@@ -314,3 +314,50 @@ fn lookup_notes_respects_cap_and_order() {
     assert!(all[1].0.ends_with("2026-10-13 b.md"), "Inbox not newest first: {all:?}");
     assert!(all[2].0.ends_with("2026-10-12 a.md"), "{all:?}");
 }
+
+#[test]
+fn append_running_keeps_leading_emphasis() {
+    let (inbox, root) = scratch("append-emphasis");
+    let note = plant_running(&root, RUNNING_BODY);
+    let msg = text_msg(405, "*eggs* and milk");
+    write_note(&inbox, &msg).unwrap();
+    append_running(&inbox, &msg, &note, "2026-10-13").unwrap();
+    let after = fs::read_to_string(&note).unwrap();
+    assert!(after.contains("- [ ] *eggs* and milk *(Discord 2026-10-13)*"), "{after}");
+}
+
+#[test]
+fn append_running_strips_only_bullet_marker() {
+    let (inbox, root) = scratch("append-bullet");
+    let note = plant_running(&root, RUNNING_BODY);
+    let msg = text_msg(406, "- [ ] eggs");
+    write_note(&inbox, &msg).unwrap();
+    append_running(&inbox, &msg, &note, "2026-10-13").unwrap();
+    let after = fs::read_to_string(&note).unwrap();
+    assert!(after.contains("- [ ] eggs *(Discord 2026-10-13)*"), "{after}");
+    assert!(!after.contains("[ ] [ ]"), "{after}");
+}
+
+#[test]
+fn lookup_notes_keeps_tail_of_long_running_list() {
+    let (inbox, root) = scratch("lookup-tail");
+    let mut body = String::from("## Costco\n");
+    for i in 0..300 {
+        body.push_str(&format!("- [ ] item {i:03}\n"));
+    }
+    let run = plant_running(&root, &body);
+    let notes = lookup_notes(&inbox, &[], &[run], 12_000);
+    assert_eq!(notes.len(), 1, "running note missing from lookup");
+    assert!(notes[0].1.contains("item 299"), "running list cut before its last item");
+}
+
+#[test]
+fn lookup_notes_caps_running_note_at_its_tail() {
+    let (inbox, root) = scratch("lookup-big");
+    let body = format!("{}\n- [ ] last one\n", "x".repeat(10_000));
+    let run = plant_running(&root, &body);
+    let notes = lookup_notes(&inbox, &[], &[run], 100_000);
+    assert_eq!(notes.len(), 1, "running note missing from lookup");
+    assert!(notes[0].1.contains("last one"), "newest item cut");
+    assert!(notes[0].1.chars().count() <= 6_000, "{}", notes[0].1.chars().count());
+}
