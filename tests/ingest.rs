@@ -1812,7 +1812,7 @@ async fn lookup_works_without_the_iou_ledger() {
     let s = spec_text(MAIN, MAIN_CH, 381, "how much does willam owe me", &[]);
     assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
     assert_eq!(w.replies_for(381), vec!["No record of that.".to_string()]);
-    assert!(chat.prompts.lock().unwrap()[1].contains("Notes:"));
+    assert!(chat.prompts.lock().unwrap()[1].contains("how much does willam owe me"));
 }
 
 /// A long DM sent as `message.txt` with an empty body is routed on the file's text, never answered as a lookup (#46 scope add).
@@ -1888,4 +1888,42 @@ async fn couldnt_file_line_when_filing_fails() {
         w.replies_for(393),
         vec!["Filed.\n\nHmm, I couldn't file that one, so it's safe in your Inbox for now.".to_string()]
     );
+}
+
+fn tree_of(dir: &Path, skip: &Path, out: &mut Vec<PathBuf>) {
+    for e in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let p = e.path();
+        if p.starts_with(skip) {
+            continue;
+        }
+        out.push(p.clone());
+        if p.is_dir() && !p.is_symlink() {
+            tree_of(&p, skip, out);
+        }
+    }
+}
+
+/// The Answer path is read-only (#49): the tool loop files nothing under the vault root. The intake record in `Inbox/` is written for every message, so it is skipped.
+#[tokio::test]
+async fn answer_path_writes_nothing_anywhere_under_root() {
+    let inbox = scratch("answer-writes");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![
+        answer("Answer", "pantry question", "food", "Checking."),
+        Ok("Cod with soy sauce.".to_string()),
+    ]);
+    let f = filer(&inbox, &chat);
+    let root = root_of(&inbox);
+    fs::create_dir_all(root.join("Fidelity/Pantry")).unwrap();
+    fs::write(root.join("Fidelity/Pantry/Pantry.md"), "cod fillets, soy sauce\n").unwrap();
+    let mut before = Vec::new();
+    tree_of(&root, &inbox, &mut before);
+    before.sort();
+    let s = spec_text(MAIN, MAIN_CH, 382, "with the ingredients in my pantry what can i do with my cod?", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    let mut after = Vec::new();
+    tree_of(&root, &inbox, &mut after);
+    after.sort();
+    assert_eq!(after, before);
+    assert_eq!(w.replies_for(382), vec!["Cod with soy sauce.".to_string()]);
 }
