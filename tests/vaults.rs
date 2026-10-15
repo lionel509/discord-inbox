@@ -34,6 +34,8 @@ fn target_matches_exact_and_case_insensitive_keys() {
 #[test]
 fn target_rejects_inbox_private_paths_dotdot_absolute_partial_empty() {
     let v = no_disk();
+    // Round 3: a trailing slash now matches its table key (norm drops "/"); it is still the static table entry, never a path.
+    assert_eq!(v.target("Citadel/Ideas/").map(|t| t.key), Some("Citadel/Ideas"));
     for s in [
         "Inbox",
         "inbox",
@@ -46,7 +48,6 @@ fn target_rejects_inbox_private_paths_dotdot_absolute_partial_empty() {
         "Fidelity/Want to Make/../../Private",
         "Citadel",
         "Ideas",
-        "Citadel/Ideas/",
         "",
         "   ",
     ] {

@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 
 pub const PAGE: usize = 100;
+pub const NOTICE_GAP: std::time::Duration = std::time::Duration::from_secs(600);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
@@ -65,8 +66,8 @@ async fn clear<M: Inbound>(m: &M) {
 pub struct Filer {
     pub chat: Arc<dyn Chat>,
     pub vaults: Vaults,
-    /// The chat error last reported to the user; cleared when a chat call succeeds (#40).
-    pub last_notice: std::sync::Mutex<Option<String>>,
+    /// When the last chat-failure notice went out; cleared when a chat call succeeds (#40).
+    pub last_notice: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 impl Filer {
@@ -275,13 +276,15 @@ pub async fn ingest_with<M: Inbound>(
             let verdict = crate::insight::compose(&incoming).await;
             let first = {
                 let mut last = filer.last_notice.lock().unwrap_or_else(|p| p.into_inner());
-                let first = last.as_deref() != Some(e.as_str());
-                *last = Some(e.clone());
+                let first = last.is_none_or(|t| t.elapsed() >= NOTICE_GAP);
+                if first {
+                    *last = Some(std::time::Instant::now());
+                }
                 first
             };
             mark(m, SAVED_MARK).await;
             let text = if first {
-                Some(combine_head("Kept in Inbox", &format!("Chat failed ({e}), so this was saved to Inbox only: not filed, not answered. Until chat works again, later messages get ✅ and no reply."), verdict.as_deref()))
+                Some(combine_head("Kept in Inbox", &format!("Chat failed ({e}), so this was saved to Inbox only: not filed, not answered. For the next 10 minutes, other messages that fail get ✅ and no reply."), verdict.as_deref()))
             } else {
                 verdict.map(|v| combine_head("Kept in Inbox", "Chat is still failing; saved to Inbox only.", Some(&v)))
             };
@@ -294,7 +297,7 @@ pub async fn ingest_with<M: Inbound>(
         Ok(d) => {
             *filer.last_notice.lock().unwrap_or_else(|p| p.into_inner()) = None;
             let verdict = crate::insight::compose(&incoming).await;
-            if d.answer || (d.running.is_some() && incoming.content.trim_end().ends_with('?')) {
+            if d.answer || incoming.content.trim_end().ends_with('?') {
                 // A question: answer from the bot's own notes, file nothing, keep the Inbox note.
                 let notes = dump::lookup_notes(
                     inbox,

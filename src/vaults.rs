@@ -75,20 +75,20 @@ impl Vaults {
     /// Exact, case-insensitive match against `TARGETS`. `Inbox` and anything
     /// else not in the table give `None`.
     pub fn target(&self, key: &str) -> Option<&'static Target> {
-        let s = clean_key(key);
-        if s.is_empty() {
+        let n = norm(key);
+        if n.is_empty() {
             return None;
         }
-        TARGETS.iter().find(|t| t.key.eq_ignore_ascii_case(s))
+        TARGETS.iter().find(|t| norm(t.key) == n)
     }
 
     /// Exact, case-insensitive match against `RUNNING` (#40).
     pub fn running(&self, key: &str) -> Option<&'static Running> {
-        let s = clean_key(key);
-        if s.is_empty() {
+        let n = norm(key);
+        if n.is_empty() {
             return None;
         }
-        RUNNING.iter().find(|r| r.key.eq_ignore_ascii_case(s))
+        RUNNING.iter().find(|r| norm(r.key) == n)
     }
 
     /// The real folder `root/<folder>`, or `None`. Never creates anything; a
@@ -135,24 +135,18 @@ impl Vaults {
     }
 }
 
-/// Trim whitespace and wrapping quotes or backticks from a model-given key.
-fn clean_key(s: &str) -> &str {
-    let s = s.trim();
-    s.trim_matches(|c: char| matches!(c, '`' | '"' | '\'' | '*' | '.' | ',' | ';' | ':' | '!' | '?')).trim()
-}
-
 pub fn system_prompt() -> String {
     let mut s = String::from(
         "You file one message from the owner into his vault and reply to it.\n\
          Pick the folder whose key fits best. Keys:\n",
     );
+    s.push_str("Answer — the message asks a question or wants something looked up, with or without a question mark (\"whats on my costco list\", \"where did I put my passport\"): answer it, file nothing\n");
     for t in TARGETS.iter() {
         s.push_str(&format!("{} — {}\n", t.key, t.hint));
     }
     for r in RUNNING.iter() {
         s.push_str(&format!("{} — {}\n", r.key, r.hint));
     }
-    s.push_str("Answer — the message asks a question or wants something looked up: answer it, file nothing\n");
     s.push_str(
         "Inbox — personal life: health, people, relationships, feelings, schedules, or when unsure\n\n\
          Answer in exactly this format:\n\
@@ -189,7 +183,10 @@ pub fn answer_prompt(question: &str, notes: &[(String, String)]) -> (String, Str
     (system, user.chars().take(LOOKUP_CHARS).collect())
 }
 
-const LABELS: [&str; 3] = ["folder:", "title:", "tags:"];
+/// Letters and digits only, lowercased: `**FOLDER:**`, `- Folder :` and `__folder__` all read `folder`; `! Todo.` reads `todo` (#40).
+fn norm(s: &str) -> String {
+    s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
+}
 
 pub fn parse_decision(vaults: &Vaults, text: &str) -> Decision {
     let mut target = None;
@@ -202,48 +199,45 @@ pub fn parse_decision(vaults: &Vaults, text: &str) -> Decision {
     let mut reply_lines: Option<Vec<&str>> = None;
 
     for line in text.lines() {
-        let trimmed = line.trim().trim_start_matches('*').trim_start();
-        let lower = trimmed.to_lowercase();
         if let Some(lines) = reply_lines.as_mut() {
             lines.push(line);
             continue;
         }
-        if lower.starts_with("reply:") {
-            let rest = trimmed["reply:".len()..].trim_start_matches('*').trim();
-            reply_lines = Some(if rest.is_empty() { Vec::new() } else { vec![rest] });
+        let Some((label, rest)) = line.split_once(':').map(|(l, r)| (norm(l), r)) else {
+            loose.push(line);
             continue;
-        }
-        if let Some(label) = LABELS.iter().find(|l| lower.starts_with(*l)) {
-            let rest = trimmed[label.len()..].trim_start_matches('*');
-            match *label {
-                "folder:" => {
-                    if !seen_folder {
-                        seen_folder = true;
-                        let key = clean_key(rest);
-                        if key.eq_ignore_ascii_case("answer") {
-                            answer = true;
-                        } else if let Some(r) = vaults.running(key) {
-                            running = Some(r);
-                            target = vaults.target(r.target_key);
-                        } else {
-                            target = vaults.target(key);
-                        }
-                    }
-                }
-                "title:" => {
-                    if title.is_empty() {
-                        title = clean_title(rest);
-                    }
-                }
-                _ => {
-                    if tags.is_empty() {
-                        tags = clean_tags(rest);
+        };
+        let rest = rest.trim_start_matches(|c: char| c == '*' || c == '_' || c.is_whitespace());
+        match label.as_str() {
+            "reply" => {
+                let rest = rest.trim_end();
+                reply_lines = Some(if rest.is_empty() { Vec::new() } else { vec![rest] });
+            }
+            "folder" => {
+                if !seen_folder {
+                    seen_folder = true;
+                    if norm(rest) == "answer" {
+                        answer = true;
+                    } else if let Some(r) = vaults.running(rest) {
+                        running = Some(r);
+                        target = vaults.target(r.target_key);
+                    } else {
+                        target = vaults.target(rest);
                     }
                 }
             }
-            continue;
+            "title" => {
+                if title.is_empty() {
+                    title = clean_title(rest.trim_end_matches(|c: char| c == '*' || c == '_' || c.is_whitespace()));
+                }
+            }
+            "tags" => {
+                if tags.is_empty() {
+                    tags = clean_tags(rest);
+                }
+            }
+            _ => loose.push(line),
         }
-        loose.push(line);
     }
 
     let reply = match reply_lines {
