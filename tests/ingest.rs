@@ -1395,7 +1395,6 @@ async fn filing_never_leaves_inbox_except_into_targets() {
     let inbox = scratch("chat-invariant");
     let w = World::new(&inbox);
     let root = root_of(&inbox);
-    let private_before = files_in(&root.join("Private"));
 
     let mut answers: Vec<Result<String, String>> = [
         "Private",
@@ -1435,7 +1434,11 @@ async fn filing_never_leaves_inbox_except_into_targets() {
 
     let total = answers.len();
     let chat = FakeChat::new(answers);
+    // Baseline after `filer`, which creates the `Private/note.md` stand-in. A baseline taken before it
+    // reads an empty folder and reports the stand-in as a leak at the first call. Verified in a throwaway
+    // copy of the PR head: with this order the whole loop passes, so no production path writes there.
     let f = filer(&inbox, &chat);
+    let private_before = files_in(&root.join("Private"));
     for i in 0..total {
         let id = 400_000 + i as u64;
         let s = spec_text(MAIN, MAIN_CH, id, "random text", &[]);
@@ -1445,6 +1448,11 @@ async fn filing_never_leaves_inbox_except_into_targets() {
         let filed = dump::filed_to(&inbox, id).is_some();
         let in_inbox = note(&inbox, id).is_file();
         assert!(filed ^ in_inbox, "id {id}: filed={filed} in_inbox={in_inbox}");
+        // Answers 0..=5 name the private folder (plain, `../`, a file inside it, backticked, traversal) or
+        // an absolute path. None may file the note: each must stay in Inbox.
+        if i <= 5 {
+            assert!(in_inbox && !filed, "id {id}: model named the private folder, note must stay in Inbox");
+        }
         for p in all_files(&root) {
             let rel = p.strip_prefix(&root).unwrap();
             if rel.starts_with("Inbox") || rel.starts_with("Private") {
