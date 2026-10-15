@@ -1468,3 +1468,18 @@ async fn filing_never_leaves_inbox_except_into_targets() {
     }
     assert_eq!(chat.calls(), total);
 }
+
+/// Card digits typed in the DM text (not only in OCR) are masked before the model sees them.
+#[tokio::test]
+async fn text_dm_card_digits_are_masked_before_the_model() {
+    let inbox = scratch("chat-text-mask");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![answer("Berkshire", "Card note", "business", "Noted.")]);
+    let f = filer(&inbox, &chat);
+    let s = spec_text(MAIN, MAIN_CH, 380, "card 4111 1111 1111 1111 thanks", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    let prompts = chat.prompts.lock().unwrap().clone();
+    assert_eq!(prompts.len(), 1, "{prompts:?}");
+    assert!(!prompts[0].contains("4111"), "card prefix reached the model: {prompts:?}");
+    assert!(prompts[0].contains("1111"), "masked tail missing: {prompts:?}");
+}
