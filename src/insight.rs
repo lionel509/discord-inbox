@@ -308,18 +308,24 @@ pub fn parse_scaledown(body: &str) -> Option<Insight> {
     let merchant = confident("merchant").unwrap_or_default();
     let total = confident("total")
         .map(|t| t.strip_prefix('$').unwrap_or(&t).trim().to_string())
+        .filter(|t| t.chars().any(is_digit))
         .unwrap_or_default();
-    // No receipt label and no total is no verdict at all: `None` lets the chain fall through to Haiku.
-    // An explicit receipt label, yes or no, is a verdict on its own. It must be confident and read
-    // yes or no; any other label is ignored, so it cannot overrule a total or stand in for one.
-    let receipt_label = confident("receipt").filter(|t| matches!(t.chars().next(), Some('y' | 'Y' | 'n' | 'N')));
-    if receipt_label.is_none() && total.is_empty() {
-        return None;
-    }
-    let receipt = match receipt_label {
-        Some(text) => matches!(text.chars().next(), Some('y' | 'Y')),
-        // No label, but a found total is the evidence.
-        None => true,
+    // Receipt verdict: every confident receipt label that is exactly yes or no (ignoring case and
+    // surrounding whitespace) is a vote. A yes alone is true; a no alone is false unless a total is
+    // found; no votes with a total is evidence of a receipt; anything else (a disagreement, a no
+    // beside a total, or no usable label and no total) is None, so the chain falls through to Haiku.
+    let votes = |word: &str| {
+        entities.iter().any(|e| {
+            e.get("type").and_then(Value::as_str) == Some("receipt")
+                && e.get("confidence").and_then(Value::as_f64).is_some_and(|c| c >= CONFIDENCE)
+                && e.get("text").and_then(Value::as_str).is_some_and(|t| t.trim().eq_ignore_ascii_case(word))
+        })
+    };
+    let receipt = match (votes("yes"), votes("no"), !total.is_empty()) {
+        (true, false, _) => true,
+        (false, true, false) => false,
+        (false, false, true) => true,
+        _ => return None,
     };
     let category = confident("category").unwrap_or_default().to_ascii_lowercase();
     Some(Insight {
