@@ -70,7 +70,8 @@ fn is_date(s: &str) -> bool {
 /// `restock [all] [YYYY-MM-DD]` and `out of X`. A question ("out of milk?") or any other sentence is not a command.
 pub fn command(content: &str) -> Option<Command> {
     let t = content.trim().to_lowercase();
-    if let Some(rest) = t.strip_prefix("restock") {
+    let restock_t = t.trim_end_matches('.').trim_end();
+    if let Some(rest) = restock_t.strip_prefix("restock") {
         if !(rest.is_empty() || rest.starts_with(char::is_whitespace)) {
             return None;
         }
@@ -273,7 +274,7 @@ pub struct Row {
     pub bought: String,
 }
 
-/// Rows after the `| Item |` header. Only the first four cells are kept.
+/// Rows after the `| Item |` header. Only the first four cells are kept; short rows are padded with empty cells.
 pub fn parse_note(text: &str) -> Vec<Row> {
     let mut rows = Vec::new();
     let mut in_table = false;
@@ -290,10 +291,11 @@ pub fn parse_note(text: &str) -> Vec<Row> {
         if cells.iter().all(|c| !c.is_empty() && c.chars().all(|ch| ch == '-' || ch == ':')) {
             continue;
         }
-        if cells.len() < 4 {
+        if cells[0].is_empty() {
             continue;
         }
-        rows.push(Row { item: cells[0].into(), qty: cells[1].into(), store: cells[2].into(), bought: cells[3].into() });
+        let cell = |i: usize| cells.get(i).copied().unwrap_or("").to_string();
+        rows.push(Row { item: cell(0), qty: cell(1), store: cell(2), bought: cell(3) });
     }
     rows
 }
@@ -443,7 +445,7 @@ fn restock_at(root: &Path, date: &str, all: bool, today: &str) -> Result<Report,
             }
             let text = fs::read_to_string(&p).unwrap_or_default();
             let ocr = ocr_lines(&text);
-            costco |= ocr.iter().any(|l| l.to_lowercase().contains("costco"));
+            costco |= ocr.iter().any(|l| { let m = l.to_lowercase().replace('0', "o"); m.contains("costco") || m.contains("kirkland") });
             filed += 1;
             for c in receipt_items(&text) {
                 if !found.iter().any(|(f, _)| *f == c) {

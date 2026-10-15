@@ -404,3 +404,29 @@ fn upsert_refreshes_a_row_whose_bought_cell_is_not_iso() {
     pantry::upsert(&mut rows, vec![Row { item: "cod".into(), qty: "".into(), store: "B".into(), bought: "2026-10-05".into() }]);
     assert_eq!(rows[0].store, "B");
 }
+
+#[test]
+fn b3_ocr_misread_costco_header_still_refused_without_split() {
+    let r = root("b3");
+    put(&r, "State Street/2026-10-04 Receipt.md", "## OCR 1.jpg\n\n~~~text\nC0STC0 WHOLESALE\nORG EGGS\n~~~\n");
+    let err = pantry::restock(&r, "2026-10-04", false).expect_err("must refuse");
+    assert!(err.contains("split"), "{err}");
+}
+
+#[test]
+fn b4_restock_with_trailing_period_is_a_command() {
+    assert_eq!(pantry::command("restock."), Some(Command::Restock { date: None, all: false }));
+    assert_eq!(
+        pantry::command("restock 2026-10-02."),
+        Some(Command::Restock { date: Some("2026-10-02".into()), all: false })
+    );
+}
+
+#[test]
+fn b5_hand_added_three_cell_row_survives_restock() {
+    let r = root("b5");
+    put(&r, PANTRY, "| Item | Qty | Store | Bought |\n|---|---|---|---|\n| rice | 1 | Home |\n");
+    put(&r, "State Street/2026-10-05 Solo receipt.md", "## OCR 1.jpg\n\n~~~text\nORG EGGS\n~~~\n");
+    pantry::restock(&r, "2026-10-05", false).unwrap();
+    assert!(read(&r).contains("| rice |"), "{}", read(&r));
+}
