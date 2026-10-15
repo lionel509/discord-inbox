@@ -33,9 +33,7 @@ impl Inbound for LiveMsg {
         self.msg.channel_id.get()
     }
     fn received(&self) -> String {
-        (*self.msg.timestamp)
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string()
+        discord_inbox::when::local_stamp(*self.msg.timestamp)
     }
     fn content(&self) -> String {
         self.msg.content.clone()
