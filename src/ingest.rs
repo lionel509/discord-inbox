@@ -4,8 +4,9 @@ use crate::dump::{self, Incoming};
 use crate::chat::{Chat, NoChat};
 use crate::insight::mask_cards;
 use crate::vaults::{self, Decision, Vaults};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 pub const PAGE: usize = 100;
 
@@ -155,6 +156,16 @@ pub async fn ingest<M: Inbound>(allow: &Allowlist, inbox: &Path, m: &M) -> Outco
     ingest_with(allow, inbox, m, &Filer::off()).await
 }
 
+/// One async lock per message id, process-wide. The live event and the catch-up can both reach one DM; each
+/// takes its id's lock around the whole ingest, so the second waits and then sees the first's result.
+/// One empty entry per id stays for the process lifetime: a few bytes per DM.
+static IN_FLIGHT: StdMutex<BTreeMap<u64, Arc<tokio::sync::Mutex<()>>>> = StdMutex::new(BTreeMap::new());
+
+fn id_lock(msg_id: u64) -> Arc<tokio::sync::Mutex<()>> {
+    let mut map = IN_FLIGHT.lock().unwrap_or_else(|p| p.into_inner());
+    map.entry(msg_id).or_default().clone()
+}
+
 pub async fn ingest_with<M: Inbound>(
     allow: &Allowlist,
     inbox: &Path,
@@ -167,6 +178,9 @@ pub async fn ingest_with<M: Inbound>(
     }
 
     let id = m.msg_id();
+    // Held to the end of this call. A second caller for the same id waits here, then re-runs the skip check below.
+    let lock = id_lock(id);
+    let _one = lock.lock().await;
     let received = m.received();
     if (dump::note_saved(&dump::note_path(inbox, &received, id)) || dump::filed_to(inbox, id).is_some())
         && !dump::in_retry(inbox, id)
