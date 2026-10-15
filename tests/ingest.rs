@@ -1814,3 +1814,60 @@ async fn lookup_works_without_the_iou_ledger() {
     assert_eq!(w.replies_for(381), vec!["No record of that.".to_string()]);
     assert!(chat.prompts.lock().unwrap()[1].contains("Notes:"));
 }
+
+/// A long DM sent as `message.txt` with an empty body is routed on the file's text, never answered as a lookup (#46 scope add).
+#[tokio::test]
+async fn text_attachment_routes_on_its_text_not_a_lookup() {
+    let inbox = scratch("attach-text");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![answer("Citadel/Ideas", "Demo announcement", "announce", "Filed it.")]);
+    let f = filer(&inbox, &chat);
+    let body = "Stormy, the Discord bot is ready for the demo on Friday.";
+    let s = spec_text(MAIN, MAIN_CH, 390, "", &[("message.txt", body.as_bytes())]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    assert_eq!(chat.calls(), 1, "a lookup ran for an attachment");
+    let prompts = chat.prompts.lock().unwrap().clone();
+    assert!(prompts[0].contains(body), "{}", prompts[0]);
+    let replies = w.replies_for(390);
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert!(replies[0].starts_with("Filed it."), "{}", replies[0]);
+    assert!(replies[0].ends_with("(Saved to Citadel/Ideas.)"), "{}", replies[0]);
+    let filed = all_files(&root_of(&inbox).join("Citadel/Ideas"));
+    assert!(
+        filed.iter().filter(|p| p.extension().is_some_and(|x| x == "md")).any(|p| fs::read_to_string(p).unwrap_or_default().contains(body)),
+        "filed note body misses the attachment text"
+    );
+}
+
+/// A DM with no text and no readable text is saved and acknowledged; the answer model is never called (#46 scope add).
+#[tokio::test]
+async fn blank_dm_never_calls_the_model() {
+    let inbox = scratch("blank-dm");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![answer("Answer", "Lookup", "", "Lookup answer about unrelated notes.")]);
+    let f = filer(&inbox, &chat);
+    let s = spec_text(MAIN, MAIN_CH, 391, "", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    assert_eq!(chat.calls(), 0, "the model was called for a blank DM");
+    assert_eq!(w.replies_for(391), vec!["Got it 🐾 (Saved to your Inbox.)".to_string()]);
+}
+
+/// The attachment text is read up to 20 000 chars, cut on a char boundary (#46 scope add).
+#[tokio::test]
+async fn text_attachment_is_capped_at_20000_chars() {
+    let inbox = scratch("attach-cap");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![answer("Citadel/Ideas", "Long", "", "Filed.")]);
+    let f = filer(&inbox, &chat);
+    let long = "é".repeat(30_000);
+    let s = spec_text(MAIN, MAIN_CH, 392, "", &[("message.txt", long.as_bytes())]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    let filed = all_files(&root_of(&inbox).join("Citadel/Ideas"));
+    let text: String = filed
+        .iter()
+        .filter(|p| p.extension().is_some_and(|x| x == "md"))
+        .map(|p| fs::read_to_string(p).unwrap_or_default())
+        .collect();
+    assert!(text.contains(&"é".repeat(20_000)), "cap is below 20 000 chars");
+    assert!(!text.contains(&"é".repeat(20_001)), "cap is above 20 000 chars");
+}
