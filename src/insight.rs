@@ -308,11 +308,24 @@ pub fn parse_scaledown(body: &str) -> Option<Insight> {
     let merchant = confident("merchant").unwrap_or_default();
     let total = confident("total")
         .map(|t| t.strip_prefix('$').unwrap_or(&t).trim().to_string())
+        .filter(|t| t.chars().any(is_digit))
         .unwrap_or_default();
-    let receipt = match best("receipt") {
-        Some((text, _)) => matches!(text.chars().next(), Some('y' | 'Y')),
-        // No classification came back: a found total is the evidence.
-        None => !total.is_empty(),
+    // Receipt verdict: every confident receipt label that is exactly yes or no (ignoring case and
+    // surrounding whitespace) is a vote. A yes alone is true; a no alone is false unless a total is
+    // found; no votes with a total is evidence of a receipt; anything else (a disagreement, a no
+    // beside a total, or no usable label and no total) is None, so the chain falls through to Haiku.
+    let votes = |word: &str| {
+        entities.iter().any(|e| {
+            e.get("type").and_then(Value::as_str) == Some("receipt")
+                && e.get("confidence").and_then(Value::as_f64).is_some_and(|c| c >= CONFIDENCE)
+                && e.get("text").and_then(Value::as_str).is_some_and(|t| t.trim().eq_ignore_ascii_case(word))
+        })
+    };
+    let receipt = match (votes("yes"), votes("no"), !total.is_empty()) {
+        (true, false, _) => true,
+        (false, true, false) => false,
+        (false, false, true) => true,
+        _ => return None,
     };
     let category = confident("category").unwrap_or_default().to_ascii_lowercase();
     Some(Insight {
@@ -323,31 +336,40 @@ pub fn parse_scaledown(body: &str) -> Option<Insight> {
     })
 }
 
-/// Masks each run of 12 or more digits (single spaces, dashes or line breaks allowed between digits)
-/// except its last four. A line break can bridge digits on neighbouring lines, so a long number split
-/// by OCR is masked too; the cost is that a 12+ digit run across two lines is masked even if it is not a card.
+/// A digit as OCR can write it: ASCII, or full-width (U+FF10 to U+FF19).
+fn is_digit(c: char) -> bool {
+    c.is_ascii_digit() || ('\u{ff10}'..='\u{ff19}').contains(&c)
+}
+
+/// Masks each run of 12 or more digits except its last four. A run can bridge a gap of 1 to 16 characters
+/// that are any Unicode whitespace (spaces, NBSP, thin space, line breaks, tabs) or a `-`, en dash or em dash
+/// between groups. Full-width digits count. A wide gap can join two table columns, and a line break can
+/// bridge digits on neighbouring lines, so a 12+ digit total across either is masked too: a false mask is
+/// the cheaper error next to a card number that reaches a model.
 pub fn mask_cards(text: &str) -> String {
+    const MAX_GAP: usize = 16;
+    let is_gap = |c: char| c.is_whitespace() || matches!(c, '-' | '\u{2013}' | '\u{2014}');
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
     while i < chars.len() {
-        if !chars[i].is_ascii_digit() {
+        if !is_digit(chars[i]) {
             out.push(chars[i]);
             i += 1;
             continue;
         }
         let mut j = i + 1;
         loop {
-            if j < chars.len() && chars[j].is_ascii_digit() {
+            if j < chars.len() && is_digit(chars[j]) {
                 j += 1;
             } else if {
                 let mut k = j;
-                while k < chars.len() && k - j < 8 && matches!(chars[k], ' ' | '-' | '\u{2013}' | '\u{2014}' | '\n' | '\r' | '\t') {
+                while k < chars.len() && k - j < MAX_GAP && is_gap(chars[k]) {
                     k += 1;
                 }
-                k > j && k < chars.len() && chars[k].is_ascii_digit()
+                k > j && k < chars.len() && is_digit(chars[k])
             } {
-                while !chars[j].is_ascii_digit() {
+                while !is_digit(chars[j]) {
                     j += 1;
                 }
                 j += 1;
@@ -356,11 +378,11 @@ pub fn mask_cards(text: &str) -> String {
             }
         }
         let span = &chars[i..j];
-        let digits = span.iter().filter(|c| c.is_ascii_digit()).count();
+        let digits = span.iter().filter(|&&c| is_digit(c)).count();
         if digits >= 12 {
             let mut seen = 0;
             for &c in span {
-                if c.is_ascii_digit() {
+                if is_digit(c) {
                     seen += 1;
                     out.push(if seen + 4 <= digits { '*' } else { c });
                 } else {
