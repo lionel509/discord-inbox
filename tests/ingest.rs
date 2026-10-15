@@ -1384,7 +1384,7 @@ async fn receipt_gets_verdict_and_chat_in_one_masked_reply() {
     let replies = w.replies_for(350);
     assert_eq!(replies.len(), 1, "{replies:?}");
     let text = &replies[0];
-    assert!(text.ends_with("(Saved to State Street.)"), "{text}");
+    assert!(text.starts_with("Logged your Trader Joe's run.\n\n(Saved to State Street.)"), "{text}");
     assert!(text.contains("Logged your Trader Joe's run."), "{text}");
     assert!(text.contains("Receipt: Trader Joe's · $12.34 · groceries"), "{text}");
     assert!(text.contains("**** **** **** 1111") && !text.contains("4111"), "{text}");
