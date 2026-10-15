@@ -1794,8 +1794,8 @@ async fn lookup_reads_the_iou_ledger() {
     assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
     let prompts = chat.prompts.lock().unwrap().clone();
     assert_eq!(chat.calls(), 2);
-    assert!(prompts[1].contains("Who Owes Me.md"), "{}", prompts[1]);
-    assert!(prompts[1].contains("William | $12.00"), "{}", prompts[1]);
+    assert!(prompts[1].contains("how much does willam owe me"), "{}", prompts[1]);
+    assert!(!prompts[1].contains("Notes:"), "the lookup bundle is gone (#49): {}", prompts[1]);
     assert_eq!(w.replies_for(380), vec!["William owes you $12.00.".to_string()]);
 }
 
