@@ -1,5 +1,5 @@
 //! Vault targets, the model's decision parser, and the note text helpers. Temp dirs and a made-up `Private` folder only.
-use discord_inbox::vaults::{self, Target, Vaults, TARGETS};
+use discord_inbox::vaults::{self, Target, Vaults, RUNNING, TARGETS};
 use std::fs;
 use std::path::PathBuf;
 
@@ -284,4 +284,73 @@ fn parse_decision_strips_bold_from_folder_key() {
     let v = no_disk();
     let d = vaults::parse_decision(&v, "FOLDER: **State Street**\nREPLY:\nok");
     assert_eq!(d.target.map(|t| t.key), Some("State Street"));
+}
+
+#[test]
+fn folder_label_forms_all_route() {
+    let v = no_disk();
+    for input in [
+        "FOLDER: Shopping List",
+        "**FOLDER:** Shopping List",
+        "__FOLDER:__ Shopping List",
+        "- FOLDER: Shopping List",
+        "FOLDER : Shopping List",
+        "Folder: shopping list.",
+        "FOLDER: **Shopping List**",
+        "FOLDER: \"Shopping List\"",
+    ] {
+        let d = vaults::parse_decision(&v, input);
+        assert_eq!(d.running.map(|r| r.key), Some("Shopping List"), "{input}");
+    }
+}
+
+#[test]
+fn folder_bang_todo_routes_with_or_without_bang() {
+    let v = no_disk();
+    for input in ["FOLDER: ! Todo", "FOLDER: Todo"] {
+        let d = vaults::parse_decision(&v, input);
+        assert_eq!(d.target.map(|t| t.key), Some("! Todo"), "{input}");
+    }
+}
+
+#[test]
+fn folder_path_keys_match_whole_and_partial_names_stay_none() {
+    let v = no_disk();
+    assert_eq!(vaults::parse_decision(&v, "FOLDER: Citadel/Ideas").target.map(|t| t.key), Some("Citadel/Ideas"));
+    assert!(vaults::parse_decision(&v, "FOLDER: Citadel").target.is_none());
+}
+
+#[test]
+fn folder_answer_with_period_and_bold_reply_label() {
+    let v = no_disk();
+    assert!(vaults::parse_decision(&v, "FOLDER: answer.").answer);
+    let d = vaults::parse_decision(&v, "__REPLY:__ Added.");
+    assert_eq!(d.reply, "Added.");
+}
+
+#[test]
+fn loose_line_with_colon_stays_in_reply() {
+    let v = no_disk();
+    let d = vaults::parse_decision(&v, "Note to self: milk");
+    assert_eq!(d.reply, "Note to self: milk");
+}
+
+#[test]
+fn every_target_and_running_key_round_trips() {
+    let v = no_disk();
+    for t in TARGETS.iter() {
+        assert_eq!(v.target(t.key).map(|x| x.key), Some(t.key));
+    }
+    for r in RUNNING.iter() {
+        assert_eq!(v.running(r.key).map(|x| x.key), Some(r.key));
+    }
+}
+
+#[test]
+fn system_prompt_lists_answer_first_and_names_questions_without_mark() {
+    let p = vaults::system_prompt();
+    let a = p.find("Answer — ").expect("Answer line");
+    assert!(a < p.find("Citadel/Ideas — ").unwrap());
+    assert!(a < p.find("Shopping List — ").unwrap());
+    assert!(p.contains("whats on my costco list"), "{p}");
 }

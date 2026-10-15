@@ -1707,3 +1707,18 @@ async fn question_routed_to_running_list_is_answered() {
     assert_eq!(replies.len(), 1, "{replies:?}");
     assert!(replies[0].starts_with("Answered"), "{}", replies[0]);
 }
+
+/// Different errors inside the notice gap still give one notice in total.
+#[tokio::test]
+async fn different_errors_inside_gap_notice_once() {
+    let inbox = scratch("chat-gap");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![Err("http 401".to_string()), Err("http 500".to_string())]);
+    let f = filer(&inbox, &chat);
+    for id in 360..362 {
+        let s = spec_text(MAIN, MAIN_CH, id, "plain message", &[]);
+        ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await;
+    }
+    let total = w.replies_for(360).len() + w.replies_for(361).len();
+    assert_eq!(total, 1, "{:?} {:?}", w.replies_for(360), w.replies_for(361));
+}
