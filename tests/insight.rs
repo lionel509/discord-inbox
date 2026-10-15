@@ -217,3 +217,28 @@ async fn model_command_keeps_a_quoted_path_and_masks_its_reply() {
     assert!(reply.contains("Receipt: VISA"), "{reply}");
     assert!(reply.contains("1111"), "{reply}");
 }
+
+/// Full-width digits (U+FF10..U+FF19) for a run of ASCII digits.
+fn full_width(s: &str) -> String {
+    s.chars().map(|c| char::from_u32(c as u32 - '0' as u32 + 0xFF10).unwrap()).collect()
+}
+
+/// B3: card digits separated by NBSP or thin spaces, written full-width, or with wide gaps are masked too.
+#[test]
+fn mask_cards_sees_unicode_spaces_full_width_and_wide_gaps() {
+    assert_eq!(
+        insight::mask_cards("VISA 4111\u{a0}1111\u{a0}1111\u{a0}1111"),
+        "VISA ****\u{a0}****\u{a0}****\u{a0}1111"
+    );
+    assert_eq!(
+        insight::mask_cards("4111\u{2009}1111\u{2009}1111\u{2009}1111"),
+        "****\u{2009}****\u{2009}****\u{2009}1111"
+    );
+    let fw = full_width("4111111111111111");
+    assert_eq!(insight::mask_cards(&fw), format!("{}{}", "*".repeat(12), full_width("1111")));
+    assert_eq!(insight::mask_cards("VISA 4111         1111 1111 1111"), "VISA ****         **** **** 1111");
+    // The protected shapes still pass through unchanged.
+    for same in ["Total $42.10        2026", "2026-10-13      14:03", "Phone 631-555-0100", "Lunch $12.90  Tip $2.00"] {
+        assert_eq!(insight::mask_cards(same), same);
+    }
+}
