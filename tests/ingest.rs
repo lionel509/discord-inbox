@@ -974,7 +974,7 @@ async fn no_reply_when_nothing_to_say() {
     assert_eq!(ingest(&allow(), &inbox, &msg(&w, &good)).await, Outcome::Saved);
     let notice = w.replies_for(102);
     assert_eq!(notice.len(), 1, "{notice:?}");
-    assert!(notice[0].starts_with("I couldn't reach the model just now") && !notice[0].contains("chat off"), "{}", notice[0]);
+    assert!(notice[0].starts_with("Sorry, my brain's a little foggy right now 😿") && !notice[0].contains("chat off"), "{}", notice[0]);
 
     let stranger = spec(STRANGER, STRANGER_CH, 103, &[("receipt.png", b"receipt")]);
     assert_eq!(ingest(&allow(), &inbox, &msg(&w, &stranger)).await, Outcome::Ignored);
@@ -1278,7 +1278,7 @@ async fn text_dm_filed_and_replied_no_tick() {
     let replies = w.replies_for(300);
     assert_eq!(replies.len(), 1, "{replies:?}");
     assert!(
-        replies[0].starts_with("That is a solar fan project") && replies[0].ends_with("(Saved to Citadel/Ideas.)"),
+        replies[0].starts_with("That is a solar fan project") && replies[0].ends_with("Saved to Citadel/Ideas for you 🐾"),
         "{}",
         replies[0]
     );
@@ -1319,7 +1319,7 @@ async fn chat_failure_falls_back_to_tick() {
     assert_eq!(w.marks(320), vec!["✅"]);
     let replies = w.replies_for(320);
     assert_eq!(replies.len(), 1, "{replies:?}");
-    assert!(replies[0].starts_with("I couldn't reach the model just now") && !replies[0].contains("http 404"), "{}", replies[0]);
+    assert!(replies[0].starts_with("Sorry, my brain's a little foggy right now 😿") && !replies[0].contains("http 404"), "{}", replies[0]);
     assert!(files_in(&root_of(&inbox).join("Citadel/Ideas")).is_empty());
     assert_eq!(chat.calls(), 1);
 }
@@ -1384,7 +1384,7 @@ async fn receipt_gets_verdict_and_chat_in_one_masked_reply() {
     let replies = w.replies_for(350);
     assert_eq!(replies.len(), 1, "{replies:?}");
     let text = &replies[0];
-    assert!(text.starts_with("Logged your Trader Joe's run.\n\n(Saved to State Street.)"), "{text}");
+    assert!(text.starts_with("Logged your Trader Joe's run.\n\nSaved to State Street for you 🐾"), "{text}");
     assert!(text.contains("Logged your Trader Joe's run."), "{text}");
     assert!(text.contains("Receipt: Trader Joe's · $12.34 · groceries"), "{text}");
     assert!(text.contains("**** **** **** 1111") && !text.contains("4111"), "{text}");
@@ -1548,7 +1548,7 @@ async fn chat_failure_with_receipt_sends_one_reply() {
     assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
     let replies = w.replies_for(325);
     assert_eq!(replies.len(), 1, "{replies:?}");
-    assert!(replies[0].starts_with("I couldn't reach the model just now") && !replies[0].contains("http 500"), "{}", replies[0]);
+    assert!(replies[0].starts_with("Sorry, my brain's a little foggy right now 😿") && !replies[0].contains("http 500"), "{}", replies[0]);
     assert_eq!(w.marks(325), vec!["✅"]);
 }
 
@@ -1605,7 +1605,7 @@ async fn lookup_failure_still_answers() {
     assert_eq!(replies.len(), 1, "{replies:?}");
     assert!(!replies[0].starts_with("Answered"), "{}", replies[0]);
     assert!(replies[0].starts_with("model guess"), "{}", replies[0]);
-    assert!(replies[0].ends_with("(I couldn't read your notes just now.)"), "{}", replies[0]);
+    assert!(replies[0].ends_with("(I couldn't peek at your notes just now, sorry!)"), "{}", replies[0]);
     assert!(!replies[0].contains("lookup failed"), "{}", replies[0]);
     assert!(note(&inbox, 331).is_file(), "question note left Inbox");
     assert_eq!(chat.calls(), 2);
@@ -1635,7 +1635,7 @@ async fn list_item_appends_to_running_note() {
     let replies = w.replies_for(340);
     assert_eq!(replies.len(), 1, "{replies:?}");
     assert!(
-        replies[0].ends_with("(Added to Shopping List.)"),
+        replies[0].ends_with("Got it, added to your Shopping List 🐾"),
         "{}",
         replies[0]
     );
@@ -1662,7 +1662,7 @@ async fn running_with_attachment_files_a_note() {
     assert!(files_in(&root.join("State Street")).contains(&"2026-10-13 Costco list.md".to_string()));
     let replies = w.replies_for(341);
     assert_eq!(replies.len(), 1, "{replies:?}");
-    assert!(replies[0].ends_with("(Saved to State Street.)"), "{}", replies[0]);
+    assert!(replies[0].ends_with("Saved to State Street for you 🐾"), "{}", replies[0]);
 }
 
 /// With no running note on disk, a list message is filed as an ordinary note in State Street.
@@ -1677,7 +1677,7 @@ async fn running_note_missing_files_a_note() {
     assert!(files_in(&root_of(&inbox).join("State Street")).contains(&"2026-10-13 Costco list.md".to_string()));
     let replies = w.replies_for(342);
     assert_eq!(replies.len(), 1, "{replies:?}");
-    assert!(replies[0].ends_with("(Saved to State Street.)"), "{}", replies[0]);
+    assert!(replies[0].ends_with("Saved to State Street for you 🐾"), "{}", replies[0]);
 }
 
 /// One notice per failure episode: a repeat of the same chat error gets ✅ only, and a success ends the episode.
@@ -1698,7 +1698,7 @@ async fn same_chat_error_notices_once_until_chat_works() {
     }
     let first = w.replies_for(340);
     assert_eq!(first.len(), 1, "{first:?}");
-    assert!(first[0].starts_with("I couldn't reach the model just now") && !first[0].contains("http 401"), "{}", first[0]);
+    assert!(first[0].starts_with("Sorry, my brain's a little foggy right now 😿") && !first[0].contains("http 401"), "{}", first[0]);
     assert!(w.replies_for(341).is_empty(), "{:?}", w.replies_for(341));
     assert_eq!(w.marks(341), vec!["✅"]);
     let third = w.replies_for(342);
@@ -1706,7 +1706,7 @@ async fn same_chat_error_notices_once_until_chat_works() {
     assert!(third[0].contains("ok"), "{}", third[0]);
     let fourth = w.replies_for(343);
     assert_eq!(fourth.len(), 1, "{fourth:?}");
-    assert!(fourth[0].starts_with("I couldn't reach the model just now") && !fourth[0].contains("http 401"), "{}", fourth[0]);
+    assert!(fourth[0].starts_with("Sorry, my brain's a little foggy right now 😿") && !fourth[0].contains("http 401"), "{}", fourth[0]);
 }
 
 /// A question the model routes to a running list is answered, and the list is left alone.
@@ -1831,7 +1831,7 @@ async fn text_attachment_routes_on_its_text_not_a_lookup() {
     let replies = w.replies_for(390);
     assert_eq!(replies.len(), 1, "{replies:?}");
     assert!(replies[0].starts_with("Filed it."), "{}", replies[0]);
-    assert!(replies[0].ends_with("(Saved to Citadel/Ideas.)"), "{}", replies[0]);
+    assert!(replies[0].ends_with("Saved to Citadel/Ideas for you 🐾"), "{}", replies[0]);
     let filed = all_files(&root_of(&inbox).join("Citadel/Ideas"));
     assert!(
         filed.iter().filter(|p| p.extension().is_some_and(|x| x == "md")).any(|p| fs::read_to_string(p).unwrap_or_default().contains(body)),
@@ -1849,7 +1849,7 @@ async fn blank_dm_never_calls_the_model() {
     let s = spec_text(MAIN, MAIN_CH, 391, "", &[]);
     assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
     assert_eq!(chat.calls(), 0, "the model was called for a blank DM");
-    assert_eq!(w.replies_for(391), vec!["Got it 🐾 (Saved to your Inbox.)".to_string()]);
+    assert_eq!(w.replies_for(391), vec!["Got it 🐾 It's saved in your Inbox.".to_string()]);
 }
 
 /// The attachment text is read up to 20 000 chars, cut on a char boundary (#46 scope add).
@@ -1870,4 +1870,22 @@ async fn text_attachment_is_capped_at_20000_chars() {
         .collect();
     assert!(text.contains(&"é".repeat(20_000)), "cap is below 20 000 chars");
     assert!(!text.contains(&"é".repeat(20_001)), "cap is above 20 000 chars");
+}
+
+/// The model picked a folder but the note could not be filed: the reply says so in one line (#46 fix round).
+#[tokio::test]
+async fn couldnt_file_line_when_filing_fails() {
+    let inbox = scratch("cant-file");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![answer("Citadel/Ideas", "Solar fan idea", "electronics", "Filed.")]);
+    let f = filer(&inbox, &chat);
+    let root = root_of(&inbox);
+    fs::remove_dir_all(root.join("Citadel/Ideas")).unwrap();
+    fs::write(root.join("Citadel/Ideas"), "not a folder\n").unwrap();
+    let s = spec_text(MAIN, MAIN_CH, 393, "solar fan idea", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    assert_eq!(
+        w.replies_for(393),
+        vec!["Filed.\n\nHmm, I couldn't file that one, so it's safe in your Inbox for now.".to_string()]
+    );
 }

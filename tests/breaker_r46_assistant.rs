@@ -41,6 +41,7 @@ fn write(root: &Path, rel: &str, text: &str) {
 struct Msg {
     id: u64,
     text: String,
+    files: Vec<(String, Vec<u8>)>,
     live: bool,
     hang_typing: bool,
     replies: Arc<Mutex<Vec<String>>>,
@@ -64,10 +65,10 @@ impl Inbound for Msg {
         self.text.clone()
     }
     fn attachment_names(&self) -> Vec<String> {
-        Vec::new()
+        self.files.iter().map(|f| f.0.clone()).collect()
     }
-    async fn download(&self, _i: usize) -> Result<Vec<u8>, String> {
-        Err("no attachments".to_string())
+    async fn download(&self, i: usize) -> Result<Vec<u8>, String> {
+        Ok(self.files[i].1.clone())
     }
     async fn react(&self, _emoji: &str) -> Result<(), String> {
         Ok(())
@@ -135,7 +136,14 @@ fn answering(reply: &str) -> Result<String, String> {
 fn msg(id: u64, text: &str, live: bool, hang_typing: bool) -> (Msg, Arc<Mutex<Vec<String>>>, Arc<Mutex<usize>>) {
     let replies = Arc::new(Mutex::new(Vec::new()));
     let typing = Arc::new(Mutex::new(0usize));
-    let m = Msg { id, text: text.to_string(), live, hang_typing, replies: replies.clone(), typing: typing.clone() };
+    let m = Msg { id, text: text.to_string(), files: Vec::new(), live, hang_typing, replies: replies.clone(), typing: typing.clone() };
+    (m, replies, typing)
+}
+
+/// A live DM with attachments.
+fn msg_files(id: u64, text: &str, files: &[(&str, &[u8])]) -> (Msg, Arc<Mutex<Vec<String>>>, Arc<Mutex<usize>>) {
+    let (mut m, replies, typing) = msg(id, text, true, false);
+    m.files = files.iter().map(|(n, b)| (n.to_string(), b.to_vec())).collect();
     (m, replies, typing)
 }
 
@@ -154,7 +162,7 @@ async fn breaker_filed_reply_starts_with_no_status_label() {
     let got = replies.lock().unwrap().clone();
     assert_eq!(got.len(), 1, "expected one reply, got {got:?}");
     assert!(!got[0].starts_with("Filed:"), "reply starts with status label: {:?}", got[0]);
-    assert!(got[0].ends_with("(Saved to Berkshire.)"), "no saved line: {:?}", got[0]);
+    assert!(got[0].ends_with("Saved to Berkshire for you 🐾"), "no saved line: {:?}", got[0]);
     assert!(!got[0].contains(".md"), "reply names a file: {:?}", got[0]);
 }
 
@@ -267,4 +275,31 @@ async fn breaker_model_panic_does_not_hang_ingest() {
     assert!(r.is_ok(), "ingest hung after a model panic");
     let n = *typing.lock().unwrap();
     assert!(n >= 1 && n <= 2, "typing count {n}");
+}
+
+// 11. Round 3 probe 1: a Windows-1252 text file is read and reaches the model, not the blank reply (#46 round 3).
+#[tokio::test]
+async fn breaker_r3_latin1_text_attachment_reaches_the_model() {
+    let root = new_root("latin1");
+    let chat = Script::new(vec![filing("Berkshire", "Noted.")]);
+    let f = filer(&root, chat.clone());
+    let (m, replies, _) = msg_files(1427000000000000011, "", &[("notes.txt", b"Pay Zo\xEB 40 for groceries")]);
+    let _ = ingest_with(&allow(), &inbox_of(&root), &m, &f).await;
+    let prompts = chat.prompts.lock().unwrap().clone();
+    assert_eq!(prompts.len(), 1, "model not called: {prompts:?}");
+    assert!(prompts[0].contains("groceries"), "{}", prompts[0]);
+    let got = replies.lock().unwrap().clone();
+    assert!(got.first().is_some_and(|r| r != "Got it 🐾 It's saved in your Inbox."), "{got:?}");
+}
+
+// 12. Round 3 guard: a binary file named .txt is unreadable, so no model call and the blank reply.
+#[tokio::test]
+async fn breaker_r3_binary_txt_makes_no_model_call() {
+    let root = new_root("binary");
+    let chat = Script::new(vec![]);
+    let f = filer(&root, chat.clone());
+    let (m, replies, _) = msg_files(1427000000000000012, "", &[("x.txt", b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR")]);
+    let _ = ingest_with(&allow(), &inbox_of(&root), &m, &f).await;
+    assert!(chat.prompts.lock().unwrap().is_empty(), "model called for a binary file");
+    assert_eq!(replies.lock().unwrap().clone(), vec!["Got it 🐾 It's saved in your Inbox.".to_string()]);
 }
