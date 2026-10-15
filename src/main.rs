@@ -11,10 +11,10 @@ use serenity::async_trait;
 use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::time::{interval_at, Instant};
+use tokio::task::JoinHandle;
+use tokio::time::{interval_at, Instant, Interval, MissedTickBehavior};
 
 const KEYCHAIN_SERVICE: &str = "discord-inbox";
 const KEYCHAIN_ACCOUNT: &str = "discord-inbox";
@@ -150,16 +150,22 @@ const PRESENCE_ROTATION: [(PresenceKind, &str); 4] = [
     (PresenceKind::Custom, "napping in a sunbeam ☀️"),
 ];
 const PRESENCE_INTERVAL: Duration = Duration::from_secs(15 * 60);
-static PRESENCE_LOOP_STARTED: AtomicBool = AtomicBool::new(false);
+/// The one live presence loop. Each `ready` replaces it, so the loop always holds the
+/// Context from the most recent identify, and the old loop is aborted.
+static PRESENCE_LOOP: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 
-/// Stub for the red commit: the real swap-and-abort lands in the next commit.
-fn install_presence_loop(handle: tokio::task::JoinHandle<()>) {
-    drop(handle);
+fn install_presence_loop(handle: JoinHandle<()>) {
+    let previous = PRESENCE_LOOP.lock().unwrap().replace(handle);
+    if let Some(old) = previous {
+        old.abort();
+    }
 }
 
-/// Stub for the red commit: tokio's default Burst missed-tick behaviour.
-fn presence_interval() -> tokio::time::Interval {
-    interval_at(Instant::now() + PRESENCE_INTERVAL, PRESENCE_INTERVAL)
+/// Skip, not Burst: a stalled runtime must not fire every missed tick back to back.
+fn presence_interval() -> Interval {
+    let mut tick = interval_at(Instant::now() + PRESENCE_INTERVAL, PRESENCE_INTERVAL);
+    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    tick
 }
 
 #[derive(Clone, Copy)]
@@ -189,22 +195,17 @@ impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, _: Ready) {
         eprintln!("discord-inbox: connected");
         ctx.set_presence(Some(presence_activity(0)), OnlineStatus::DoNotDisturb);
-        // Reconnects call `ready` again; only the first call starts the rotation.
-        if PRESENCE_LOOP_STARTED
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
-            let ctx = ctx.clone();
-            tokio::spawn(async move {
-                let mut tick = interval_at(Instant::now() + PRESENCE_INTERVAL, PRESENCE_INTERVAL);
-                let mut index = 0;
-                loop {
-                    tick.tick().await;
-                    index = next_presence(index);
-                    ctx.set_presence(Some(presence_activity(index)), OnlineStatus::DoNotDisturb);
-                }
-            });
-        }
+        // Every `ready` (including a re-identify) replaces the loop, so it never holds a dead shard's Context.
+        let loop_ctx = ctx.clone();
+        install_presence_loop(tokio::spawn(async move {
+            let mut tick = presence_interval();
+            let mut index = 0;
+            loop {
+                tick.tick().await;
+                index = next_presence(index);
+                loop_ctx.set_presence(Some(presence_activity(index)), OnlineStatus::DoNotDisturb);
+            }
+        }));
         catch_up_with(
             &self.allow,
             &self.inbox,
