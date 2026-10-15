@@ -152,8 +152,9 @@ fn parse_scaledown_maps_entities() {
     let c = parse(body_with(vec![ent("X", "merchant", 0.2), ent("$3", "total", 0.9)])).unwrap();
     assert_eq!(c.merchant, "unknown");
 
-    let d = parse(body_with(vec![ent("$5", "total", 0.9), ent("no", "receipt", 0.9)])).unwrap();
-    assert!(!d.receipt);
+    // A confident "no" next to a confident total is a contradiction: None, so Haiku decides.
+    let d = parse(body_with(vec![ent("$5", "total", 0.9), ent("no", "receipt", 0.9)]));
+    assert_eq!(d, None);
 
     let e = parse(body_with(vec![ent("$8.00", "total", 0.8)])).unwrap();
     assert!(e.receipt);
@@ -446,4 +447,67 @@ fn scaledown_weak_or_odd_label_is_not_a_verdict() {
     fs::write(cap.join("openrouter.json"), openrouter_body()).unwrap();
 
     assert_eq!(weak.expect("haiku after weak label").merchant, "Haiku Mart");
+}
+
+/// The receipt label is a truth table: only an exact yes or no (ignoring case and surrounding
+/// whitespace) counts, every confident one is a vote, and a disagreement or a "no" beside a total
+/// is no verdict. A total counts only if it has a digit.
+#[test]
+fn scaledown_label_must_be_yes_or_no_and_agree() {
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let cap = init();
+    std::env::remove_var("DISCORD_INBOX_INSIGHT");
+    std::env::set_var("DISCORD_INBOX_OPENROUTER_KEY", cap.join("openrouter_key"));
+    let s = Duration::from_secs(1);
+    let total = Duration::from_secs(3);
+    let parse = |v: Vec<Value>| insight::parse_scaledown(&body_with(v));
+
+    // "N/A" and "none" are not yes or no: a real total still makes a receipt.
+    for label in ["N/A", "none"] {
+        let got = parse(vec![ent(label, "receipt", 0.9), ent("$15.48", "total", 0.95)]).expect("total is evidence");
+        assert!(got.receipt, "label {label} with a total");
+    }
+    // An unusable label alone, or at exactly the confidence floor, is no verdict.
+    assert_eq!(parse(vec![ent("N/A", "receipt", 0.9)]), None);
+    assert_eq!(parse(vec![ent("none", "receipt", 0.9)]), None);
+    assert_eq!(parse(vec![ent("N/A", "receipt", 0.5)]), None);
+
+    // A confident yes beside an unusable label still counts.
+    let yes = parse(vec![ent("N/A", "receipt", 0.97), ent("yes", "receipt", 0.9), ent("$15.48", "total", 0.95)])
+        .expect("yes vote");
+    assert!(yes.receipt);
+
+    // A "no" beside a confident total is a contradiction: no verdict.
+    assert_eq!(parse(vec![ent("no", "receipt", 0.9), ent("$15.48", "total", 0.95)]), None);
+
+    // Yes and no that disagree: no verdict, whatever the order.
+    assert_eq!(parse(vec![ent("yes", "receipt", 0.9), ent("no", "receipt", 0.9), ent("$15.48", "total", 0.95)]), None);
+    assert_eq!(parse(vec![ent("no", "receipt", 0.9), ent("yes", "receipt", 0.9), ent("$15.48", "total", 0.95)]), None);
+    assert_eq!(parse(vec![ent("yes", "receipt", 0.9), ent("no", "receipt", 0.9)]), None);
+
+    // An unusable higher-confidence label does not hide a lower-confidence yes.
+    let hidden = parse(vec![ent("receipt", "receipt", 0.99), ent("yes", "receipt", 0.9)]).expect("yes counts");
+    assert!(hidden.receipt);
+
+    // Case and surrounding whitespace are ignored.
+    assert!(!parse(vec![ent("NO", "receipt", 0.9)]).expect("NO is no").receipt);
+    assert!(parse(vec![ent(" Yes ", "receipt", 0.9)]).expect("Yes is yes").receipt);
+
+    // A total with no digit is not receipt evidence.
+    assert_eq!(parse(vec![ent("N/A", "total", 0.9)]), None);
+    let digitless = parse(vec![ent("yes", "receipt", 0.9), ent("N/A", "total", 0.9)]).expect("yes");
+    assert!(digitless.receipt);
+    assert_eq!(digitless.total, "unknown");
+
+    // Chain: an unusable label with a merchant is no verdict, so Haiku answers.
+    fs::write(cap.join("openrouter.json"), body_with(vec![ent("N/A", "receipt", 0.9), ent("Hua Lian", "merchant", 0.93)]))
+        .unwrap();
+    let na = insight::ask_chain("HUA LIAN 2 MILK", s, total);
+    // Chain: a "no" beside a total is no verdict, so Haiku answers.
+    fs::write(cap.join("openrouter.json"), body_with(vec![ent("no", "receipt", 0.9), ent("$15.48", "total", 0.95)])).unwrap();
+    let contra = insight::ask_chain("TOTAL 15.48 HUA LIAN", s, total);
+    fs::write(cap.join("openrouter.json"), openrouter_body()).unwrap();
+
+    assert_eq!(na.expect("haiku after N/A label").merchant, "Haiku Mart");
+    assert_eq!(contra.expect("haiku after no beside total").merchant, "Haiku Mart");
 }
