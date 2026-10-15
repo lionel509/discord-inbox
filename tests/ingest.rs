@@ -974,7 +974,7 @@ async fn no_reply_when_nothing_to_say() {
     assert_eq!(ingest(&allow(), &inbox, &msg(&w, &good)).await, Outcome::Saved);
     let notice = w.replies_for(102);
     assert_eq!(notice.len(), 1, "{notice:?}");
-    assert!(notice[0].contains("Kept in Inbox") && notice[0].contains("chat off"), "{}", notice[0]);
+    assert!(notice[0].starts_with("I couldn't reach the model just now") && !notice[0].contains("chat off"), "{}", notice[0]);
 
     let stranger = spec(STRANGER, STRANGER_CH, 103, &[("receipt.png", b"receipt")]);
     assert_eq!(ingest(&allow(), &inbox, &msg(&w, &stranger)).await, Outcome::Ignored);
@@ -1278,7 +1278,7 @@ async fn text_dm_filed_and_replied_no_tick() {
     let replies = w.replies_for(300);
     assert_eq!(replies.len(), 1, "{replies:?}");
     assert!(
-        replies[0].starts_with("Filed: Citadel/Ideas/2026-10-13 Solar fan idea.md"),
+        replies[0].starts_with("That is a solar fan project") && replies[0].ends_with("(Saved to Citadel/Ideas.)"),
         "{}",
         replies[0]
     );
@@ -1319,7 +1319,7 @@ async fn chat_failure_falls_back_to_tick() {
     assert_eq!(w.marks(320), vec!["✅"]);
     let replies = w.replies_for(320);
     assert_eq!(replies.len(), 1, "{replies:?}");
-    assert!(replies[0].contains("Kept in Inbox") && replies[0].contains("http 404"), "{}", replies[0]);
+    assert!(replies[0].starts_with("I couldn't reach the model just now") && !replies[0].contains("http 404"), "{}", replies[0]);
     assert!(files_in(&root_of(&inbox).join("Citadel/Ideas")).is_empty());
     assert_eq!(chat.calls(), 1);
 }
@@ -1343,7 +1343,7 @@ async fn off_list_folder_keeps_note_in_inbox_but_replies() {
         assert!(w.marks(id).is_empty(), "{:?}", w.marks(id));
         let replies = w.replies_for(id);
         assert_eq!(replies.len(), 1, "{replies:?}");
-        assert!(replies[0].starts_with("Kept in Inbox"), "{}", replies[0]);
+        assert!(replies[0].starts_with("Kept it here"), "{}", replies[0]);
     }
     assert_eq!(files_in(&root.join("Private")), before);
     assert_eq!(fs::read_to_string(root.join("Private/note.md")).unwrap(), "private\n");
@@ -1384,7 +1384,7 @@ async fn receipt_gets_verdict_and_chat_in_one_masked_reply() {
     let replies = w.replies_for(350);
     assert_eq!(replies.len(), 1, "{replies:?}");
     let text = &replies[0];
-    assert!(text.starts_with("Filed: State Street/"), "{text}");
+    assert!(text.ends_with("(Saved to State Street.)"), "{text}");
     assert!(text.contains("Logged your Trader Joe's run."), "{text}");
     assert!(text.contains("Receipt: Trader Joe's · $12.34 · groceries"), "{text}");
     assert!(text.contains("**** **** **** 1111") && !text.contains("4111"), "{text}");
@@ -1548,7 +1548,7 @@ async fn chat_failure_with_receipt_sends_one_reply() {
     assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
     let replies = w.replies_for(325);
     assert_eq!(replies.len(), 1, "{replies:?}");
-    assert!(replies[0].contains("Kept in Inbox") && replies[0].contains("http 500"), "{}", replies[0]);
+    assert!(replies[0].starts_with("I couldn't reach the model just now") && !replies[0].contains("http 500"), "{}", replies[0]);
     assert_eq!(w.marks(325), vec!["✅"]);
 }
 
@@ -1635,7 +1635,7 @@ async fn list_item_appends_to_running_note() {
     let replies = w.replies_for(340);
     assert_eq!(replies.len(), 1, "{replies:?}");
     assert!(
-        replies[0].starts_with("Filed: State Street/Cash Flow/Spending/Shopping List.md (appended)"),
+        replies[0].ends_with("(Added to Shopping List.)"),
         "{}",
         replies[0]
     );
@@ -1662,7 +1662,7 @@ async fn running_with_attachment_files_a_note() {
     assert!(files_in(&root.join("State Street")).contains(&"2026-10-13 Costco list.md".to_string()));
     let replies = w.replies_for(341);
     assert_eq!(replies.len(), 1, "{replies:?}");
-    assert!(replies[0].starts_with("Filed: State Street/2026-10-13 Costco list.md"), "{}", replies[0]);
+    assert!(replies[0].ends_with("(Saved to State Street.)"), "{}", replies[0]);
 }
 
 /// With no running note on disk, a list message is filed as an ordinary note in State Street.
@@ -1677,7 +1677,7 @@ async fn running_note_missing_files_a_note() {
     assert!(files_in(&root_of(&inbox).join("State Street")).contains(&"2026-10-13 Costco list.md".to_string()));
     let replies = w.replies_for(342);
     assert_eq!(replies.len(), 1, "{replies:?}");
-    assert!(replies[0].starts_with("Filed: State Street/2026-10-13 Costco list.md"), "{}", replies[0]);
+    assert!(replies[0].ends_with("(Saved to State Street.)"), "{}", replies[0]);
 }
 
 /// One notice per failure episode: a repeat of the same chat error gets ✅ only, and a success ends the episode.
@@ -1698,7 +1698,7 @@ async fn same_chat_error_notices_once_until_chat_works() {
     }
     let first = w.replies_for(340);
     assert_eq!(first.len(), 1, "{first:?}");
-    assert!(first[0].contains("Chat failed (http 401)"), "{}", first[0]);
+    assert!(first[0].starts_with("I couldn't reach the model just now") && !first[0].contains("http 401"), "{}", first[0]);
     assert!(w.replies_for(341).is_empty(), "{:?}", w.replies_for(341));
     assert_eq!(w.marks(341), vec!["✅"]);
     let third = w.replies_for(342);
@@ -1706,7 +1706,7 @@ async fn same_chat_error_notices_once_until_chat_works() {
     assert!(third[0].contains("ok"), "{}", third[0]);
     let fourth = w.replies_for(343);
     assert_eq!(fourth.len(), 1, "{fourth:?}");
-    assert!(fourth[0].contains("Chat failed (http 401)"), "{}", fourth[0]);
+    assert!(fourth[0].starts_with("I couldn't reach the model just now") && !fourth[0].contains("http 401"), "{}", fourth[0]);
 }
 
 /// A question the model routes to a running list is answered, and the list is left alone.
