@@ -437,3 +437,38 @@ fn r6_b4_kirkland_address_on_plain_receipt_is_not_costco() {
     put(&r, "State Street/2026-10-06 Receipt.md", "## OCR 1.jpg\n\n~~~text\nFRESH MART\n12 MAIN ST KIRKLAND WA\nORG EGGS\n~~~\n");
     assert!(pantry::restock(&r, "2026-10-06", false).is_ok());
 }
+
+// Round 8 (decision: Costco is detected by "costco" alone; no Kirkland heuristic).
+#[test]
+fn r8_spaced_costco_header_without_split_is_refused() {
+    let r = root("r8spaced");
+    put(&r, "State Street/2026-10-04 Receipt.md", "## OCR 1.jpg\n\n~~~text\nC O S T C O  W H O L E S A L E\nORG EGGS\n~~~\n");
+    let err = pantry::restock(&r, "2026-10-04", false).expect_err("spaced costco must refuse");
+    assert!(err.contains("split"), "{err}");
+}
+
+#[test]
+fn r8_kirkland_street_address_on_plain_receipt_is_not_costco() {
+    let r = root("r8addr");
+    put(&r, "State Street/2026-10-04 Receipt.md", "## OCR 1.jpg\n\n~~~text\nFRESH MART\n12 MAIN ST KIRKLAND WA\nORG EGGS\n~~~\n");
+    let rep = pantry::restock(&r, "2026-10-04", false).expect("plain receipt is stocked");
+    assert!(rep.added.contains(&"eggs".to_string()));
+}
+
+#[test]
+fn r8_kirkland_sign_store_names_are_not_costco() {
+    for (name, store) in [("sign", "KIRKLAND SIGN CO"), ("signal", "KIRKLAND SIGNAL WAY")] {
+        let r = root(&format!("r8{name}"));
+        put(&r, "State Street/2026-10-04 Receipt.md", &format!("## OCR 1.jpg\n\n~~~text\n{store}\nORG EGGS\n~~~\n"));
+        let rep = pantry::restock(&r, "2026-10-04", false).unwrap_or_else(|e| panic!("{store}: {e}"));
+        assert!(rep.added.contains(&"eggs".to_string()), "{store}");
+    }
+}
+
+#[test]
+fn r8_mixed_case_costco_without_split_is_refused() {
+    let r = root("r8mixed");
+    put(&r, "State Street/2026-10-04 Receipt.md", "## OCR 1.jpg\n\n~~~text\nCostco Wholesale\nORG EGGS\n~~~\n");
+    let err = pantry::restock(&r, "2026-10-04", false).expect_err("mixed-case costco must refuse");
+    assert!(err.contains("split"), "{err}");
+}
