@@ -52,3 +52,14 @@ fn from_key_file_missing_empty_and_trimmed() {
     assert_eq!(chat::key_path(), d.join("key"));
     std::env::remove_var("DISCORD_INBOX_OPENROUTER_KEY_FILE");
 }
+
+/// The request body pins the model and the zero-data-retention flag. Offline: the body is built, never sent.
+#[test]
+fn request_body_pins_model_and_zdr() {
+    let body = chat::request_body("system text", "user text");
+    assert_eq!(body["provider"]["zdr"], serde_json::Value::Bool(true), "{body}");
+    assert_eq!(body["model"], "xiaomi/mimo-v2.6-flash", "{body}");
+    assert_eq!(body["max_tokens"], 500, "{body}");
+    assert_eq!(body["messages"][0]["role"], "system", "{body}");
+    assert_eq!(body["messages"][1]["content"], "user text", "{body}");
+}
