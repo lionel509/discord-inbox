@@ -430,3 +430,10 @@ fn b5_hand_added_three_cell_row_survives_restock() {
     pantry::restock(&r, "2026-10-05", false).unwrap();
     assert!(read(&r).contains("| rice |"), "{}", read(&r));
 }
+
+#[test]
+fn r6_b4_kirkland_address_on_plain_receipt_is_not_costco() {
+    let r = root("r6b4");
+    put(&r, "State Street/2026-10-06 Receipt.md", "## OCR 1.jpg\n\n~~~text\nFRESH MART\n12 MAIN ST KIRKLAND WA\nORG EGGS\n~~~\n");
+    assert!(pantry::restock(&r, "2026-10-06", false).is_ok());
+}
