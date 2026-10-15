@@ -13,6 +13,9 @@ pub const DEADLINE: Duration = Duration::from_secs(40);
 pub const LIMIT_NOTE: &str = "(That was your last lookup. Answer now from what you've read, say warmly that you couldn't check everything, and don't call any tool.)";
 
 const CUT_BUDGET: &str = "…[cut: budget]";
+/// Characters held back for markers: a cut or refused result still gets its marker after the budget runs out,
+/// so no tool message goes out blank. One slot per allowed call.
+const MARK_RESERVE: usize = 14 * MAX_CALLS;
 
 #[derive(Debug)]
 pub struct Answered {
@@ -73,13 +76,13 @@ pub fn answer(chat: &dyn Chat, lookup: &Lookup, question: &str) -> Result<Answer
                             Err(e) => format!("error: {e}"),
                         }
                     };
-                    let content = fit(&result, BUDGET_CHARS.saturating_sub(used));
+                    let content = fit(&result, room(used));
                     used += content.chars().count();
                     messages.push(json!({"role": "tool", "tool_call_id": c.id, "content": content}));
                 }
                 let next = if calls >= MAX_CALLS {
                     Some("lookups")
-                } else if used >= BUDGET_CHARS {
+                } else if room(used) == 0 {
                     Some("budget")
                 } else if start.elapsed() >= DEADLINE {
                     Some("time")
@@ -95,14 +98,20 @@ pub fn answer(chat: &dyn Chat, lookup: &Lookup, question: &str) -> Result<Answer
     }
 }
 
+/// Tool output left for the next message: the budget minus the marker reserve.
+fn room(used: usize) -> usize {
+    BUDGET_CHARS.saturating_sub(used + MARK_RESERVE)
+}
+
 /// `s` if it fits in `room` characters, else cut to fit with the budget marker at the end.
+/// When `room` is smaller than the marker, the marker alone goes out (it is never blank).
 fn fit(s: &str, room: usize) -> String {
     if s.chars().count() <= room {
         return s.to_string();
     }
     let mark = CUT_BUDGET.chars().count();
     if room < mark {
-        return CUT_BUDGET.chars().take(room).collect();
+        return CUT_BUDGET.to_string();
     }
     let mut out: String = s.chars().take(room - mark).collect();
     out.push_str(CUT_BUDGET);

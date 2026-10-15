@@ -270,3 +270,33 @@ fn double_ignored_tool_choice_after_limit_still_answers() {
     assert!(r.limited.is_some());
     assert!(r.text.contains("couldn't check everything"));
 }
+
+#[test]
+fn budget_overflow_inside_one_round_gives_nonempty_tool_content() {
+    // Six parallel reads of a ~120K note in one turn: the budget runs out inside the round.
+    // Every tool message must still carry its marker, never an empty string, and the total stays in budget.
+    let (lk, _) = lookup("overflow");
+    let mut q: Vec<Result<Reply, String>> = vec![Ok(Reply {
+        turn: Turn::Calls(
+            (0..MAX_CALLS)
+                .map(|i| ToolCall {
+                    id: format!("c{i}"),
+                    name: "read_note".into(),
+                    arguments: r#"{"path":"Fidelity/Big.md"}"#.into(),
+                })
+                .collect(),
+        ),
+        usage: Usage::default(),
+    })];
+    q.push(Ok(text("Cod, mostly.")));
+    let chat = Script::new(q);
+    let _ = answer(&chat, &lk, Q).unwrap();
+    let seen = chat.seen.lock().unwrap().clone();
+    let tools = tool_msgs(&seen[1].0);
+    assert_eq!(tools.len(), MAX_CALLS);
+    for m in &tools {
+        assert!(!m["content"].as_str().unwrap().is_empty(), "blank tool result: {m}");
+    }
+    let total: usize = tools.iter().map(|m| m["content"].as_str().unwrap().chars().count()).sum();
+    assert!(total <= BUDGET_CHARS, "{total}");
+}
