@@ -4,14 +4,17 @@ use discord_inbox::chat::{self, OpenRouter};
 use discord_inbox::ingest::{catch_up_with, ingest_with, Filer, History, Inbound, PAGE};
 use discord_inbox::vaults::Vaults;
 use serenity::all::{
-    ChannelId, Client, Context, EventHandler, GatewayIntents, GetMessages, Http, Message,
-    MessageId, ReactionType, Ready, UserId,
+    ActivityData, ChannelId, Client, Context, EventHandler, GatewayIntents, GetMessages, Http,
+    Message, MessageId, OnlineStatus, ReactionType, Ready, UserId,
 };
 use serenity::async_trait;
 use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::task::JoinHandle;
+use tokio::time::{interval_at, Instant, Interval, MissedTickBehavior};
 
 const KEYCHAIN_SERVICE: &str = "discord-inbox";
 const KEYCHAIN_ACCOUNT: &str = "discord-inbox";
@@ -139,10 +142,70 @@ struct Handler {
     filer: Filer,
 }
 
+/// Bot presence rotation, status always Do Not Disturb. Changed every `PRESENCE_INTERVAL`.
+const PRESENCE_ROTATION: [(PresenceKind, &str); 4] = [
+    (PresenceKind::Playing, "with a ball of yarn 🧶"),
+    (PresenceKind::Watching, "the rain ⛈️"),
+    (PresenceKind::Listening, "thunder"),
+    (PresenceKind::Custom, "napping in a sunbeam ☀️"),
+];
+const PRESENCE_INTERVAL: Duration = Duration::from_secs(15 * 60);
+/// The one live presence loop. Each `ready` replaces it, so the loop always holds the
+/// Context from the most recent identify, and the old loop is aborted.
+static PRESENCE_LOOP: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
+
+fn install_presence_loop(handle: JoinHandle<()>) {
+    let previous = PRESENCE_LOOP.lock().unwrap().replace(handle);
+    if let Some(old) = previous {
+        old.abort();
+    }
+}
+
+/// Skip, not Burst: a stalled runtime must not fire every missed tick back to back.
+fn presence_interval() -> Interval {
+    let mut tick = interval_at(Instant::now() + PRESENCE_INTERVAL, PRESENCE_INTERVAL);
+    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    tick
+}
+
+#[derive(Clone, Copy)]
+enum PresenceKind {
+    Playing,
+    Watching,
+    Listening,
+    Custom,
+}
+
+fn presence_activity(index: usize) -> ActivityData {
+    let (kind, text) = PRESENCE_ROTATION[index];
+    match kind {
+        PresenceKind::Playing => ActivityData::playing(text),
+        PresenceKind::Watching => ActivityData::watching(text),
+        PresenceKind::Listening => ActivityData::listening(text),
+        PresenceKind::Custom => ActivityData::custom(text),
+    }
+}
+
+fn next_presence(index: usize) -> usize {
+    (index + 1) % PRESENCE_ROTATION.len()
+}
+
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, _: Ready) {
         eprintln!("discord-inbox: connected");
+        ctx.set_presence(Some(presence_activity(0)), OnlineStatus::DoNotDisturb);
+        // Every `ready` (including a re-identify) replaces the loop, so it never holds a dead shard's Context.
+        let loop_ctx = ctx.clone();
+        install_presence_loop(tokio::spawn(async move {
+            let mut tick = presence_interval();
+            let mut index = 0;
+            loop {
+                tick.tick().await;
+                index = next_presence(index);
+                loop_ctx.set_presence(Some(presence_activity(index)), OnlineStatus::DoNotDisturb);
+            }
+        }));
         catch_up_with(
             &self.allow,
             &self.inbox,
@@ -254,4 +317,46 @@ async fn main() -> ExitCode {
         return fail(format!("gateway stopped: {e}"));
     }
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod presence_tests {
+    use super::*;
+
+    #[test]
+    fn presence_rotation_is_nonempty_and_wraps() {
+        let n = PRESENCE_ROTATION.len();
+        assert!(n > 0);
+        assert_eq!(next_presence(0), 1 % n);
+        assert_eq!(next_presence(n - 1), 0);
+    }
+
+    #[tokio::test]
+    async fn install_presence_loop_aborts_previous_loop() {
+        let first = tokio::spawn(std::future::pending::<()>());
+        let first_abort = first.abort_handle();
+        let second = tokio::spawn(std::future::pending::<()>());
+        install_presence_loop(first);
+        install_presence_loop(second);
+        tokio::task::yield_now().await;
+        assert!(first_abort.is_finished(), "previous presence loop was not aborted");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn presence_interval_does_not_burst_after_stall() {
+        let mut tick = presence_interval();
+        tokio::time::advance(Duration::from_secs(3 * 24 * 60 * 60)).await;
+        let mut immediate = 0usize;
+        while immediate < 1000 {
+            if tokio::time::timeout(Duration::from_millis(0), tick.tick())
+                .await
+                .is_ok()
+            {
+                immediate += 1;
+            } else {
+                break;
+            }
+        }
+        assert!(immediate <= 1, "{immediate} presence updates fired back to back after a stall");
+    }
 }
