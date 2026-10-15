@@ -52,10 +52,15 @@ pub fn answer(chat: &dyn Chat, lookup: &Lookup, question: &str) -> Result<Answer
                     .collect();
                 messages.push(json!({"role": "assistant", "content": null, "tool_calls": tool_calls}));
                 for c in &calls_in_round {
-                    calls += 1;
-                    let result = match lookup.call(&c.name, &c.arguments) {
-                        Ok(s) => s,
-                        Err(e) => format!("error: {e}"),
+                    // Parallel calls in one turn count too: past the cap, answer the id without running it.
+                    let result = if calls >= MAX_CALLS || start.elapsed() >= DEADLINE {
+                        "error: lookup limit reached".to_string()
+                    } else {
+                        calls += 1;
+                        match lookup.call(&c.name, &c.arguments) {
+                            Ok(s) => s,
+                            Err(e) => format!("error: {e}"),
+                        }
                     };
                     let content = fit(&result, BUDGET_CHARS.saturating_sub(used));
                     used += content.chars().count();

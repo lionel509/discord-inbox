@@ -113,6 +113,8 @@ impl Lookup {
         if Path::new(rel).is_absolute() {
             return None;
         }
+        // Models copy the trailing slash from list_folder output; treat "Fidelity/" as "Fidelity".
+        let rel = rel.trim_end_matches(['/', '\\']);
         let parts: Vec<&str> = rel.split(['/', '\\']).collect();
         if parts.iter().any(|p| p.is_empty() || p.starts_with('.')) {
             return None;
@@ -138,7 +140,7 @@ impl Lookup {
         let words: Vec<String> = query
             .split_whitespace()
             .map(|w| w.to_lowercase())
-            .filter(|w| w.chars().count() >= 2)
+            .filter(|w| w.len() >= 2)
             .take(8)
             .collect();
         if words.is_empty() {

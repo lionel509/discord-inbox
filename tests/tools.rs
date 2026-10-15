@@ -185,3 +185,32 @@ fn no_tool_output_ever_leaks_the_sentinel() {
     }
     assert_eq!(lk.search_notes(SECRET, None).unwrap(), "No notes matched.");
 }
+
+// Regression (PR #51 review round 1): models copy the trailing slash from list_folder output.
+#[test]
+fn trailing_slash_on_a_folder_path_is_accepted() {
+    let base = std::env::temp_dir().join(format!("di-trailing-slash-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let root = base.join("vault");
+    std::fs::create_dir_all(root.join("Fidelity/Pantry")).unwrap();
+    std::fs::write(root.join("Fidelity/Pantry/Pantry.md"), "cod fillets\n").unwrap();
+    let lk = discord_inbox::tools::Lookup::new(root, base.join("Inbox"));
+    let listing = lk.list_folder("Fidelity/").expect("trailing slash listed");
+    assert!(listing.contains("Pantry/"));
+    let hits = lk.search_notes("cod", Some("Fidelity/Pantry/")).expect("trailing slash search");
+    assert!(hits.contains("Pantry.md"));
+    assert!(lk.list_folder("../Fidelity/").is_err(), "parent traversal still refused");
+}
+
+// Regression (PR #51 review round 1): a one-character CJK query is kept (the plan's 2-byte floor).
+#[test]
+fn single_cjk_character_query_is_kept() {
+    let base = std::env::temp_dir().join(format!("di-cjk-one-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let root = base.join("vault");
+    std::fs::create_dir_all(root.join("Mirae")).unwrap();
+    std::fs::write(root.join("Mirae/学习.md"), "学习 汉字\n").unwrap();
+    let lk = discord_inbox::tools::Lookup::new(root, base.join("Inbox"));
+    let hits = lk.search_notes("学", None).expect("one-character query");
+    assert!(hits.contains("学习.md"), "hits = {hits}");
+}

@@ -214,3 +214,25 @@ fn live_pantry_question() {
     let a = answer(&key, &lk, Q).unwrap();
     println!("{}\n[calls {} tokens {}+{} limit {:?}]", a.text, a.calls, a.usage.prompt, a.usage.completion, a.limited);
 }
+
+// Regression (PR #51 review round 1): parallel calls in one turn must respect MAX_CALLS.
+#[test]
+fn one_round_of_many_calls_cannot_exceed_max_calls() {
+    let (lk, _) = lookup("burst");
+    let burst = Reply {
+        turn: Turn::Calls(
+            (0..10)
+                .map(|i| ToolCall { id: format!("c{i}"), name: "search_notes".into(), arguments: r#"{"query":"pantry"}"#.into() })
+                .collect(),
+        ),
+        usage: Usage::default(),
+    };
+    let chat = Script::new(vec![Ok(burst), Ok(text("done"))]);
+    let a = answer(&chat, &lk, Q).unwrap();
+    assert_eq!(a.calls, MAX_CALLS);
+    assert_eq!(a.limited, Some("lookups"));
+    let seen = chat.seen.lock().unwrap().clone();
+    let tools = tool_msgs(&seen[1].0);
+    assert_eq!(tools.len(), 10, "every tool_call_id still gets a reply");
+    assert_eq!(tools[9]["content"], "error: lookup limit reached");
+}
