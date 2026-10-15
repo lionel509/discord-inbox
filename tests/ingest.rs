@@ -941,14 +941,16 @@ async fn reply_masks_card_digits() {
     assert!(!replies[0].contains("4111"), "{}", replies[0]);
 }
 
-/// Nothing to say means no reply: plain text, strangers, a pending receipt.
+/// Nothing to say means no reply: strangers, a pending receipt. A plain DM with the chat off gets the one failure notice (#40).
 #[tokio::test]
 async fn no_reply_when_nothing_to_say() {
     let inbox = scratch("reply-none");
     let w = World::new(&inbox);
     let good = spec(MAIN, MAIN_CH, 102, &[("good.txt", b"hello")]);
     assert_eq!(ingest(&allow(), &inbox, &msg(&w, &good)).await, Outcome::Saved);
-    assert!(w.replies_for(102).is_empty());
+    let notice = w.replies_for(102);
+    assert_eq!(notice.len(), 1, "{notice:?}");
+    assert!(notice[0].contains("Kept in Inbox") && notice[0].contains("chat off"), "{}", notice[0]);
 
     let stranger = spec(STRANGER, STRANGER_CH, 103, &[("receipt.png", b"receipt")]);
     assert_eq!(ingest(&allow(), &inbox, &msg(&w, &stranger)).await, Outcome::Ignored);
@@ -1539,6 +1541,7 @@ async fn question_is_answered_not_filed() {
     let root = root_of(&inbox);
     let shop = root.join("State Street/Cash Flow/Spending");
     fs::create_dir_all(&shop).unwrap();
+    fs::create_dir_all(&inbox).unwrap();
     fs::write(shop.join("Shopping List.md"), "- [ ] Eggs\n").unwrap();
     fs::write(inbox.join("2026-10-12 tape.md"), "masking tape\n").unwrap();
     fs::write(inbox.join(".filed"), format!("999 {}\n", root.join("Private/note.md").display())).unwrap();
