@@ -376,23 +376,26 @@ pub async fn ingest_with<M: Inbound>(
             *filer.last_notice.lock().unwrap_or_else(|p| p.into_inner()) = None;
             let verdict = crate::insight::compose(&incoming).await;
             if d.answer || incoming.content.trim_end().ends_with('?') {
-                // A question: answer from the bot's own notes, file nothing, keep the Inbox note.
-                let notes = dump::lookup_notes_with(
-                    inbox,
-                    &filer.vaults.allowed_dirs(),
-                    &filer.vaults.running_paths(),
-                    &filer.vaults.ledger().into_iter().collect::<Vec<_>>(),
-                    vaults::LOOKUP_CHARS,
-                );
-                let (system, user) = vaults::answer_prompt(&sensitive(&incoming.content), &notes);
+                // A question: the agent searches and reads the notes itself (#49), file nothing, keep the Inbox note.
+                let lookup = crate::tools::Lookup::new(filer.vaults.root().to_path_buf(), inbox.to_path_buf());
+                let question = sensitive(&incoming.content);
                 let chat = filer.chat.clone();
-                let looked = typing_while(m, tokio::task::spawn_blocking(move || chat.ask(&system, &user)))
+                let looked = typing_while(m, tokio::task::spawn_blocking(move || crate::agent::answer(chat.as_ref(), &lookup, &question)))
                     .await
                     .map_err(|e| e.to_string())
                     .and_then(|r| r)
-                    .and_then(|a| if a.trim().is_empty() { Err("empty answer".to_string()) } else { Ok(a) });
+                    .and_then(|a| if a.text.trim().is_empty() { Err("empty answer".to_string()) } else { Ok(a) });
                 let body = match looked {
-                    Ok(a) => a,
+                    Ok(a) => {
+                        eprintln!(
+                            "discord-inbox: answer for {id}: {} lookups, {}+{} tokens{}",
+                            a.calls,
+                            a.usage.prompt,
+                            a.usage.completion,
+                            a.limited.map(|l| format!(", limit: {l}")).unwrap_or_default()
+                        );
+                        a.text
+                    }
                     Err(e) => {
                         eprintln!("discord-inbox: lookup for {id} failed: {e}");
                         format!("{}\n\n(I couldn't peek at your notes just now, sorry!)", d.reply)
