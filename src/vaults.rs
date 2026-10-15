@@ -46,6 +46,15 @@ pub const PROMPT_CHARS: usize = 4000;
 /// The IOU ledger (ledger.py output), read by the lookup for an Answer (#45).
 pub const LEDGER: &str = "State Street/Assets/Receivables/Who Owes Me.md";
 
+/// The restock target (#50): what is in the fridge, with a Bought date and Days per row.
+pub const PANTRY: &str = "Fidelity/Pantry/On Hand.md";
+
+/// The folder of Costco split notes (#50), read by `restock`.
+pub const SPLITS: &str = "State Street/Cash Flow/Spending/Splits";
+
+/// The staples notes the answer prompt also names (#50).
+pub const STAPLES: [&str; 2] = ["Fidelity/Pantry/Seasoning Shelf.md", "Fidelity/Pantry/Korean Shelf.md"];
+
 /// Stormy, the voice of every reply (#45). Private: the public profile never says what the bot does.
 pub const PERSONA: &str = "You're Stormy, Pusheen's little sister: a fluffy gray cat and Lionel's personal assistant. You're warm, a little sassy, and very on top of things. Keep replies short, like a text from a friend who has everything handled. Answer first, then add one small cat-ish touch now and then (a 🐾, a \"purr\", a dramatic sigh about a long list). Don't overdo it. When something fails, say so plainly. You genuinely care about Lionel and you're on his side: be warm and encouraging, never cold or robotic, even when something went wrong.";
 
@@ -195,16 +204,17 @@ pub fn user_prompt(content: &str, ocr: &[String]) -> String {
 /// bot's own notes. `notes` is `(label, redacted text)` pairs (#40).
 pub fn answer_prompt(question: &str, notes: &[(String, String)]) -> (String, String) {
     let shopping = RUNNING[0].path;
+    let [staple_a, staple_b] = STAPLES;
     let system = format!(
         "{PERSONA}\n\n\
          You answer one question from the owner. You can look in his notes with three read-only tools: \
          search_notes(query, folder) finds notes by words, read_note(path) reads one note, list_folder(path) lists a folder. \
          Paths look like \"Fidelity/Pantry/Pantry.md\". The vaults are: BlackRock (school), State Street (money; the IOU ledger is \"{LEDGER}\", the shopping list is \"{shopping}\"), \
-         Berkshire (business), Goldman (career), Fidelity (kitchen: recipes, pantry), Citadel (projects), Mirae (languages), Bridgewater (audits), Inbox (recent messages), ! Todo (tasks). \
+         Berkshire (business), Goldman (career), Fidelity (kitchen: what is in the fridge is \"{PANTRY}\" with a Bought date and Days per row; staples are \"{staple_a}\" and \"{staple_b}\"), Citadel (projects), Mirae (languages), Bridgewater (audits), Inbox (recent messages), ! Todo (tasks). \
          Start with a search or a hub note like \"<Vault>/Home.md\", use at most a few lookups, then answer. \
          Names in the question may be misspelled (\"willam\" = William). \
          List the items you find. If the notes do not hold the answer, say so in one sentence. \
-         1 to 6 sentences, in the user's language. Never include card numbers."
+         1 to 6 sentences, in the user's language. Never include card numbers. For a recipe or \"what can I make\" question: read \"{PANTRY}\" first and prefer its oldest rows, then the staples notes; cook for one; never alcohol (no wine, mirin, sake, Shaoxing) and nothing caffeinated."
     );
     let mut user = question.to_string();
     if !notes.is_empty() {

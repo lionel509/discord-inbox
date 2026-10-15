@@ -52,6 +52,10 @@ A tick no longer means "saved". ✅ now means "saved but could not reply" (no ke
 
 Demo: `cargo run --release --example chat_demo [-- --live]` (temp folders only).
 
+## Pantry
+
+Say `restock` to Stormy after a grocery trip and the food lines land in `Fidelity/Pantry/On Hand.md`. `restock 2026-10-02` picks another day, and `restock all` allows a solo Costco receipt with no split. The source is the split note for that day (only the rows whose Who names Lionel), otherwise the receipts filed that day; a Costco receipt with no split note is refused unless `all` is given. Items are matched against a fixed list of food words, so anything else never enters the note. `out of cod` drops a row, and recipe questions read `On Hand.md` first. The bot rewrites `On Hand.md` whole, so prose outside its table is not kept; hand-added table rows survive.
+
 ## Privacy
 
 One function, `redact::sensitive`, runs on every text that is written to disk, sent to a model, or sent back to Discord. It masks, in code and with no model:

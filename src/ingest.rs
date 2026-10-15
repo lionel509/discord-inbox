@@ -80,6 +80,14 @@ impl Filer {
     }
 }
 
+/// The sender's local date for a UTC `received` stamp (#50). Falls back to the UTC date when it does not parse.
+fn local_date(received: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(received) {
+        Ok(dt) => crate::when::local_stamp(dt.with_timezone(&chrono::Utc))[..10].to_string(),
+        Err(_) => received.get(..10).unwrap_or(received).to_string(),
+    }
+}
+
 async fn chat_decision(filer: &Filer, msg: &Incoming) -> Result<Decision, String> {
     let system = vaults::system_prompt();
     let ocr: Vec<String> = msg.ocr.iter().map(|(_, t)| sensitive(t)).collect();
@@ -347,6 +355,29 @@ pub async fn ingest_with<M: Inbound>(
             }
         }
         return Outcome::Saved;
+    }
+    // Pantry commands (#50) are answered from the vault notes, before any model call.
+    if incoming.attachments.is_empty() {
+        if let Some(cmd) = crate::pantry::command(&incoming.content) {
+            let today = local_date(&incoming.received);
+            let root = filer.vaults.root().to_path_buf();
+            let text = tokio::task::spawn_blocking(move || crate::pantry::run(&root, cmd, &today))
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r)
+                .unwrap_or_else(|e| {
+                    eprintln!("discord-inbox: pantry for {id} failed: {e}");
+                    format!("I couldn't update the pantry: {e}")
+                });
+            match m.reply(&text).await {
+                Ok(()) => clear(m).await,
+                Err(e) => {
+                    eprintln!("discord-inbox: reply on {id} failed: {e}");
+                    mark(m, SAVED_MARK).await;
+                }
+            }
+            return Outcome::Saved;
+        }
     }
     match typing_while(m, chat_decision(filer, &incoming)).await {
         Err(e) => {

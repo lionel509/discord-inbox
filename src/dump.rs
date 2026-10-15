@@ -153,7 +153,7 @@ pub fn saved_id(inbox: &Path, msg_id: u64) -> bool {
 }
 
 /// Serialises every writer of `.cursor-*`, `.retry` and notes. The live event and catch-up can run at once.
-static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The lib gate. A sender not on the allowlist gets no file. Never touches cursors.
 /// A pending note never replaces a complete one, so the check and the write share the lock.
