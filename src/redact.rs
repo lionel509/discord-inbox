@@ -8,10 +8,14 @@ use crate::insight::mask_cards;
 const REDACTED: &str = "[redacted]";
 
 /// Store labels whose long digit runs are references, not cards.
-const STORE_LABELS: [&str; 8] = ["transaction", "reference", "cashier", "station", "invoice", "order", "txn", "ref"];
+const STORE_LABELS: [&str; 9] =
+    ["transaction", "reference", "cashier", "station", "invoice", "order", "receipt", "txn", "ref"];
 /// Labels whose digits (6 to 17 of them) are a bank account or routing number: all but the last four are masked.
 const ACCOUNT_LABELS: [&str; 4] = ["account", "acct", "routing", "aba"];
+/// Labels whose value follows `=` or `:`, or for passwords also the word `is`.
 const PASSWORD_LABELS: [&str; 3] = ["password", "passwd", "pwd"];
+/// Labels whose value follows `=` or `:` only.
+const SECRET_LABELS: [&str; 4] = ["api_key", "apikey", "token", "secret"];
 
 /// A token with a fixed prefix. `keep` keeps the prefix (`Bearer `) and masks only the value after it.
 struct Token {
@@ -22,8 +26,22 @@ struct Token {
     allowed: fn(char) -> bool,
 }
 
-const TOKENS: [Token; 9] = [
+const TOKENS: &[Token] = &[
+    Token { prefix: "Authorization: Basic ", ci: true, min: 8, keep: true, allowed: token_char },
+    Token { prefix: "Authorization: Bearer ", ci: true, min: 8, keep: true, allowed: token_char },
     Token { prefix: "sk-", ci: false, min: 16, keep: false, allowed: key_char },
+    Token { prefix: "sk_live_", ci: false, min: 16, keep: false, allowed: word_char },
+    Token { prefix: "sk_test_", ci: false, min: 16, keep: false, allowed: word_char },
+    Token { prefix: "rk_live_", ci: false, min: 16, keep: false, allowed: word_char },
+    Token { prefix: "pk_live_", ci: false, min: 16, keep: false, allowed: word_char },
+    Token { prefix: "gho_", ci: false, min: 16, keep: false, allowed: word_char },
+    Token { prefix: "ghu_", ci: false, min: 16, keep: false, allowed: word_char },
+    Token { prefix: "ghs_", ci: false, min: 16, keep: false, allowed: word_char },
+    Token { prefix: "ghr_", ci: false, min: 16, keep: false, allowed: word_char },
+    Token { prefix: "shpat_", ci: false, min: 16, keep: false, allowed: word_char },
+    Token { prefix: "shpss_", ci: false, min: 16, keep: false, allowed: word_char },
+    Token { prefix: "shpca_", ci: false, min: 16, keep: false, allowed: word_char },
+    Token { prefix: "shppa_", ci: false, min: 16, keep: false, allowed: word_char },
     Token { prefix: "ghp_", ci: false, min: 16, keep: false, allowed: word_char },
     Token { prefix: "github_pat_", ci: false, min: 16, keep: false, allowed: word_char },
     Token { prefix: "xoxa-", ci: false, min: 10, keep: false, allowed: key_char },
@@ -102,7 +120,7 @@ fn word_at(c: &[char], i: usize, w: &str) -> bool {
 /// Skips an optional `no` or `number` word after a label, then the separators.
 fn after_label(c: &[char], q: usize) -> usize {
     let q = marks(c, q);
-    for w in ["no", "number"] {
+    for w in ["no", "number", "id"] {
         if word_at(c, q, w) {
             return marks(c, q + w.len());
         }
@@ -111,6 +129,7 @@ fn after_label(c: &[char], q: usize) -> usize {
 }
 
 /// The end of a digit run that starts at `q`, with single gaps allowed between digits, and its digit values.
+/// A run never crosses a line break.
 fn run_end(c: &[char], q: usize) -> (usize, Vec<u32>) {
     let (mut j, mut end, mut digits) = (q, q, Vec::new());
     while j < c.len() {
@@ -118,7 +137,7 @@ fn run_end(c: &[char], q: usize) -> (usize, Vec<u32>) {
             digits.push(digit_value(c[j]));
             j += 1;
             end = j;
-        } else if is_gap(c[j]) && j + 1 < c.len() && digit(c[j + 1]) {
+        } else if is_gap(c[j]) && c[j] != '\n' && c[j] != '\r' && j + 1 < c.len() && digit(c[j + 1]) {
             j += 1;
         } else {
             break;
@@ -144,35 +163,33 @@ fn luhn_ok(digits: &[u32]) -> bool {
     sum % 10 == 0
 }
 
-/// Digit runs of 12 or more after a store label. A 13 to 19 digit run that passes Luhn is a card and stays masked.
+/// Keeps the digit run at `q` as a reference when it is 12 to 19 digits and not a Luhn-valid card of 13 to 19.
+/// A run over 19 digits, or one that passes Luhn, is left for `mask_cards`.
+fn keep_span(c: &[char], q: usize, spans: &mut Vec<(usize, usize)>) {
+    if q >= c.len() || !digit(c[q]) {
+        return;
+    }
+    let (end, digits) = run_end(c, q);
+    let count = digits.len();
+    if !(12..=19).contains(&count) || (count >= 13 && luhn_ok(&digits)) {
+        return;
+    }
+    if spans.last().is_none_or(|&(_, e)| q >= e) {
+        spans.push((q, end));
+    }
+}
+
+/// Digit runs of 12 to 19 after a store label or a `+` country code. A 13 to 19 digit run that passes Luhn is a card.
 fn kept_spans(c: &[char]) -> Vec<(usize, usize)> {
     let mut spans: Vec<(usize, usize)> = Vec::new();
     for i in 0..c.len() {
-        let Some(label) = STORE_LABELS.iter().find(|l| word_at(c, i, l)) else {
-            continue;
-        };
-        let mut q = after_label(c, i + label.len());
-        // A short token before the reference, as in "Station 05 3135...".
-        let mut r = q;
-        while r < c.len() && digit(c[r]) {
-            r += 1;
+        // An international phone number: `+86 138 0013 8000`.
+        if c[i] == '+' && (i == 0 || !c[i - 1].is_alphanumeric()) {
+            keep_span(c, i + 1, &mut spans);
         }
-        if r > q && r - q <= 4 && r < c.len() && c[r] == ' ' {
-            let s = spaces(c, r);
-            if s < c.len() && digit(c[s]) {
-                q = s;
-            }
-        }
-        if q >= c.len() || !digit(c[q]) {
-            continue;
-        }
-        let (end, digits) = run_end(c, q);
-        let count = digits.len();
-        if count < 12 || ((13..=19).contains(&count) && luhn_ok(&digits)) {
-            continue;
-        }
-        if spans.last().is_none_or(|&(_, e)| q >= e) {
-            spans.push((q, end));
+        if let Some(label) = STORE_LABELS.iter().find(|l| word_at(c, i, l)) {
+            let q = after_label(c, i + label.len());
+            keep_span(c, q, &mut spans);
         }
     }
     spans
@@ -192,7 +209,23 @@ fn mask_numbers(text: &str) -> String {
     out
 }
 
-/// `###-##-####` with no digit on either side: masked as `***-**-1234`.
+/// `123456789`, `123 45 6789` or `123-45-6789` at `q` with no digit after: the index just past it.
+fn loose_ssn_end(c: &[char], q: usize) -> Option<usize> {
+    let mut j = q;
+    for (k, n) in [3usize, 2, 4].into_iter().enumerate() {
+        if k > 0 && j < c.len() && matches!(c[j], ' ' | '-') {
+            j += 1;
+        }
+        if j + n > c.len() || !c[j..j + n].iter().all(|ch| ch.is_ascii_digit()) {
+            return None;
+        }
+        j += n;
+    }
+    (!c.get(j).is_some_and(|ch| ch.is_ascii_digit())).then_some(j)
+}
+
+/// `###-##-####` with no digit on either side: masked as `***-**-1234`. After an `SSN` label the dashes and
+/// spaces are optional, so `SSN 123456789` and `SSN: 123 45 6789` are masked too.
 fn mask_ssns(text: &str) -> String {
     let c: Vec<char> = text.chars().collect();
     let is_ssn = |s: &[char]| {
@@ -204,6 +237,16 @@ fn mask_ssns(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
     while i < c.len() {
+        if word_at(&c, i, "ssn") {
+            let q = after_label(&c, i + 3);
+            if let Some(end) = loose_ssn_end(&c, q) {
+                out.extend(&c[i..q]);
+                out.push_str("***-**-");
+                out.extend(&c[end - 4..end]);
+                i = end;
+                continue;
+            }
+        }
         let bounded = (i == 0 || !c[i - 1].is_ascii_digit()) && c.get(i + 11).is_none_or(|ch| !ch.is_ascii_digit());
         if i + 11 <= c.len() && bounded && is_ssn(&c[i..i + 11]) {
             out.push_str("***-**-");
@@ -247,7 +290,19 @@ fn secret_at(c: &[char], i: usize) -> Option<(usize, usize)> {
     if i > 0 && word_char(c[i - 1]) {
         return None;
     }
-    for t in &TOKENS {
+    // The password in `scheme://user:password@host`: the part between the first `:` and the `@`.
+    if i >= 3 && c[i - 3..i] == [':', '/', '/'] {
+        let stop = c[i..].iter().position(|&ch| ch == '/' || ch.is_whitespace()).map_or(c.len(), |p| i + p);
+        let auth = &c[i..stop];
+        if let Some(at) = auth.iter().rposition(|&ch| ch == '@') {
+            if let Some(colon) = auth[..at].iter().position(|&ch| ch == ':') {
+                if colon + 1 < at {
+                    return Some((i + colon + 1, i + at));
+                }
+            }
+        }
+    }
+    for t in TOKENS.iter() {
         let n = t.prefix.len();
         let matched = i + n <= c.len()
             && c[i..i + n].iter().zip(t.prefix.chars()).all(|(a, b)| {
@@ -260,17 +315,22 @@ fn secret_at(c: &[char], i: usize) -> Option<(usize, usize)> {
             }
         }
     }
-    for label in PASSWORD_LABELS {
+    for label in PASSWORD_LABELS.iter().chain(SECRET_LABELS.iter()) {
         if !word_at(c, i, label) {
             continue;
         }
         let q = spaces(c, i + label.len());
-        if q < c.len() && (c[q] == '=' || c[q] == ':') {
-            let v = spaces(c, q + 1);
-            let run = c[v..].iter().take_while(|ch| !ch.is_whitespace()).count();
-            if run > 0 {
-                return Some((v, v + run));
-            }
+        let sep_end = if q < c.len() && (c[q] == '=' || c[q] == ':') {
+            q + 1
+        } else if PASSWORD_LABELS.contains(label) && word_at(c, q, "is") {
+            q + 2
+        } else {
+            continue;
+        };
+        let v = spaces(c, sep_end);
+        let run = c[v..].iter().take_while(|ch| !ch.is_whitespace()).count();
+        if run > 0 {
+            return Some((v, v + run));
         }
     }
     None
