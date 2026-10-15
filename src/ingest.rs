@@ -99,7 +99,10 @@ fn list_append(filer: &Filer, inbox: &Path, incoming: &Incoming, d: &Decision) -
     }
     let note = filer.vaults.running_path(r)?;
     match dump::append_running(inbox, incoming, &note, &incoming.received[..10]) {
-        Ok(()) => Some(format!("{} (appended)", r.path)),
+        Ok(()) => {
+            let stem = Path::new(r.path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            Some(format!("Got it, added to your {stem} 🐾"))
+        }
         Err(e) => {
             eprintln!("discord-inbox: append {} failed: {e}", incoming.msg_id);
             None
@@ -107,20 +110,17 @@ fn list_append(filer: &Filer, inbox: &Path, incoming: &Incoming, d: &Decision) -
     }
 }
 
-/// One reply: where it went, the chat answer, then the receipt verdict if any. Masked and capped.
-pub fn combine(filed: Option<&str>, chat: &str, verdict: Option<&str>) -> String {
-    let head = match filed {
-        Some(f) => format!("Filed: {f}"),
-        None => "Kept in Inbox".to_string(),
-    };
-    combine_head(&head, chat, verdict)
+/// One reply: the model's text, then one plain line saying where it went (when there is one), then the receipt verdict. Masked and capped (#45).
+pub fn combine(line: Option<&str>, chat: &str, verdict: Option<&str>) -> String {
+    match line {
+        Some(l) => reply_text(&format!("{chat}\n\n{l}"), verdict),
+        None => reply_text(chat, verdict),
+    }
 }
 
-/// `combine` with the first line given as `head` (the notice, the answer label, or the filing).
-pub fn combine_head(head: &str, chat: &str, verdict: Option<&str>) -> String {
-    let mut out = head.to_string();
-    out.push_str("\n\n");
-    out.push_str(chat);
+/// The reply text: `chat`, then the verdict if any, masked and capped. No status label goes first (#45).
+fn reply_text(chat: &str, verdict: Option<&str>) -> String {
+    let mut out = chat.to_string();
     if let Some(v) = verdict {
         out.push_str("\n\n");
         out.push_str(v);
@@ -132,6 +132,65 @@ pub fn combine_head(head: &str, chat: &str, verdict: Option<&str>) -> String {
         return cut;
     }
     out
+}
+
+/// How often "typing" is re-sent while a model call runs. Discord's indicator lasts about 10 s (#45).
+pub const TYPING_EVERY: std::time::Duration = std::time::Duration::from_secs(8);
+/// The longest a typing call may hold up the reply. Typing is best-effort (#45).
+pub const TYPING_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Runs `work`, re-sending the typing indicator every `TYPING_EVERY` until it finishes. Live DMs only: catch-up never types (#45).
+async fn typing_while<M: Inbound, F: std::future::Future>(m: &M, work: F) -> F::Output {
+    if !m.live() {
+        return work.await;
+    }
+    // Sent before the request starts, then again every TYPING_EVERY until the work is done.
+    let _ = tokio::time::timeout(TYPING_WAIT, m.typing()).await;
+    tokio::pin!(work);
+    let start = tokio::time::Instant::now() + TYPING_EVERY;
+    let mut every = tokio::time::interval_at(start, TYPING_EVERY);
+    loop {
+        tokio::select! {
+            out = &mut work => return out,
+            _ = every.tick() => {
+                let _ = tokio::time::timeout(TYPING_WAIT, m.typing()).await;
+            }
+        }
+    }
+}
+
+/// The reply to a DM with nothing to read (#46).
+pub const BLANK_REPLY: &str = "Got it 🐾 It's saved in your Inbox.";
+/// How much of a text attachment is read as the message (#46).
+pub const ATTACH_TEXT_CHARS: usize = 20_000;
+
+/// The text of a `.txt` or `.md` attachment, from the bytes that were saved, up to ATTACH_TEXT_CHARS on a char boundary. `None` for other files or binary (a NUL byte); invalid UTF-8 is decoded lossily (#46).
+fn attachment_text(name: &str, bytes: &[u8]) -> Option<String> {
+    let lower = name.to_ascii_lowercase();
+    if !(lower.ends_with(".txt") || lower.ends_with(".md")) {
+        return None;
+    }
+    if bytes.contains(&0) {
+        return None;
+    }
+    let text = String::from_utf8_lossy(bytes);
+    Some(text.chars().take(ATTACH_TEXT_CHARS).collect())
+}
+
+/// The typed text, then each readable text attachment after it. Blank when neither has text (#46).
+fn message_text(typed: &str, attachments: &[(String, Option<Vec<u8>>)]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !typed.trim().is_empty() {
+        parts.push(typed.to_string());
+    }
+    for (name, bytes) in attachments {
+        if let Some(t) = bytes.as_deref().and_then(|b| attachment_text(name, b)) {
+            if !t.trim().is_empty() {
+                parts.push(t);
+            }
+        }
+    }
+    parts.join("\n\n")
 }
 
 /// One message, as the decision logic sees it.
@@ -155,6 +214,14 @@ pub trait Inbound: Send + Sync {
     fn own_reactions(&self) -> Vec<String>;
     /// Sends `text` back into the channel this message came from.
     fn reply(&self, text: &str) -> impl std::future::Future<Output = Result<(), String>> + Send;
+    /// False for a message replayed from history (catch-up). Only live messages show typing (#45).
+    fn live(&self) -> bool {
+        true
+    }
+    /// Shows "typing" in the message's channel, best-effort. Default: nothing.
+    fn typing(&self) -> impl std::future::Future<Output = ()> + Send {
+        async {}
+    }
 }
 
 /// The Discord history calls the catch-up needs.
@@ -243,7 +310,7 @@ pub async fn ingest_with<M: Inbound>(
         msg_id: id,
         author_id: m.author_id(),
         received,
-        content: m.content(),
+        content: message_text(&m.content(), &attachments),
         attachments,
         ocr,
     };
@@ -270,7 +337,18 @@ pub async fn ingest_with<M: Inbound>(
     if let Err(e) = dump::remove_retry(inbox, id) {
         eprintln!("discord-inbox: retry clear for {id} failed: {e}");
     }
-    match chat_decision(filer, &incoming).await {
+    // Nothing to read (no text, no OCR text): the note is saved and acknowledged, the model is not called (#46).
+    if incoming.content.trim().is_empty() && incoming.ocr.is_empty() {
+        match m.reply(BLANK_REPLY).await {
+            Ok(()) => clear(m).await,
+            Err(e) => {
+                eprintln!("discord-inbox: reply on {id} failed: {e}");
+                mark(m, SAVED_MARK).await;
+            }
+        }
+        return Outcome::Saved;
+    }
+    match typing_while(m, chat_decision(filer, &incoming)).await {
         Err(e) => {
             eprintln!("discord-inbox: chat for {id} failed: {e}");
             let verdict = crate::insight::compose(&incoming).await;
@@ -284,9 +362,9 @@ pub async fn ingest_with<M: Inbound>(
             };
             mark(m, SAVED_MARK).await;
             let text = if first {
-                Some(combine_head("Kept in Inbox", &format!("Chat failed ({e}), so this was saved to Inbox only: not filed, not answered. For the next 10 minutes, other messages that fail get ✅ and no reply."), verdict.as_deref()))
+                Some(reply_text("Sorry, my brain's a little foggy right now 😿 Your message is saved in your Inbox. For the next 10 minutes I'll just ✅ new ones and catch up after.", verdict.as_deref()))
             } else {
-                verdict.map(|v| combine_head("Kept in Inbox", "Chat is still failing; saved to Inbox only.", Some(&v)))
+                verdict.map(|v| reply_text("Still a little foggy 😿 This one's saved in your Inbox too.", Some(&v)))
             };
             if let Some(text) = text {
                 if let Err(e) = m.reply(&text).await {
@@ -299,26 +377,28 @@ pub async fn ingest_with<M: Inbound>(
             let verdict = crate::insight::compose(&incoming).await;
             if d.answer || incoming.content.trim_end().ends_with('?') {
                 // A question: answer from the bot's own notes, file nothing, keep the Inbox note.
-                let notes = dump::lookup_notes(
+                let notes = dump::lookup_notes_with(
                     inbox,
                     &filer.vaults.allowed_dirs(),
                     &filer.vaults.running_paths(),
+                    &filer.vaults.ledger().into_iter().collect::<Vec<_>>(),
                     vaults::LOOKUP_CHARS,
                 );
                 let (system, user) = vaults::answer_prompt(&sensitive(&incoming.content), &notes);
                 let chat = filer.chat.clone();
-                let looked = tokio::task::spawn_blocking(move || chat.ask(&system, &user))
+                let looked = typing_while(m, tokio::task::spawn_blocking(move || chat.ask(&system, &user)))
                     .await
                     .map_err(|e| e.to_string())
-                    .and_then(|r| r);
-                let (head, body) = match looked {
-                    Ok(a) => ("Answered".to_string(), a),
+                    .and_then(|r| r)
+                    .and_then(|a| if a.trim().is_empty() { Err("empty answer".to_string()) } else { Ok(a) });
+                let body = match looked {
+                    Ok(a) => a,
                     Err(e) => {
                         eprintln!("discord-inbox: lookup for {id} failed: {e}");
-                        (format!("Answered without the vault (lookup failed: {e})"), d.reply.clone())
+                        format!("{}\n\n(I couldn't peek at your notes just now, sorry!)", d.reply)
                     }
                 };
-                let text = combine_head(&head, &body, verdict.as_deref());
+                let text = reply_text(&body, verdict.as_deref());
                 match m.reply(&text).await {
                     Ok(()) => clear(m).await,
                     Err(e) => {
@@ -341,7 +421,7 @@ pub async fn ingest_with<M: Inbound>(
                         &vaults::front_extra(t, &d.tags),
                         &vaults::hub_line(t),
                     ) {
-                        Ok(_) => Some(format!("{}/{}", t.folder, name)),
+                        Ok(_) => Some(format!("Saved to {} for you 🐾", t.folder)),
                         Err(e) => {
                             eprintln!("discord-inbox: file {id} failed: {e}");
                             None
@@ -349,7 +429,9 @@ pub async fn ingest_with<M: Inbound>(
                     }
                 })
             });
-            let text = combine(filed.as_deref(), &d.reply, verdict.as_deref());
+            // A target the model picked that did not take the note: say so, in the same one-line shape.
+            let line = filed.or_else(|| d.target.map(|_| "Hmm, I couldn't file that one, so it's safe in your Inbox for now.".to_string()));
+            let text = combine(line.as_deref(), &d.reply, verdict.as_deref());
             match m.reply(&text).await {
                 Ok(()) => clear(m).await,
                 Err(e) => {

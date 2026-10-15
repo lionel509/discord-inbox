@@ -126,6 +126,8 @@ struct World {
     replies: Mutex<Vec<(u64, String)>>,
     /// msg id -> the bot's reactions now on that message (the Discord-side state).
     marks: Mutex<HashMap<u64, Vec<String>>>,
+    /// Every above-the-line "typing" call, by msg id (#45).
+    typing: Mutex<Vec<u64>>,
     /// Every react/unreact attempt in order: (msg id, "react"|"unreact", emoji).
     ops: Mutex<Vec<(u64, &'static str, String)>>,
 }
@@ -142,8 +144,12 @@ impl World {
             note_at_react: Mutex::new(HashMap::new()),
             replies: Mutex::new(Vec::new()),
             marks: Mutex::new(HashMap::new()),
+            typing: Mutex::new(Vec::new()),
             ops: Mutex::new(Vec::new()),
         })
+    }
+    fn typing_count(&self, id: u64) -> usize {
+        self.typing.lock().unwrap().iter().filter(|m| **m == id).count()
     }
     fn replies_for(&self, id: u64) -> Vec<String> {
         self.replies
@@ -189,6 +195,8 @@ impl World {
 struct FakeMsg {
     spec: Spec,
     w: Arc<World>,
+    /// false for a message that came back from history (catch-up), true for a live DM.
+    live: bool,
 }
 
 impl Inbound for FakeMsg {
@@ -209,6 +217,12 @@ impl Inbound for FakeMsg {
     }
     fn attachment_names(&self) -> Vec<String> {
         self.spec.files.iter().map(|f| f.0.clone()).collect()
+    }
+    fn live(&self) -> bool {
+        self.live
+    }
+    async fn typing(&self) {
+        self.w.typing.lock().unwrap().push(self.spec.id);
     }
     async fn download(&self, i: usize) -> Result<Vec<u8>, String> {
         self.w.add_download(self.spec.id);
@@ -279,6 +293,7 @@ fn msg(w: &Arc<World>, s: &Spec) -> FakeMsg {
     FakeMsg {
         spec: s.clone(),
         w: w.clone(),
+        live: true,
     }
 }
 
@@ -333,7 +348,7 @@ impl History for FakeHistory {
         }
         // Newest first, the way Discord returns them.
         picked.reverse();
-        Ok(picked.into_iter().map(|spec| msg(&self.w, &spec)).collect())
+        Ok(picked.into_iter().map(|spec| history_msg(&self.w, &spec)).collect())
     }
 
     async fn fetch(&self, channel: u64, msg_id: u64) -> Result<FakeMsg, String> {
@@ -345,9 +360,17 @@ impl History for FakeHistory {
             .find(|s| s.id == msg_id && s.channel == channel)
             .cloned();
         match found {
-            Some(spec) => Ok(msg(&self.w, &spec)),
+            Some(spec) => Ok(history_msg(&self.w, &spec)),
             None => Err("unknown message".to_string()),
         }
+    }
+}
+
+/// A message as the history calls return it: catch-up, not live.
+fn history_msg(w: &Arc<World>, s: &Spec) -> FakeMsg {
+    FakeMsg {
+        live: false,
+        ..msg(w, s)
     }
 }
 
@@ -368,6 +391,7 @@ async fn stranger_live_dm_triggers_nothing() {
     let m = FakeMsg {
         spec: spec(STRANGER, STRANGER_CH, 100, &[("bad.jpg", b"b")]),
         w: w.clone(),
+        live: true,
     };
     assert_eq!(ingest(&allow(), &inbox, &m).await, Outcome::Ignored);
     assert_eq!(w.downloads(100), 0);
@@ -950,7 +974,7 @@ async fn no_reply_when_nothing_to_say() {
     assert_eq!(ingest(&allow(), &inbox, &msg(&w, &good)).await, Outcome::Saved);
     let notice = w.replies_for(102);
     assert_eq!(notice.len(), 1, "{notice:?}");
-    assert!(notice[0].contains("Kept in Inbox") && notice[0].contains("chat off"), "{}", notice[0]);
+    assert!(notice[0].starts_with("Sorry, my brain's a little foggy right now 😿") && !notice[0].contains("chat off"), "{}", notice[0]);
 
     let stranger = spec(STRANGER, STRANGER_CH, 103, &[("receipt.png", b"receipt")]);
     assert_eq!(ingest(&allow(), &inbox, &msg(&w, &stranger)).await, Outcome::Ignored);
@@ -1254,7 +1278,7 @@ async fn text_dm_filed_and_replied_no_tick() {
     let replies = w.replies_for(300);
     assert_eq!(replies.len(), 1, "{replies:?}");
     assert!(
-        replies[0].starts_with("Filed: Citadel/Ideas/2026-10-13 Solar fan idea.md"),
+        replies[0].starts_with("That is a solar fan project") && replies[0].ends_with("Saved to Citadel/Ideas for you 🐾"),
         "{}",
         replies[0]
     );
@@ -1295,7 +1319,7 @@ async fn chat_failure_falls_back_to_tick() {
     assert_eq!(w.marks(320), vec!["✅"]);
     let replies = w.replies_for(320);
     assert_eq!(replies.len(), 1, "{replies:?}");
-    assert!(replies[0].contains("Kept in Inbox") && replies[0].contains("http 404"), "{}", replies[0]);
+    assert!(replies[0].starts_with("Sorry, my brain's a little foggy right now 😿") && !replies[0].contains("http 404"), "{}", replies[0]);
     assert!(files_in(&root_of(&inbox).join("Citadel/Ideas")).is_empty());
     assert_eq!(chat.calls(), 1);
 }
@@ -1319,7 +1343,7 @@ async fn off_list_folder_keeps_note_in_inbox_but_replies() {
         assert!(w.marks(id).is_empty(), "{:?}", w.marks(id));
         let replies = w.replies_for(id);
         assert_eq!(replies.len(), 1, "{replies:?}");
-        assert!(replies[0].starts_with("Kept in Inbox"), "{}", replies[0]);
+        assert!(replies[0].starts_with("Kept it here"), "{}", replies[0]);
     }
     assert_eq!(files_in(&root.join("Private")), before);
     assert_eq!(fs::read_to_string(root.join("Private/note.md")).unwrap(), "private\n");
@@ -1360,7 +1384,7 @@ async fn receipt_gets_verdict_and_chat_in_one_masked_reply() {
     let replies = w.replies_for(350);
     assert_eq!(replies.len(), 1, "{replies:?}");
     let text = &replies[0];
-    assert!(text.starts_with("Filed: State Street/"), "{text}");
+    assert!(text.starts_with("Logged your Trader Joe's run.\n\nSaved to State Street for you 🐾"), "{text}");
     assert!(text.contains("Logged your Trader Joe's run."), "{text}");
     assert!(text.contains("Receipt: Trader Joe's · $12.34 · groceries"), "{text}");
     assert!(text.contains("**** **** **** 1111") && !text.contains("4111"), "{text}");
@@ -1524,7 +1548,7 @@ async fn chat_failure_with_receipt_sends_one_reply() {
     assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
     let replies = w.replies_for(325);
     assert_eq!(replies.len(), 1, "{replies:?}");
-    assert!(replies[0].contains("Kept in Inbox") && replies[0].contains("http 500"), "{}", replies[0]);
+    assert!(replies[0].starts_with("Sorry, my brain's a little foggy right now 😿") && !replies[0].contains("http 500"), "{}", replies[0]);
     assert_eq!(w.marks(325), vec!["✅"]);
 }
 
@@ -1556,8 +1580,7 @@ async fn question_is_answered_not_filed() {
 
     let replies = w.replies_for(330);
     assert_eq!(replies.len(), 1, "{replies:?}");
-    assert!(replies[0].starts_with("Answered"), "{}", replies[0]);
-    assert!(replies[0].contains("Eggs, masking tape"), "{}", replies[0]);
+    assert_eq!(replies[0], "Eggs, masking tape", "the reply is the model's answer only (#45)");
     assert!(w.marks(330).is_empty(), "{:?}", w.marks(330));
     assert_eq!(chat.calls(), 2);
     let prompts = chat.prompts.lock().unwrap().clone();
@@ -1580,8 +1603,10 @@ async fn lookup_failure_still_answers() {
     assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
     let replies = w.replies_for(331);
     assert_eq!(replies.len(), 1, "{replies:?}");
-    assert!(replies[0].starts_with("Answered without the vault"), "{}", replies[0]);
-    assert!(replies[0].contains("model guess"), "{}", replies[0]);
+    assert!(!replies[0].starts_with("Answered"), "{}", replies[0]);
+    assert!(replies[0].starts_with("model guess"), "{}", replies[0]);
+    assert!(replies[0].ends_with("(I couldn't peek at your notes just now, sorry!)"), "{}", replies[0]);
+    assert!(!replies[0].contains("lookup failed"), "{}", replies[0]);
     assert!(note(&inbox, 331).is_file(), "question note left Inbox");
     assert_eq!(chat.calls(), 2);
 }
@@ -1610,7 +1635,7 @@ async fn list_item_appends_to_running_note() {
     let replies = w.replies_for(340);
     assert_eq!(replies.len(), 1, "{replies:?}");
     assert!(
-        replies[0].starts_with("Filed: State Street/Cash Flow/Spending/Shopping List.md (appended)"),
+        replies[0].ends_with("Got it, added to your Shopping List 🐾"),
         "{}",
         replies[0]
     );
@@ -1637,7 +1662,7 @@ async fn running_with_attachment_files_a_note() {
     assert!(files_in(&root.join("State Street")).contains(&"2026-10-13 Costco list.md".to_string()));
     let replies = w.replies_for(341);
     assert_eq!(replies.len(), 1, "{replies:?}");
-    assert!(replies[0].starts_with("Filed: State Street/2026-10-13 Costco list.md"), "{}", replies[0]);
+    assert!(replies[0].ends_with("Saved to State Street for you 🐾"), "{}", replies[0]);
 }
 
 /// With no running note on disk, a list message is filed as an ordinary note in State Street.
@@ -1652,7 +1677,7 @@ async fn running_note_missing_files_a_note() {
     assert!(files_in(&root_of(&inbox).join("State Street")).contains(&"2026-10-13 Costco list.md".to_string()));
     let replies = w.replies_for(342);
     assert_eq!(replies.len(), 1, "{replies:?}");
-    assert!(replies[0].starts_with("Filed: State Street/2026-10-13 Costco list.md"), "{}", replies[0]);
+    assert!(replies[0].ends_with("Saved to State Street for you 🐾"), "{}", replies[0]);
 }
 
 /// One notice per failure episode: a repeat of the same chat error gets ✅ only, and a success ends the episode.
@@ -1673,7 +1698,7 @@ async fn same_chat_error_notices_once_until_chat_works() {
     }
     let first = w.replies_for(340);
     assert_eq!(first.len(), 1, "{first:?}");
-    assert!(first[0].contains("Chat failed (http 401)"), "{}", first[0]);
+    assert!(first[0].starts_with("Sorry, my brain's a little foggy right now 😿") && !first[0].contains("http 401"), "{}", first[0]);
     assert!(w.replies_for(341).is_empty(), "{:?}", w.replies_for(341));
     assert_eq!(w.marks(341), vec!["✅"]);
     let third = w.replies_for(342);
@@ -1681,7 +1706,7 @@ async fn same_chat_error_notices_once_until_chat_works() {
     assert!(third[0].contains("ok"), "{}", third[0]);
     let fourth = w.replies_for(343);
     assert_eq!(fourth.len(), 1, "{fourth:?}");
-    assert!(fourth[0].contains("Chat failed (http 401)"), "{}", fourth[0]);
+    assert!(fourth[0].starts_with("Sorry, my brain's a little foggy right now 😿") && !fourth[0].contains("http 401"), "{}", fourth[0]);
 }
 
 /// A question the model routes to a running list is answered, and the list is left alone.
@@ -1705,7 +1730,7 @@ async fn question_routed_to_running_list_is_answered() {
     assert!(!text.contains("whats on my costco"), "{text}");
     let replies = w.replies_for(350);
     assert_eq!(replies.len(), 1, "{replies:?}");
-    assert!(replies[0].starts_with("Answered"), "{}", replies[0]);
+    assert_eq!(replies[0], "Eggs, masking tape", "{}", replies[0]);
 }
 
 /// Different errors inside the notice gap still give one notice in total.
@@ -1721,4 +1746,146 @@ async fn different_errors_inside_gap_notice_once() {
     }
     let total = w.replies_for(360).len() + w.replies_for(361).len();
     assert_eq!(total, 1, "{:?} {:?}", w.replies_for(360), w.replies_for(361));
+}
+
+/// A live DM shows "typing" while the model works (#45).
+#[tokio::test]
+async fn live_dm_shows_typing_while_the_model_works() {
+    let inbox = scratch("typing-live");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![answer("Answer", "Costco list", "shopping", "Eggs."), Ok("Eggs, masking tape".into())]);
+    let f = filer(&inbox, &chat);
+    let s = spec_text(MAIN, MAIN_CH, 370, "what is on my costco list?", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    assert!(w.typing_count(370) >= 1, "no typing shown for a live DM");
+    assert_eq!(w.replies_for(370).len(), 1);
+}
+
+/// Catch-up never shows typing: old DMs are replayed, not waited on (#45).
+#[tokio::test]
+async fn catch_up_never_shows_typing() {
+    let inbox = scratch("typing-catch-up");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![answer("Answer", "Costco list", "shopping", "Eggs."), Ok("Eggs, masking tape".into())]);
+    let f = filer(&inbox, &chat);
+    let s = spec_text(MAIN, MAIN_CH, 371, "what is on my costco list?", &[]);
+    let h = FakeHistory::new(&w, vec![s]);
+    catch_up_with(&allow(), &inbox, &h, &f).await;
+    assert_eq!(w.typing_count(371), 0, "typing sent during catch-up");
+    assert_eq!(w.replies_for(371).len(), 1, "{:?}", w.replies_for(371));
+}
+
+/// The lookup reads the IOU ledger alongside the running notes (#45).
+#[tokio::test]
+async fn lookup_reads_the_iou_ledger() {
+    let inbox = scratch("chat-ledger");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![
+        answer("Answer", "William debt", "money", "Checking."),
+        Ok("William owes you $12.00.".to_string()),
+    ]);
+    let f = filer(&inbox, &chat);
+    let root = root_of(&inbox);
+    let rec = root.join("State Street/Assets/Receivables");
+    fs::create_dir_all(&rec).unwrap();
+    fs::write(rec.join("Who Owes Me.md"), "| Who | Owes |\n| William | $12.00 |\n").unwrap();
+
+    let s = spec_text(MAIN, MAIN_CH, 380, "how much does willam owe me", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    let prompts = chat.prompts.lock().unwrap().clone();
+    assert_eq!(chat.calls(), 2);
+    assert!(prompts[1].contains("Who Owes Me.md"), "{}", prompts[1]);
+    assert!(prompts[1].contains("William | $12.00"), "{}", prompts[1]);
+    assert_eq!(w.replies_for(380), vec!["William owes you $12.00.".to_string()]);
+}
+
+/// No ledger file: the lookup still runs over the running notes (#45).
+#[tokio::test]
+async fn lookup_works_without_the_iou_ledger() {
+    let inbox = scratch("chat-no-ledger");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![
+        answer("Answer", "William debt", "money", "Checking."),
+        Ok("No record of that.".to_string()),
+    ]);
+    let f = filer(&inbox, &chat);
+    let s = spec_text(MAIN, MAIN_CH, 381, "how much does willam owe me", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    assert_eq!(w.replies_for(381), vec!["No record of that.".to_string()]);
+    assert!(chat.prompts.lock().unwrap()[1].contains("Notes:"));
+}
+
+/// A long DM sent as `message.txt` with an empty body is routed on the file's text, never answered as a lookup (#46 scope add).
+#[tokio::test]
+async fn text_attachment_routes_on_its_text_not_a_lookup() {
+    let inbox = scratch("attach-text");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![answer("Citadel/Ideas", "Demo announcement", "announce", "Filed it.")]);
+    let f = filer(&inbox, &chat);
+    let body = "Stormy, the Discord bot is ready for the demo on Friday.";
+    let s = spec_text(MAIN, MAIN_CH, 390, "", &[("message.txt", body.as_bytes())]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    assert_eq!(chat.calls(), 1, "a lookup ran for an attachment");
+    let prompts = chat.prompts.lock().unwrap().clone();
+    assert!(prompts[0].contains(body), "{}", prompts[0]);
+    let replies = w.replies_for(390);
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert!(replies[0].starts_with("Filed it."), "{}", replies[0]);
+    assert!(replies[0].ends_with("Saved to Citadel/Ideas for you 🐾"), "{}", replies[0]);
+    let filed = all_files(&root_of(&inbox).join("Citadel/Ideas"));
+    assert!(
+        filed.iter().filter(|p| p.extension().is_some_and(|x| x == "md")).any(|p| fs::read_to_string(p).unwrap_or_default().contains(body)),
+        "filed note body misses the attachment text"
+    );
+}
+
+/// A DM with no text and no readable text is saved and acknowledged; the answer model is never called (#46 scope add).
+#[tokio::test]
+async fn blank_dm_never_calls_the_model() {
+    let inbox = scratch("blank-dm");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![answer("Answer", "Lookup", "", "Lookup answer about unrelated notes.")]);
+    let f = filer(&inbox, &chat);
+    let s = spec_text(MAIN, MAIN_CH, 391, "", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    assert_eq!(chat.calls(), 0, "the model was called for a blank DM");
+    assert_eq!(w.replies_for(391), vec!["Got it 🐾 It's saved in your Inbox.".to_string()]);
+}
+
+/// The attachment text is read up to 20 000 chars, cut on a char boundary (#46 scope add).
+#[tokio::test]
+async fn text_attachment_is_capped_at_20000_chars() {
+    let inbox = scratch("attach-cap");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![answer("Citadel/Ideas", "Long", "", "Filed.")]);
+    let f = filer(&inbox, &chat);
+    let long = "é".repeat(30_000);
+    let s = spec_text(MAIN, MAIN_CH, 392, "", &[("message.txt", long.as_bytes())]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    let filed = all_files(&root_of(&inbox).join("Citadel/Ideas"));
+    let text: String = filed
+        .iter()
+        .filter(|p| p.extension().is_some_and(|x| x == "md"))
+        .map(|p| fs::read_to_string(p).unwrap_or_default())
+        .collect();
+    assert!(text.contains(&"é".repeat(20_000)), "cap is below 20 000 chars");
+    assert!(!text.contains(&"é".repeat(20_001)), "cap is above 20 000 chars");
+}
+
+/// The model picked a folder but the note could not be filed: the reply says so in one line (#46 fix round).
+#[tokio::test]
+async fn couldnt_file_line_when_filing_fails() {
+    let inbox = scratch("cant-file");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![answer("Citadel/Ideas", "Solar fan idea", "electronics", "Filed.")]);
+    let f = filer(&inbox, &chat);
+    let root = root_of(&inbox);
+    fs::remove_dir_all(root.join("Citadel/Ideas")).unwrap();
+    fs::write(root.join("Citadel/Ideas"), "not a folder\n").unwrap();
+    let s = spec_text(MAIN, MAIN_CH, 393, "solar fan idea", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    assert_eq!(
+        w.replies_for(393),
+        vec!["Filed.\n\nHmm, I couldn't file that one, so it's safe in your Inbox for now.".to_string()]
+    );
 }

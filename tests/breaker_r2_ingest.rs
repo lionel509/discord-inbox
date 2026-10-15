@@ -242,7 +242,7 @@ async fn breaker_r2_question_filed_to_normal_folder_is_answered_not_filed() {
     let filed = files_in(&root.join("Citadel/Ideas"));
     assert!(filed.is_empty(), "a question was filed as a note: {filed:?}");
     let got = replies_for(&replies, 9201);
-    assert!(got.first().is_some_and(|r| r.starts_with("Answered")), "{got:?}");
+    assert!(got.first().is_some_and(|r| !r.starts_with("Answered") && r.starts_with("Your passport")), "{got:?}");
 }
 
 /// Markdown bullet before the label (`- FOLDER: Shopping List`) is not stripped, so the list is not routed.

@@ -17,13 +17,13 @@ fn scratch(name: &str) -> (PathBuf, PathBuf) {
     (inbox, root)
 }
 
-/// A reply with no filing and no verdict is `Kept in Inbox`, a blank line, then the chat text.
+/// A reply with no filing and no verdict is the chat text alone, with no status label (#45).
 fn reply(text: &str) -> String {
     combine(None, text, None)
 }
 
 fn kept(expected: &str) -> String {
-    format!("Kept in Inbox\n\n{expected}")
+    expected.to_string()
 }
 
 // ---- Categories, through the reply path ----
