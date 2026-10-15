@@ -152,6 +152,16 @@ const PRESENCE_ROTATION: [(PresenceKind, &str); 4] = [
 const PRESENCE_INTERVAL: Duration = Duration::from_secs(15 * 60);
 static PRESENCE_LOOP_STARTED: AtomicBool = AtomicBool::new(false);
 
+/// Stub for the red commit: the real swap-and-abort lands in the next commit.
+fn install_presence_loop(handle: tokio::task::JoinHandle<()>) {
+    drop(handle);
+}
+
+/// Stub for the red commit: tokio's default Burst missed-tick behaviour.
+fn presence_interval() -> tokio::time::Interval {
+    interval_at(Instant::now() + PRESENCE_INTERVAL, PRESENCE_INTERVAL)
+}
+
 #[derive(Clone, Copy)]
 enum PresenceKind {
     Playing,
@@ -318,5 +328,34 @@ mod presence_tests {
         assert!(n > 0);
         assert_eq!(next_presence(0), 1 % n);
         assert_eq!(next_presence(n - 1), 0);
+    }
+
+    #[tokio::test]
+    async fn install_presence_loop_aborts_previous_loop() {
+        let first = tokio::spawn(std::future::pending::<()>());
+        let first_abort = first.abort_handle();
+        let second = tokio::spawn(std::future::pending::<()>());
+        install_presence_loop(first);
+        install_presence_loop(second);
+        tokio::task::yield_now().await;
+        assert!(first_abort.is_finished(), "previous presence loop was not aborted");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn presence_interval_does_not_burst_after_stall() {
+        let mut tick = presence_interval();
+        tokio::time::advance(Duration::from_secs(3 * 24 * 60 * 60)).await;
+        let mut immediate = 0usize;
+        while immediate < 1000 {
+            if tokio::time::timeout(Duration::from_millis(0), tick.tick())
+                .await
+                .is_ok()
+            {
+                immediate += 1;
+            } else {
+                break;
+            }
+        }
+        assert!(immediate <= 1, "{immediate} presence updates fired back to back after a stall");
     }
 }
