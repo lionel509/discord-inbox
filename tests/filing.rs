@@ -119,3 +119,46 @@ fn filed_to_none_without_ledger_and_skips_junk() {
     assert_eq!(filed_to(&inbox, 505), None);
     assert_eq!(filed_to(&inbox, 50), None);
 }
+
+/// A planted symlink at the temp name must never be followed: the write stays out of `Private`.
+#[test]
+fn file_away_tmp_symlink_never_writes_through_into_private() {
+    let (inbox, root) = scratch("tmp-symlink");
+    let m = msg(506);
+    write_note(&inbox, &m).unwrap();
+    let private = root.join("Private");
+    fs::create_dir_all(&private).unwrap();
+    fs::write(private.join("victim.md"), "PRIVATE ORIGINAL\n").unwrap();
+    let dest_dir = root.join("Citadel/Ideas");
+    let tmp = dest_dir.join(format!(".{NAME}.tmp"));
+    std::os::unix::fs::symlink(private.join("victim.md"), &tmp).unwrap();
+    let r = file_away(&inbox, &m, &dest_dir, NAME, FX, LEAD);
+    assert_eq!(
+        fs::read_to_string(private.join("victim.md")).unwrap(),
+        "PRIVATE ORIGINAL\n",
+        "write went through the temp symlink into Private (file_away -> {r:?})"
+    );
+    if r.is_ok() {
+        let meta = fs::symlink_metadata(dest_dir.join(NAME)).unwrap();
+        assert!(meta.is_file() && !meta.file_type().is_symlink(), "filed note is not a regular file");
+    }
+}
+
+/// The same for the `.filed` ledger temp file in Inbox: a planted link is never followed.
+#[test]
+fn file_away_ledger_tmp_symlink_never_writes_through() {
+    let (inbox, root) = scratch("ledger-symlink");
+    let m = msg(507);
+    write_note(&inbox, &m).unwrap();
+    let private = root.join("Private");
+    fs::create_dir_all(&private).unwrap();
+    fs::write(private.join("victim.md"), "PRIVATE ORIGINAL\n").unwrap();
+    std::os::unix::fs::symlink(private.join("victim.md"), inbox.join(".filed.tmp")).unwrap();
+    let dest_dir = root.join("Citadel/Ideas");
+    let _ = file_away(&inbox, &m, &dest_dir, NAME, FX, LEAD);
+    assert_eq!(
+        fs::read_to_string(private.join("victim.md")).unwrap(),
+        "PRIVATE ORIGINAL\n",
+        "ledger write went through the temp symlink into Private"
+    );
+}
