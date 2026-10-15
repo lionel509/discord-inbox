@@ -159,6 +159,37 @@ async fn typing_while<M: Inbound, F: std::future::Future>(m: &M, work: F) -> F::
     }
 }
 
+/// The reply to a DM with nothing to read (#46).
+pub const BLANK_REPLY: &str = "Got it 🐾 (Saved to your Inbox.)";
+/// How much of a text attachment is read as the message (#46).
+pub const ATTACH_TEXT_CHARS: usize = 20_000;
+
+/// The text of a `.txt` or `.md` attachment, from the bytes that were saved, up to ATTACH_TEXT_CHARS on a char boundary. `None` for other files or non-UTF-8 (#46).
+fn attachment_text(name: &str, bytes: &[u8]) -> Option<String> {
+    let lower = name.to_ascii_lowercase();
+    if !(lower.ends_with(".txt") || lower.ends_with(".md")) {
+        return None;
+    }
+    let text = std::str::from_utf8(bytes).ok()?;
+    Some(text.chars().take(ATTACH_TEXT_CHARS).collect())
+}
+
+/// The typed text, then each readable text attachment after it. Blank when neither has text (#46).
+fn message_text(typed: &str, attachments: &[(String, Option<Vec<u8>>)]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !typed.trim().is_empty() {
+        parts.push(typed.to_string());
+    }
+    for (name, bytes) in attachments {
+        if let Some(t) = bytes.as_deref().and_then(|b| attachment_text(name, b)) {
+            if !t.trim().is_empty() {
+                parts.push(t);
+            }
+        }
+    }
+    parts.join("\n\n")
+}
+
 /// One message, as the decision logic sees it.
 pub trait Inbound: Send + Sync {
     fn author_id(&self) -> u64;
@@ -276,7 +307,7 @@ pub async fn ingest_with<M: Inbound>(
         msg_id: id,
         author_id: m.author_id(),
         received,
-        content: m.content(),
+        content: message_text(&m.content(), &attachments),
         attachments,
         ocr,
     };
@@ -302,6 +333,17 @@ pub async fn ingest_with<M: Inbound>(
     }
     if let Err(e) = dump::remove_retry(inbox, id) {
         eprintln!("discord-inbox: retry clear for {id} failed: {e}");
+    }
+    // Nothing to read (no text, no OCR text): the note is saved and acknowledged, the model is not called (#46).
+    if incoming.content.trim().is_empty() && incoming.ocr.is_empty() {
+        match m.reply(BLANK_REPLY).await {
+            Ok(()) => clear(m).await,
+            Err(e) => {
+                eprintln!("discord-inbox: reply on {id} failed: {e}");
+                mark(m, SAVED_MARK).await;
+            }
+        }
+        return Outcome::Saved;
     }
     match typing_while(m, chat_decision(filer, &incoming)).await {
         Err(e) => {
