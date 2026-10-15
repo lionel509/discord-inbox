@@ -445,7 +445,7 @@ fn restock_at(root: &Path, date: &str, all: bool, today: &str) -> Result<Report,
             }
             let text = fs::read_to_string(&p).unwrap_or_default();
             let ocr = ocr_lines(&text);
-            costco |= ocr.iter().any(|l| { let m: String = l.to_lowercase().replace('0', "o").split_whitespace().collect(); m.contains("costco") || m.contains("kirklandsig") });
+            costco |= ocr.iter().any(|l| { let m: String = l.to_lowercase().replace('0', "o").split_whitespace().collect(); m.contains("costco") });
             filed += 1;
             for c in receipt_items(&text) {
                 if !found.iter().any(|(f, _)| *f == c) {
