@@ -49,7 +49,7 @@ fn command_parses_restock_variants_and_out_of() {
         Some(Command::Restock { date: Some("2026-10-02".into()), all: true })
     );
     assert_eq!(pantry::command("out of cod"), Some(Command::OutOf("cod".into())));
-    assert_eq!(pantry::command("out of the salmon."), Some(Command::OutOf("the salmon".into())));
+    assert_eq!(pantry::command("out of the salmon."), Some(Command::OutOf("salmon".into())));
     for chat in ["out of milk?", "restock the shelves tmr", "restocking", "restock 2026-13"] {
         assert_eq!(pantry::command(chat), None, "{chat} must reach the model");
     }
@@ -296,4 +296,78 @@ fn demo_restock_prints_before_and_after() {
     let rep = pantry::restock(&r, "2026-10-02", false).unwrap();
     println!("--- reply ---\n{}", rep.text());
     println!("--- {PANTRY} ---\n{}", read(&r));
+}
+
+// Review of #58 (made-up fixtures only).
+
+#[test]
+fn out_of_takes_only_whole_food_items() {
+    assert_eq!(pantry::command("out of eggs and milk"), Some(Command::OutOf("eggs and milk".into())));
+    assert_eq!(pantry::command("out of the salmon."), Some(Command::OutOf("salmon".into())));
+    for chat in ["out of orange juice", "out of paper towels", "out of town till sunday", "out of peanut butter"] {
+        assert_eq!(pantry::command(chat), None, "{chat} must reach the model");
+    }
+}
+
+#[test]
+fn out_of_two_items_drops_both_and_keeps_the_rest() {
+    let r = root("outtwo");
+    put(&r, &format!("{SPLIT}/Costco Split — 2026-10-02.md"), &split_note(&[("EGGS", "Lionel"), ("MILK", "Lionel"), ("ORANGE — orange", "Lionel")]));
+    pantry::restock(&r, "2026-10-02", false).unwrap();
+    let out = pantry::run(&r, pantry::command("out of eggs and milk").unwrap(), "2026-10-15").unwrap();
+    assert!(out.starts_with("Dropped"), "{out}");
+    let note = read(&r);
+    assert!(!note.contains("| eggs |") && !note.contains("| milk |"), "{note}");
+    assert!(note.contains("| orange |"), "{note}");
+}
+
+#[test]
+fn out_of_refuses_a_multiword_item_instead_of_dropping_its_first_word() {
+    let r = root("outjuice");
+    put(&r, &format!("{SPLIT}/Costco Split — 2026-10-02.md"), &split_note(&[("ORANGE", "Lionel")]));
+    pantry::restock(&r, "2026-10-02", false).unwrap();
+    assert!(pantry::out_of(&r, "orange juice", "2026-10-15").is_err());
+    assert!(read(&r).contains("| orange |"));
+}
+
+#[test]
+fn food_matches_es_plurals() {
+    assert_eq!(pantry::food("TOMATOES ROMA 3LB"), Some("tomato"));
+    assert_eq!(pantry::food("Potatoes 5lb"), Some("potato"));
+    assert_eq!(pantry::food("CABBAGES"), Some("cabbage"));
+}
+
+#[test]
+fn receipt_tender_lines_are_not_food() {
+    let note = "## OCR 1.jpg\n\n~~~text\nAPPLE PAY 12.00\nVISA ENDING 1234\nORG EGGS\n~~~\n";
+    assert_eq!(pantry::receipt_items(note), vec!["eggs".to_string()]);
+}
+
+#[test]
+fn receipt_store_is_the_note_each_row_came_from() {
+    let r = root("perrow");
+    put(&r, "State Street/2026-10-06 Grocer receipt.md", "## OCR 1.jpg\n\n~~~text\nKS ATL SALMON\n~~~\n");
+    put(&r, "State Street/2026-10-06 Card statement.md", "Statement for Visa ending 1234, merchant ACME.\n");
+    let rep = pantry::restock(&r, "2026-10-06", false).expect("receipt restock");
+    let note = read(&r);
+    assert!(note.contains("| salmon |  | Grocer receipt |"), "{note}");
+    assert!(!note.contains("Card statement"), "{note}");
+    assert!(!rep.text().contains("Card statement"), "{}", rep.text());
+}
+
+#[test]
+fn receipt_day_with_no_food_says_so() {
+    let r = root("nofood");
+    put(&r, "State Street/2026-10-07 Card statement.md", "Statement for Visa ending 1234.\n");
+    let rep = pantry::restock(&r, "2026-10-07", false).expect("restock");
+    assert!(rep.text().starts_with("Nothing food-shaped"), "{}", rep.text());
+    assert!(!r.join(PANTRY).exists());
+}
+
+#[test]
+fn upsert_keeps_the_newer_purchase_date() {
+    let row = |bought: &str| Row { item: "milk".into(), qty: String::new(), store: "Costco".into(), bought: bought.into() };
+    let mut rows = vec![row("2026-10-08")];
+    pantry::upsert(&mut rows, vec![row("2026-10-01")]);
+    assert_eq!(rows[0].bought, "2026-10-08");
 }
