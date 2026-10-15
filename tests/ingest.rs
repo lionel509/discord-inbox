@@ -212,6 +212,8 @@ impl Inbound for FakeMsg {
     }
     async fn download(&self, i: usize) -> Result<Vec<u8>, String> {
         self.w.add_download(self.spec.id);
+        // A real download awaits the network: yield here so two calls on one message can interleave.
+        tokio::task::yield_now().await;
         let (name, bytes) = &self.spec.files[i];
         if self.w.cdn_down.load(Ordering::SeqCst) && name.starts_with("bad") {
             return Err("cdn 503".to_string());
@@ -1482,4 +1484,24 @@ async fn text_dm_card_digits_are_masked_before_the_model() {
     assert_eq!(prompts.len(), 1, "{prompts:?}");
     assert!(!prompts[0].contains("4111"), "card prefix reached the model: {prompts:?}");
     assert!(prompts[0].contains("1111"), "masked tail missing: {prompts:?}");
+}
+
+/// The live event and the catch-up both ingest one DM at once: exactly one reply, one model call, never "Kept in Inbox" for a filed note.
+#[tokio::test]
+async fn concurrent_duplicate_ingest_replies_once() {
+    let inbox = scratch("chat-race");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![answer("Goldman", "Race test", "career", "Filed the race test.")]);
+    let f = filer(&inbox, &chat);
+    let s = spec_text(MAIN, MAIN_CH, 400, "a file", &[("notes.txt", b"hello")]);
+    let (live, catch) = (msg(&w, &s), msg(&w, &s));
+    let al = allow();
+    let (a, b) = tokio::join!(ingest_with(&al, &inbox, &live, &f), ingest_with(&al, &inbox, &catch, &f));
+    let mut outcomes = vec![a, b];
+    outcomes.sort_by_key(|o| format!("{o:?}"));
+    assert_eq!(outcomes, vec![Outcome::Saved, Outcome::Skipped], "{outcomes:?}");
+    let replies = w.replies_for(400);
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert!(!replies[0].starts_with("Kept in Inbox"), "{replies:?}");
+    assert_eq!(chat.calls(), 1, "the model ran {} times", chat.calls());
 }
