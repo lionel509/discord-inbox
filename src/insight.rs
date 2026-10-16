@@ -496,78 +496,37 @@ pub fn budget_line(received: &str) -> Option<String> {
     ))
 }
 
-/// The reply text. Header lines (one per item, then the budget if a receipt was found), a blank line,
-/// then the OCR text: alone for one attachment, each under `file:` for several.
-pub fn reply_text(
-    items: &[(String, String, Option<Insight>)],
-    budget: Option<String>,
-) -> String {
+/// The reply text: one `Receipt:` line per receipt, then the budget line if a receipt was found.
+/// Nothing for a photo that is not a receipt, so no OCR text reaches Discord.
+pub fn reply_text(insights: &[Insight], budget: Option<String>) -> String {
     let mut head: Vec<String> = Vec::new();
-    for (file, _, insight) in items {
-        let Some(i) = insight else { continue };
-        if i.receipt {
-            let total = if i.total.starts_with(|c: char| c.is_ascii_digit()) {
-                format!("${}", i.total)
-            } else {
-                i.total.clone()
-            };
-            head.push(format!("Receipt: {} · {} · {}", i.merchant, total, i.category));
+    for i in insights.iter().filter(|i| i.receipt) {
+        let total = if i.total.starts_with(|c: char| c.is_ascii_digit()) {
+            format!("${}", i.total)
         } else {
-            head.push(format!("Not a receipt: {file}"));
-        }
+            i.total.clone()
+        };
+        head.push(format!("Receipt: {} · {} · {}", i.merchant, total, i.category));
     }
-    let any_receipt = items
-        .iter()
-        .any(|(_, _, i)| i.as_ref().is_some_and(|i| i.receipt));
-    if let (true, Some(b)) = (any_receipt, budget) {
-        head.push(b);
+    if !head.is_empty() {
+        head.extend(budget);
     }
-    let head = if head.is_empty() {
-        String::new()
-    } else {
-        format!("{}\n\n", head.join("\n"))
-    };
-
-    let blocks: Vec<String> = items
-        .iter()
-        .map(|(file, text, _)| {
-            if items.len() >= 2 {
-                format!("{file}:\n{text}")
-            } else {
-                text.clone()
-            }
-        })
-        .collect();
-    let body = blocks.join("\n\n");
-    let out = format!("{head}{body}");
+    let out = head.join("\n");
     if out.chars().count() <= DISCORD_MAX {
         return out;
     }
-    // Over the cap: keep the header, cut the OCR text, and mark the cut with an ellipsis.
-    let limit = DISCORD_MAX - 1;
-    let head_len = head.chars().count();
-    if head_len >= limit {
-        let cut: String = head.chars().take(limit).collect();
-        return format!("{cut}…");
-    }
-    let room = limit - head_len;
-    let kept: String = body.chars().take(room).collect();
-    format!("{head}{kept}…")
+    let cut: String = out.chars().take(DISCORD_MAX - 1).collect();
+    format!("{cut}…")
 }
 
-/// The reply for one message, or `None` when it has no OCR text. The model and the budget are optional.
+/// The reply for one message, or `None` when there is no receipt to report. The model and the budget are optional.
 pub async fn compose(msg: &Incoming) -> Option<String> {
     if msg.ocr.is_empty() {
         return None;
     }
     let configured = model();
-    let mut items: Vec<(String, String, Option<Insight>)> = Vec::new();
+    let mut insights: Vec<Insight> = Vec::new();
     for (i, text) in &msg.ocr {
-        let file = msg
-            .attachments
-            .get(*i)
-            .map(|a| a.0.clone())
-            .unwrap_or_default();
         let insight = if configured == Model::Off || text.trim().is_empty() {
             None
         } else {
@@ -585,16 +544,18 @@ pub async fn compose(msg: &Incoming) -> Option<String> {
             }
             got
         };
-        items.push((file, crate::redact::sensitive(text), insight));
+        insights.extend(insight);
     }
-    let any_receipt = items
-        .iter()
-        .any(|(_, _, i)| i.as_ref().is_some_and(|i| i.receipt));
+    let any_receipt = insights.iter().any(|i| i.receipt);
     let budget = if any_receipt {
         budget_line(&msg.received)
     } else {
         None
     };
     // The model's merchant and total are read from the same photo, so mask the whole reply, not only the OCR.
-    Some(crate::redact::sensitive(&reply_text(&items, budget)))
+    let text = reply_text(&insights, budget);
+    if text.is_empty() {
+        return None;
+    }
+    Some(crate::redact::sensitive(&text))
 }

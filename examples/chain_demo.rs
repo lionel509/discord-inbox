@@ -12,6 +12,6 @@ fn main() {
     let mut ocr = String::new();
     std::io::stdin().read_to_string(&mut ocr).unwrap();
     let insight = ask_model(&model(), &ocr, TIMEOUT);
-    let header = reply_text(&[("receipt.png".into(), String::new(), insight)], None);
+    let header = reply_text(&insight.into_iter().collect::<Vec<_>>(), None);
     println!("{}", header.lines().next().unwrap_or("(no verdict)"));
 }
