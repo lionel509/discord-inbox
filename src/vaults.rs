@@ -171,7 +171,8 @@ pub fn system_prompt() -> String {
         "You file one message from the owner into his vault and reply to it.\n\
          Pick the folder whose key fits best. Keys:\n",
     );
-    s.push_str("Answer — the message asks a question or wants something looked up, with or without a question mark (\"whats on my costco list\", \"where did I put my passport\"): answer it, file nothing; a request for ideas or advice from his notes is also Answer (\"with the ingredients in my pantry what can i make with cod\"): answer it, file nothing\n");
+    s.push_str("Answer — the message asks a question or wants something looked up, with or without a question mark (\"whats on my costco list\", \"where did I put my passport\"): answer it, file nothing; a request for ideas or advice from his notes is also Answer (\"with the ingredients in my pantry what can i make with cod\", \"which one should i get\"): answer it, file nothing\n");
+    s.push_str("Chat — a short conversational follow-up, aside or thanks that adds nothing worth keeping on its own (\"it comes with the bottle tho\", \"lol ok\", \"thanks\"): reply like a friend, file nothing\n");
     for t in TARGETS.iter() {
         s.push_str(&format!("{} — {}\n", t.key, t.hint));
     }
@@ -185,7 +186,8 @@ pub fn system_prompt() -> String {
          TITLE: <3 to 8 words>\n\
          TAGS: <up to 3 comma-separated lowercase words>\n\
          REPLY:\n\
-         <1 to 3 sentences: answer the message if it asks something, else say what it is>\n\n\
+         <1 to 3 sentences, like a text from a friend: answer or react to what he said; never say that you saved, filed or noted it, a reaction on his message does that>\n\n\
+         The message may begin with \"Earlier in this chat\"; that is context only: file and reply to the part after \"Now he says:\" alone.\n\
          Reply in the user's language. Never include card numbers.",
     );
     s
@@ -214,7 +216,7 @@ pub fn answer_prompt(question: &str, notes: &[(String, String)]) -> (String, Str
          Start with a search or a hub note like \"<Vault>/Home.md\", use at most a few lookups, then answer. \
          Names in the question may be misspelled (\"willam\" = William). \
          List the items you find. If the notes do not hold the answer, say so in one sentence. \
-         1 to 6 sentences, in the user's language. Never include card numbers. For a recipe or \"what can I make\" question: read \"{PANTRY}\" first and prefer its oldest rows, then the staples notes; cook for one; never alcohol (no wine, mirin, sake, Shaoxing) and nothing caffeinated."
+         1 to 6 sentences, in the user's language. Never include card numbers. For a recipe or \"what can I make\" question: read \"{PANTRY}\" first and prefer its oldest rows, then the staples notes; cook for one; never alcohol (no wine, mirin, sake, Shaoxing) and nothing caffeinated. The message may begin with \"Earlier in this chat\"; that is context only: answer the part after \"Now he says:\" alone."
     );
     let mut user = question.to_string();
     if !notes.is_empty() {
@@ -224,6 +226,19 @@ pub fn answer_prompt(question: &str, notes: &[(String, String)]) -> (String, Str
         }
     }
     (system, user.chars().take(LOOKUP_CHARS).collect())
+}
+
+/// Prefixes the last few turns of the DM (#67) so a follow-up reads in context. No turns: `user` unchanged.
+pub fn with_window(turns: &[(String, String)], user: &str) -> String {
+    if turns.is_empty() {
+        return user.to_string();
+    }
+    let mut s = String::from("Earlier in this chat, oldest first:\n");
+    for (him, her) in turns {
+        s.push_str(&format!("Lionel: {him}\nStormy: {her}\n"));
+    }
+    s.push_str(&format!("\nNow he says:\n{user}"));
+    s
 }
 
 /// Letters and digits only, lowercased: `**FOLDER:**`, `- Folder :` and `__folder__` all read `folder`; `! Todo.` reads `todo` (#40).
@@ -261,6 +276,8 @@ pub fn parse_decision(vaults: &Vaults, text: &str) -> Decision {
                     seen_folder = true;
                     if norm(rest) == "answer" {
                         answer = true;
+                    } else if norm(rest) == "chat" {
+                        // A follow-up that files nothing (#67): target, running and answer stay unset.
                     } else if let Some(r) = vaults.running(rest) {
                         running = Some(r);
                         target = vaults.target(r.target_key);
