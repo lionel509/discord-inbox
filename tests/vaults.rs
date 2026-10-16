@@ -384,3 +384,34 @@ fn answer_prompt_names_on_hand_staples_and_house_rules() {
     assert!(system.contains("caffeinated"), "{system}");
     assert!(system.contains("for one"), "{system}");
 }
+
+#[test]
+fn chat_key_files_nothing() {
+    let v = no_disk();
+    let d = vaults::parse_decision(&v, "FOLDER: Chat\nTITLE: x\nTAGS: a\nREPLY:\nOh nice");
+    assert!(d.target.is_none());
+    assert!(d.running.is_none());
+    assert!(!d.answer);
+    assert_eq!(d.reply, "Oh nice");
+}
+
+#[test]
+fn system_prompt_names_chat_and_window() {
+    let sys = vaults::system_prompt();
+    for want in ["Chat — ", "which one should i get", "Now he says:", "never say that you saved"] {
+        assert!(sys.contains(want), "{want}: {sys}");
+    }
+    assert!(!sys.contains("say what it is"), "{sys}");
+    let (system, _) = vaults::answer_prompt("q", &[]);
+    assert!(system.contains("Now he says:"), "{system}");
+}
+
+#[test]
+fn with_window_formats_turns() {
+    assert_eq!(vaults::with_window(&[], "q"), "q");
+    let turns = vec![("a".to_string(), "b".to_string()), ("c".to_string(), "d".to_string())];
+    assert_eq!(
+        vaults::with_window(&turns, "q"),
+        "Earlier in this chat, oldest first:\nLionel: a\nStormy: b\nLionel: c\nStormy: d\n\nNow he says:\nq"
+    );
+}

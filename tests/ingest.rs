@@ -1935,3 +1935,133 @@ async fn answer_path_writes_nothing_anywhere_under_root() {
     assert_eq!(after, before);
     assert_eq!(w.replies_for(382), vec!["Cod with soy sauce.".to_string()]);
 }
+
+// ---- Warm replies (#67). Temp dirs and a made-up `Private` folder only. ----
+
+/// A filed text DM gets the model's reply and nothing else: no footer, and a 🐾 reaction on his message.
+#[tokio::test]
+async fn filed_reply_is_model_text_plus_paw() {
+    let inbox = scratch("warm-filed");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![answer("Citadel/Ideas", "Solar fan idea", "electronics", "That is a solar fan project.")]);
+    let f = filer(&inbox, &chat);
+    let s = spec_text(MAIN, MAIN_CH, 400, "sketch of a solar fan", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    let replies = w.replies_for(400);
+    assert_eq!(replies, vec!["That is a solar fan project.".to_string()], "{replies:?}");
+    let ops = w.ops_for(400);
+    assert!(ops.contains(&("react", discord_inbox::ingest::FILED_MARK.to_string())), "{ops:?}");
+    assert!(files_in(&root_of(&inbox).join("Citadel/Ideas")).contains(&"2026-10-13 Solar fan idea.md".to_string()));
+}
+
+/// A follow-up the model files under `Chat` goes nowhere: no note in any target folder, and the reply is the model text.
+#[tokio::test]
+async fn chat_decision_files_nothing() {
+    let inbox = scratch("warm-chat");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![answer("Chat", "Bottle", "", "Oh nice, that's the one.")]);
+    let f = filer(&inbox, &chat);
+    let s = spec_text(MAIN, MAIN_CH, 401, "it comes with the bottle tho", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    assert_eq!(w.replies_for(401), vec!["Oh nice, that's the one.".to_string()]);
+    assert!(!w.ops_for(401).iter().any(|(_, e)| e == discord_inbox::ingest::FILED_MARK), "{:?}", w.ops_for(401));
+    let root = root_of(&inbox);
+    for t in TARGETS.iter() {
+        assert!(files_in(&root.join(t.folder)).is_empty(), "{} got a note", t.folder);
+    }
+}
+
+/// The turn before reaches the next filing prompt, in the same channel only.
+#[tokio::test]
+async fn window_reaches_the_next_prompt() {
+    let inbox = scratch("warm-window");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![
+        answer("Citadel/Ideas", "Sodastream", "electronics", "Nice, filed under Citadel."),
+        answer("Chat", "Bottle", "", "Lol right."),
+        answer("Chat", "Other", "", "Hi there."),
+    ]);
+    let f = filer(&inbox, &chat);
+    let s1 = spec_text(MAIN, MAIN_CH, 402, "sodastream terra 89.99", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s1), &f).await, Outcome::Saved);
+    let s2 = spec_text(MAIN, MAIN_CH, 403, "it comes with the bottle tho", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s2), &f).await, Outcome::Saved);
+    let prompts = chat.prompts.lock().unwrap().clone();
+    assert_eq!(prompts.len(), 2, "{prompts:?}");
+    let p = &prompts[1];
+    assert!(p.contains("Earlier in this chat"), "{p}");
+    assert!(p.contains("Lionel: sodastream terra 89.99"), "{p}");
+    assert!(p.contains("Stormy: Nice, filed under Citadel."), "{p}");
+    assert!(p.contains("Now he says:\nit comes with the bottle tho"), "{p}");
+
+    let other = spec_text(MAIN, ALT_CH, 404, "hello from another chat", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &other), &f).await, Outcome::Saved);
+    let prompts = chat.prompts.lock().unwrap().clone();
+    assert!(!prompts[2].contains("Earlier in this chat"), "{}", prompts[2]);
+}
+
+/// The window also reaches the question path: every prompt after the first carries the earlier turn.
+#[tokio::test]
+async fn window_reaches_the_question_path() {
+    let inbox = scratch("warm-question");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![
+        answer("Citadel/Ideas", "Sodastream", "electronics", "Nice, filed under Citadel."),
+        answer("Answer", "", "", ""),
+        Ok("Get the Terra one.".to_string()),
+    ]);
+    let f = filer(&inbox, &chat);
+    let s1 = spec_text(MAIN, MAIN_CH, 405, "sodastream terra 89.99", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s1), &f).await, Outcome::Saved);
+    let s2 = spec_text(MAIN, MAIN_CH, 406, "which one should i get?", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s2), &f).await, Outcome::Saved);
+    let prompts = chat.prompts.lock().unwrap().clone();
+    assert!(prompts.len() >= 2, "{prompts:?}");
+    for p in &prompts[1..] {
+        assert!(p.contains("Earlier in this chat") && p.contains("Lionel: sodastream terra 89.99"), "{p}");
+    }
+}
+
+/// The window masks at its own boundary, keeps the last six turns oldest first, drops turns older than 30 minutes, and cuts long text.
+#[test]
+fn window_is_masked_and_bounded() {
+    use discord_inbox::ingest::Window;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let win = Window::default();
+    win.push(1, &now, "card 4111 1111 1111 1111 ssn 123-45-6789", "ok");
+    let got = win.recent(1);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert!(!got[0].0.contains("4111") && !got[0].0.contains("123-45-6789"), "{got:?}");
+    assert!(got[0].0.contains("**** **** **** 1111"), "{got:?}");
+
+    let win = Window::default();
+    for i in 0..8 {
+        win.push(2, &now, &format!("t{i}"), "r");
+    }
+    let got = win.recent(2);
+    assert_eq!(got.len(), 6, "{got:?}");
+    assert_eq!(got.first().unwrap().0, "t2");
+    assert_eq!(got.last().unwrap().0, "t7");
+
+    let win = Window::default();
+    let two_hours = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+    win.push(3, &two_hours, "old", "x");
+    assert!(win.recent(3).is_empty());
+
+    let win = Window::default();
+    win.push(4, &now, &"a".repeat(1000), &"b".repeat(1000));
+    let got = win.recent(4);
+    assert_eq!(got[0].0.chars().count(), 400);
+    assert_eq!(got[0].1.chars().count(), 400);
+}
+
+/// A forward has no text of its own: its text comes from the snapshot, and typed text always wins.
+#[test]
+fn blank_forward_text_comes_from_snapshot() {
+    use discord_inbox::ingest::forwarded_text;
+    assert_eq!(forwarded_text("", &["IPI: the lab is closed Friday".into()]), "IPI: the lab is closed Friday");
+    assert_eq!(forwarded_text("   ", &["one".into(), "two".into()]), "one\n\ntwo");
+    assert_eq!(forwarded_text("hi", &["x".into()]), "hi");
+    assert_eq!(forwarded_text("", &[]), "");
+}
