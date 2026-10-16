@@ -98,7 +98,9 @@ impl Window {
         let turn = Turn { at, him: cut(him), her: cut(her) };
         let mut map = self.0.lock().unwrap_or_else(|p| p.into_inner());
         let q = map.entry(channel).or_default();
-        q.push_back(turn);
+        // Keep the queue sorted by stamp: a retried message can arrive after newer turns.
+        let pos = q.iter().position(|t| t.at > turn.at).unwrap_or(q.len());
+        q.insert(pos, turn);
         while q.len() > WINDOW_TURNS {
             q.pop_front();
         }
@@ -114,7 +116,7 @@ impl Window {
         let cutoff = now - chrono::Duration::seconds(WINDOW_AGE_SECS);
         let map = self.0.lock().unwrap_or_else(|p| p.into_inner());
         map.get(&channel)
-            .map(|q| q.iter().filter(|t| t.at >= cutoff).map(|t| (t.him.clone(), t.her.clone())).collect())
+            .map(|q| q.iter().filter(|t| t.at >= cutoff && t.at <= now).map(|t| (t.him.clone(), t.her.clone())).collect())
             .unwrap_or_default()
     }
 }

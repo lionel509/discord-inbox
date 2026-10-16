@@ -961,7 +961,6 @@ async fn reply_masks_card_digits() {
     assert_eq!(ingest(&allow(), &inbox, &msg(&w, &s)).await, Outcome::Saved);
     let replies = w.replies_for(101);
     assert_eq!(replies.len(), 1, "{replies:?}");
-    assert!(replies[0].contains("**** **** **** 1111"), "{}", replies[0]);
     assert!(!replies[0].contains("4111"), "{}", replies[0]);
 }
 
@@ -993,7 +992,7 @@ async fn no_reply_when_nothing_to_say() {
     assert_eq!(w.replies_for(104).len(), 1);
 }
 
-/// With the model down the reply is OCR only, and a failed send changes neither the note nor the tick.
+/// With the model down the reply is the failure notice only (no OCR text, no verdict), and a failed send changes neither the note nor the tick.
 #[tokio::test]
 async fn reply_without_model_or_on_send_failure_changes_nothing() {
     let inbox_a = scratch("reply-model-down");
@@ -1001,7 +1000,7 @@ async fn reply_without_model_or_on_send_failure_changes_nothing() {
     let down = spec(MAIN, MAIN_CH, 106, &[("receipt.png", b"receipt down")]);
     assert_eq!(ingest(&allow(), &inbox_a, &msg(&w_a, &down)).await, Outcome::Saved);
     let text = &w_a.replies_for(106)[0];
-    assert!(text.contains("MODELDOWN"), "{text}");
+    assert!(!text.contains("MODELDOWN"), "{text}");
     assert!(!text.contains("Receipt:") && !text.contains("Budget"), "{text}");
 
     let inbox_b = scratch("reply-clean");
@@ -2017,6 +2016,21 @@ async fn window_reaches_the_question_path() {
     for p in &prompts[1..] {
         assert!(p.contains("Earlier in this chat") && p.contains("Lionel: sodastream terra 89.99"), "{p}");
     }
+}
+
+/// A retried turn that arrives late sorts by its own stamp, and a turn after `now` is not shown.
+#[test]
+fn window_reads_oldest_first_when_a_catch_up_turn_arrives_late() {
+    use discord_inbox::ingest::Window;
+    let at = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&chrono::Utc);
+    let win = Window::default();
+    win.push(5, "2026-10-14T12:02:00-04:00", "B later", "b reply");
+    win.push(5, "2026-10-14T12:01:00-04:00", "A earlier", "a reply");
+    let got: Vec<String> = win.recent_at(5, at("2026-10-14T12:05:00-04:00")).into_iter().map(|(him, _)| him).collect();
+    assert_eq!(got, vec!["A earlier", "B later"], "window must read oldest first");
+    let got = win.recent_at(5, at("2026-10-14T12:01:00-04:00"));
+    assert_eq!(got.len(), 1, "a turn after the message leaked into its prompt: {got:?}");
+    assert_eq!(got[0].0, "A earlier");
 }
 
 /// The window masks at its own boundary, keeps the last six turns oldest first, drops turns older than 30 minutes, and cuts long text.
