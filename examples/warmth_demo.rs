@@ -151,7 +151,7 @@ async fn main() -> ExitCode {
             files: vec![("receipt_zh.png".to_string(), receipt.clone())],
             at: "12:01:05",
             canned: vec![
-                Ok("FOLDER: Fidelity/Want to Make\nTITLE: SodaStream Terra\nTAGS: kitchen, gadget\nREPLY:\nGot the SodaStream Terra down as something to get.".into()),
+                Ok("FOLDER: State Street\nTITLE: Hua Lian grocery receipt\nTAGS: groceries\nREPLY:\nGot your Hua Lian receipt: milk and bread. Filed it with your spending.".into()),
             ],
         },
         Case {
@@ -190,6 +190,10 @@ async fn main() -> ExitCode {
         },
     ];
 
+    println!("Real vs canned: the prompt, the window, the reactions and the filing come from the code under test; the reply wording is a stub ({LABEL}).");
+    println!("Legend: \"filed to\" = the note went into a vault folder. \"kept in Inbox\" = nothing went to a vault folder (the answers that file nothing); the Inbox copy is still kept.");
+    println!("Bot log lines go to stderr, not this output: run with 2>/dev/null to hide them.");
+
     let mut pass = true;
     for (k, c) in cases.into_iter().enumerate() {
         let n = k + 1;
@@ -212,8 +216,9 @@ async fn main() -> ExitCode {
         let seen = stub.seen.lock().unwrap().clone();
         match seen.get(before) {
             Some(first) => {
-                let head: Vec<&str> = first.lines().take(12).collect();
-                println!("model saw (first 12 lines):\n{}", indent(&head.join("\n")));
+                let lines: Vec<&str> = first.lines().collect();
+                let tail = &lines[lines.len().saturating_sub(12)..];
+                println!("model saw (last 12 lines of the prompt):\n{}", indent(&tail.join("\n")));
             }
             None => println!("model saw: nothing (the model was not asked)"),
         }
