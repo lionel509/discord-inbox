@@ -41,7 +41,8 @@ impl Inbound for LiveMsg {
         discord_inbox::when::local_stamp(*self.msg.timestamp)
     }
     fn content(&self) -> String {
-        self.msg.content.clone()
+        let snaps: Vec<String> = self.msg.message_snapshots.iter().map(|s| s.content.clone()).collect();
+        discord_inbox::ingest::forwarded_text(&self.msg.content, &snaps)
     }
     fn attachment_names(&self) -> Vec<String> {
         self.msg
@@ -306,6 +307,7 @@ async fn main() -> ExitCode {
             chat: Arc::new(c),
             vaults: Vaults::new(Vaults::default_root()),
             last_notice: Default::default(),
+            window: Default::default(),
         },
         None => {
             eprintln!("discord-inbox: no openrouter key, chat replies off");

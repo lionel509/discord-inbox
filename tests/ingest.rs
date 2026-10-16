@@ -945,7 +945,7 @@ async fn receipt_dm_replies_once_after_tick() {
     let text = &replies[0];
     assert!(text.contains("Receipt: Trader Joe's · $12.34 · groceries"), "{text}");
     assert!(text.contains("Budget left before this: $742.00 of $800.00 (2026-10)"), "{text}");
-    assert!(text.contains("TRADER JOES"), "{text}");
+    assert!(!text.contains("TRADER JOES"), "{text}");
     assert_eq!(ingest(&allow(), &inbox, &msg(&w, &s)).await, Outcome::Skipped);
     let hist = FakeHistory::new(&w, vec![s.clone()]);
     catch_up(&allow(), &inbox, &hist).await;
@@ -1220,6 +1220,7 @@ fn filer(inbox: &Path, chat: &Arc<FakeChat>) -> Filer {
         chat: chat.clone(),
         vaults: Vaults::new(vault_root(inbox)),
         last_notice: Default::default(),
+        window: Default::default(),
     }
 }
 
@@ -1277,14 +1278,11 @@ async fn text_dm_filed_and_replied_no_tick() {
     assert!(text.contains("sketch of a solar fan") && text.contains("Hub: [[Ideas]]"), "{text}");
     let replies = w.replies_for(300);
     assert_eq!(replies.len(), 1, "{replies:?}");
-    assert!(
-        replies[0].starts_with("That is a solar fan project") && replies[0].ends_with("Saved to Citadel/Ideas for you 🐾"),
-        "{}",
-        replies[0]
-    );
+    assert_eq!(replies[0], "That is a solar fan project. Filed under Citadel.", "{}", replies[0]);
+    assert!(w.ops_for(300).contains(&("react", discord_inbox::ingest::FILED_MARK.to_string())), "{:?}", w.ops_for(300));
     assert!(replies[0].contains("That is a solar fan project"), "{}", replies[0]);
-    assert!(w.marks(300).is_empty(), "{:?}", w.marks(300));
-    assert_eq!(w.reacts(300), 0);
+    assert_eq!(w.marks(300), vec!["🐾"], "{:?}", w.marks(300));
+    assert_eq!(w.reacts(300), 1);
     assert_eq!(chat.calls(), 1);
 }
 
@@ -1376,7 +1374,7 @@ async fn receipt_gets_verdict_and_chat_in_one_masked_reply() {
         "State Street",
         "Trader Joes groceries",
         "receipts",
-        "Logged your Trader Joe's run.",
+        "Logged your Trader Joe's run. Card 4111 1111 1111 1111",
     )]);
     let f = filer(&inbox, &chat);
     let s = spec_text(MAIN, MAIN_CH, 350, "receipt", &[("receipt.png", b"receipt card")]);
@@ -1384,13 +1382,13 @@ async fn receipt_gets_verdict_and_chat_in_one_masked_reply() {
     let replies = w.replies_for(350);
     assert_eq!(replies.len(), 1, "{replies:?}");
     let text = &replies[0];
-    assert!(text.starts_with("Logged your Trader Joe's run.\n\nSaved to State Street for you 🐾"), "{text}");
+    assert!(text.starts_with("Logged your Trader Joe's run. Card **** **** **** 1111\n\nReceipt: Trader Joe's"), "{text}");
     assert!(text.contains("Logged your Trader Joe's run."), "{text}");
     assert!(text.contains("Receipt: Trader Joe's · $12.34 · groceries"), "{text}");
     assert!(text.contains("**** **** **** 1111") && !text.contains("4111"), "{text}");
     let prompts = chat.prompts.lock().unwrap().clone();
     assert!(prompts.iter().all(|p| !p.contains("4111")), "{prompts:?}");
-    assert!(w.marks(350).is_empty(), "{:?}", w.marks(350));
+    assert_eq!(w.marks(350), vec!["🐾"], "{:?}", w.marks(350));
 }
 
 /// A pending DM gets the hourglass first and is not answered early; when the retry completes, the hourglass goes and the DM is filed and answered.
@@ -1408,7 +1406,7 @@ async fn retry_completion_clears_hourglass_when_replied() {
     w.cdn_down.store(false, Ordering::SeqCst);
     let hist = FakeHistory::new(&w, vec![s.clone()]);
     catch_up_with(&allow(), &inbox, &hist, &f).await;
-    assert!(w.marks(360).is_empty(), "{:?}", w.marks(360));
+    assert_eq!(w.marks(360), vec!["🐾"], "{:?}", w.marks(360));
     assert!(
         w.ops_for(360).iter().any(|(k, e)| *k == "unreact" && e == "⏳"),
         "{:?}",
@@ -1634,11 +1632,8 @@ async fn list_item_appends_to_running_note() {
     assert!(fs::read_to_string(inbox.join(".filed")).unwrap().contains("Shopping List.md"));
     let replies = w.replies_for(340);
     assert_eq!(replies.len(), 1, "{replies:?}");
-    assert!(
-        replies[0].ends_with("Got it, added to your Shopping List 🐾"),
-        "{}",
-        replies[0]
-    );
+    assert_eq!(replies[0], "Added.", "{}", replies[0]);
+    assert!(w.ops_for(340).contains(&("react", discord_inbox::ingest::FILED_MARK.to_string())), "{:?}", w.ops_for(340));
     assert_eq!(chat.calls(), 1);
 }
 
@@ -1662,7 +1657,8 @@ async fn running_with_attachment_files_a_note() {
     assert!(files_in(&root.join("State Street")).contains(&"2026-10-13 Costco list.md".to_string()));
     let replies = w.replies_for(341);
     assert_eq!(replies.len(), 1, "{replies:?}");
-    assert!(replies[0].ends_with("Saved to State Street for you 🐾"), "{}", replies[0]);
+    assert_eq!(replies[0], "Filed.", "{}", replies[0]);
+    assert!(w.ops_for(341).contains(&("react", discord_inbox::ingest::FILED_MARK.to_string())), "{:?}", w.ops_for(341));
 }
 
 /// With no running note on disk, a list message is filed as an ordinary note in State Street.
@@ -1677,7 +1673,8 @@ async fn running_note_missing_files_a_note() {
     assert!(files_in(&root_of(&inbox).join("State Street")).contains(&"2026-10-13 Costco list.md".to_string()));
     let replies = w.replies_for(342);
     assert_eq!(replies.len(), 1, "{replies:?}");
-    assert!(replies[0].ends_with("Saved to State Street for you 🐾"), "{}", replies[0]);
+    assert_eq!(replies[0], "Filed.", "{}", replies[0]);
+    assert!(w.ops_for(342).contains(&("react", discord_inbox::ingest::FILED_MARK.to_string())), "{:?}", w.ops_for(342));
 }
 
 /// One notice per failure episode: a repeat of the same chat error gets ✅ only, and a success ends the episode.
@@ -1839,7 +1836,7 @@ async fn text_attachment_routes_on_its_text_not_a_lookup() {
     let replies = w.replies_for(390);
     assert_eq!(replies.len(), 1, "{replies:?}");
     assert!(replies[0].starts_with("Filed it."), "{}", replies[0]);
-    assert!(replies[0].ends_with("Saved to Citadel/Ideas for you 🐾"), "{}", replies[0]);
+    assert!(w.ops_for(390).contains(&("react", discord_inbox::ingest::FILED_MARK.to_string())), "{:?}", w.ops_for(390));
     let filed = all_files(&root_of(&inbox).join("Citadel/Ideas"));
     assert!(
         filed.iter().filter(|p| p.extension().is_some_and(|x| x == "md")).any(|p| fs::read_to_string(p).unwrap_or_default().contains(body)),
@@ -1857,7 +1854,7 @@ async fn blank_dm_never_calls_the_model() {
     let s = spec_text(MAIN, MAIN_CH, 391, "", &[]);
     assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
     assert_eq!(chat.calls(), 0, "the model was called for a blank DM");
-    assert_eq!(w.replies_for(391), vec!["Got it 🐾 It's saved in your Inbox.".to_string()]);
+    assert_eq!(w.replies_for(391), vec![discord_inbox::ingest::BLANK_REPLY.to_string()]);
 }
 
 /// The attachment text is read up to 20 000 chars, cut on a char boundary (#46 scope add).

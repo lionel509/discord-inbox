@@ -122,7 +122,7 @@ impl Chat for Script {
 }
 
 fn filer(root: &Path, chat: Arc<Script>) -> Filer {
-    Filer { chat, vaults: Vaults::new(root.to_path_buf()), last_notice: Default::default() }
+    Filer { chat, vaults: Vaults::new(root.to_path_buf()), last_notice: Default::default(), window: Default::default() }
 }
 
 fn filing(folder: &str, reply: &str) -> Result<String, String> {
@@ -162,7 +162,7 @@ async fn breaker_filed_reply_starts_with_no_status_label() {
     let got = replies.lock().unwrap().clone();
     assert_eq!(got.len(), 1, "expected one reply, got {got:?}");
     assert!(!got[0].starts_with("Filed:"), "reply starts with status label: {:?}", got[0]);
-    assert!(got[0].ends_with("Saved to Berkshire for you 🐾"), "no saved line: {:?}", got[0]);
+    assert_eq!(got[0], "Saved your receipt.", "reply is the model text only: {:?}", got[0]);
     assert!(!got[0].contains(".md"), "reply names a file: {:?}", got[0]);
 }
 
@@ -289,7 +289,7 @@ async fn breaker_r3_latin1_text_attachment_reaches_the_model() {
     assert_eq!(prompts.len(), 1, "model not called: {prompts:?}");
     assert!(prompts[0].contains("groceries"), "{}", prompts[0]);
     let got = replies.lock().unwrap().clone();
-    assert!(got.first().is_some_and(|r| r != "Got it 🐾 It's saved in your Inbox."), "{got:?}");
+    assert!(got.first().is_some_and(|r| r != discord_inbox::ingest::BLANK_REPLY), "{got:?}");
 }
 
 // 12. Round 3 guard: a binary file named .txt is unreadable, so no model call and the blank reply.
@@ -301,5 +301,5 @@ async fn breaker_r3_binary_txt_makes_no_model_call() {
     let (m, replies, _) = msg_files(1427000000000000012, "", &[("x.txt", b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR")]);
     let _ = ingest_with(&allow(), &inbox_of(&root), &m, &f).await;
     assert!(chat.prompts.lock().unwrap().is_empty(), "model called for a binary file");
-    assert_eq!(replies.lock().unwrap().clone(), vec!["Got it 🐾 It's saved in your Inbox.".to_string()]);
+    assert_eq!(replies.lock().unwrap().clone(), vec![discord_inbox::ingest::BLANK_REPLY.to_string()]);
 }

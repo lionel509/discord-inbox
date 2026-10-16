@@ -4,7 +4,7 @@ use crate::dump::{self, Incoming};
 use crate::chat::{Chat, NoChat};
 use crate::redact::sensitive;
 use crate::vaults::{self, Decision, Vaults};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -23,6 +23,12 @@ pub enum Outcome {
 pub const SAVED_MARK: &str = "✅";
 pub const PENDING_MARK: &str = "⏳";
 pub const FAILED_MARK: &str = "\u{26A0}\u{FE0F}";
+/// The bot's reaction on a message whose text was filed: the only sign of filing (#67). Never cleared by `clear`.
+pub const FILED_MARK: &str = "\u{1F43E}";
+/// Turns kept per channel for the warm-reply prompt (#67). In memory only.
+pub const WINDOW_TURNS: usize = 6;
+const WINDOW_AGE_SECS: i64 = 30 * 60;
+pub const WINDOW_CHARS: usize = 400;
 
 /// Leaves exactly `want` on the message among the three marks. Best-effort: errors are logged and change nothing.
 async fn mark<M: Inbound>(m: &M, want: &str) {
@@ -68,6 +74,49 @@ pub struct Filer {
     pub vaults: Vaults,
     /// When the last chat-failure notice went out; cleared when a chat call succeeds (#40).
     pub last_notice: std::sync::Mutex<Option<std::time::Instant>>,
+    /// The last few DM turns per channel, prefixed to the prompts (#67).
+    pub window: Window,
+}
+
+struct Turn {
+    at: chrono::DateTime<chrono::Utc>,
+    him: String,
+    her: String,
+}
+
+/// The recent DM turns per channel (#67). Masked and capped on the way in; read back oldest first.
+#[derive(Default)]
+pub struct Window(StdMutex<BTreeMap<u64, VecDeque<Turn>>>);
+
+impl Window {
+    /// Records one turn. `received` is the message's UTC rfc3339 stamp; a stamp that does not parse counts as now.
+    pub fn push(&self, channel: u64, received: &str, him: &str, her: &str) {
+        let at = chrono::DateTime::parse_from_rfc3339(received)
+            .map(|d| d.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| chrono::Utc::now());
+        let cut = |s: &str| sensitive(s).chars().take(WINDOW_CHARS).collect::<String>();
+        let turn = Turn { at, him: cut(him), her: cut(her) };
+        let mut map = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let q = map.entry(channel).or_default();
+        q.push_back(turn);
+        while q.len() > WINDOW_TURNS {
+            q.pop_front();
+        }
+    }
+
+    /// The turns of `channel` within the window's age of now, oldest first, as `(him, her)`.
+    pub fn recent(&self, channel: u64) -> Vec<(String, String)> {
+        self.recent_at(channel, chrono::Utc::now())
+    }
+
+    /// The turns of `channel` within the window's age of `now` (the incoming message's own time), oldest first.
+    pub fn recent_at(&self, channel: u64, now: chrono::DateTime<chrono::Utc>) -> Vec<(String, String)> {
+        let cutoff = now - chrono::Duration::seconds(WINDOW_AGE_SECS);
+        let map = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        map.get(&channel)
+            .map(|q| q.iter().filter(|t| t.at >= cutoff).map(|t| (t.him.clone(), t.her.clone())).collect())
+            .unwrap_or_default()
+    }
 }
 
 impl Filer {
@@ -76,6 +125,7 @@ impl Filer {
             chat: Arc::new(NoChat),
             vaults: Vaults::new(PathBuf::new()),
             last_notice: Default::default(),
+            window: Default::default(),
         }
     }
 }
@@ -88,10 +138,10 @@ fn local_date(received: &str) -> String {
     }
 }
 
-async fn chat_decision(filer: &Filer, msg: &Incoming) -> Result<Decision, String> {
+async fn chat_decision(filer: &Filer, msg: &Incoming, turns: &[(String, String)]) -> Result<Decision, String> {
     let system = vaults::system_prompt();
     let ocr: Vec<String> = msg.ocr.iter().map(|(_, t)| sensitive(t)).collect();
-    let user = vaults::user_prompt(&sensitive(&msg.content), &ocr);
+    let user = vaults::with_window(turns, &vaults::user_prompt(&sensitive(&msg.content), &ocr));
     let chat = filer.chat.clone();
     let text = tokio::task::spawn_blocking(move || chat.ask(&system, &user))
         .await
@@ -100,17 +150,14 @@ async fn chat_decision(filer: &Filer, msg: &Incoming) -> Result<Decision, String
 }
 
 /// Appends a list message to its running note. `None` (no running note, attachments, or a failed append) means the caller files it as today.
-fn list_append(filer: &Filer, inbox: &Path, incoming: &Incoming, d: &Decision) -> Option<String> {
+fn list_append(filer: &Filer, inbox: &Path, incoming: &Incoming, d: &Decision) -> Option<()> {
     let r = d.running?;
     if !incoming.attachments.is_empty() {
         return None;
     }
     let note = filer.vaults.running_path(r)?;
     match dump::append_running(inbox, incoming, &note, &incoming.received[..10]) {
-        Ok(()) => {
-            let stem = Path::new(r.path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-            Some(format!("Got it, added to your {stem} 🐾"))
-        }
+        Ok(()) => Some(()),
         Err(e) => {
             eprintln!("discord-inbox: append {} failed: {e}", incoming.msg_id);
             None
@@ -168,7 +215,7 @@ async fn typing_while<M: Inbound, F: std::future::Future>(m: &M, work: F) -> F::
 }
 
 /// The reply to a DM with nothing to read (#46).
-pub const BLANK_REPLY: &str = "Got it 🐾 It's saved in your Inbox.";
+pub const BLANK_REPLY: &str = "Got it 🐾";
 /// How much of a text attachment is read as the message (#46).
 pub const ATTACH_TEXT_CHARS: usize = 20_000;
 
@@ -199,6 +246,23 @@ fn message_text(typed: &str, attachments: &[(String, Option<Vec<u8>>)]) -> Strin
         }
     }
     parts.join("\n\n")
+}
+
+/// The text a DM carries for the window: what he typed, then each attachment by name only (never its OCR text) (#67).
+fn turn_text(incoming: &Incoming) -> String {
+    let mut out = incoming.content.clone();
+    for (name, _) in &incoming.attachments {
+        out.push_str(&format!("\n[attachment: {name}]"));
+    }
+    out
+}
+
+/// A forward has no text of its own: the snapshot text stands in when the typed text is blank (#67).
+pub fn forwarded_text(content: &str, snapshots: &[String]) -> String {
+    if !content.trim().is_empty() {
+        return content.to_string();
+    }
+    snapshots.iter().filter(|s| !s.trim().is_empty()).cloned().collect::<Vec<_>>().join("\n\n")
 }
 
 /// One message, as the decision logic sees it.
@@ -379,7 +443,12 @@ pub async fn ingest_with<M: Inbound>(
             return Outcome::Saved;
         }
     }
-    match typing_while(m, chat_decision(filer, &incoming)).await {
+    // Aged against the incoming message's own stamp, so a replayed DM sees the turns around it.
+    let now = chrono::DateTime::parse_from_rfc3339(&incoming.received)
+        .map(|d| d.with_timezone(&chrono::Utc))
+        .unwrap_or_else(|_| chrono::Utc::now());
+    let turns = filer.window.recent_at(m.channel_id(), now);
+    match typing_while(m, chat_decision(filer, &incoming, &turns)).await {
         Err(e) => {
             eprintln!("discord-inbox: chat for {id} failed: {e}");
             let verdict = crate::insight::compose(&incoming).await;
@@ -409,7 +478,7 @@ pub async fn ingest_with<M: Inbound>(
             if d.answer || incoming.content.trim_end().ends_with('?') {
                 // A question: the agent searches and reads the notes itself (#49), file nothing, keep the Inbox note.
                 let lookup = crate::tools::Lookup::new(filer.vaults.root().to_path_buf(), inbox.to_path_buf());
-                let question = sensitive(&incoming.content);
+                let question = vaults::with_window(&turns, &sensitive(&incoming.content));
                 let chat = filer.chat.clone();
                 let looked = typing_while(m, tokio::task::spawn_blocking(move || crate::agent::answer(chat.as_ref(), &lookup, &question)))
                     .await
@@ -434,7 +503,10 @@ pub async fn ingest_with<M: Inbound>(
                 };
                 let text = reply_text(&body, verdict.as_deref());
                 match m.reply(&text).await {
-                    Ok(()) => clear(m).await,
+                    Ok(()) => {
+                        clear(m).await;
+                        filer.window.push(m.channel_id(), &incoming.received, &turn_text(&incoming), &text);
+                    }
                     Err(e) => {
                         eprintln!("discord-inbox: reply on {id} failed: {e}");
                         mark(m, SAVED_MARK).await;
@@ -443,31 +515,30 @@ pub async fn ingest_with<M: Inbound>(
                 return Outcome::Saved;
             }
             // A list message with no attachment is appended to its running note; otherwise it is filed as today.
-            let filed: Option<String> = list_append(filer, inbox, &incoming, &d).or_else(|| {
-                d.target.and_then(|t| {
-                    let dir = filer.vaults.dest_dir(t)?;
-                    let name = vaults::note_name(&incoming.received, &d.title);
-                    match dump::file_away(
-                        inbox,
-                        &incoming,
-                        &dir,
-                        &name,
-                        &vaults::front_extra(t, &d.tags),
-                        &vaults::hub_line(t),
-                    ) {
-                        Ok(_) => Some(format!("Saved to {} for you 🐾", t.folder)),
+            let filed = list_append(filer, inbox, &incoming, &d).is_some()
+                || d.target.is_some_and(|t| match filer.vaults.dest_dir(t) {
+                    None => false,
+                    Some(dir) => match dump::file_away(inbox, &incoming, &dir, &vaults::note_name(&incoming.received, &d.title), &vaults::front_extra(t, &d.tags), &vaults::hub_line(t)) {
+                        Ok(_) => true,
                         Err(e) => {
                             eprintln!("discord-inbox: file {id} failed: {e}");
-                            None
+                            false
+                        }
+                    },
+                });
+            // A target the model picked that did not take the note: say so, in the same one-line shape.
+            let line = (d.target.is_some() && !filed).then_some("Hmm, I couldn't file that one, so it's safe in your Inbox for now.");
+            let text = combine(line, &d.reply, verdict.as_deref());
+            match m.reply(&text).await {
+                Ok(()) => {
+                    clear(m).await;
+                    if filed {
+                        if let Err(e) = m.react(FILED_MARK).await {
+                            eprintln!("discord-inbox: react on {id} failed: {e}");
                         }
                     }
-                })
-            });
-            // A target the model picked that did not take the note: say so, in the same one-line shape.
-            let line = filed.or_else(|| d.target.map(|_| "Hmm, I couldn't file that one, so it's safe in your Inbox for now.".to_string()));
-            let text = combine(line.as_deref(), &d.reply, verdict.as_deref());
-            match m.reply(&text).await {
-                Ok(()) => clear(m).await,
+                    filer.window.push(m.channel_id(), &incoming.received, &turn_text(&incoming), &text);
+                }
                 Err(e) => {
                     eprintln!("discord-inbox: reply on {id} failed: {e}");
                     mark(m, SAVED_MARK).await;

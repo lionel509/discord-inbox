@@ -37,7 +37,7 @@ impl Chat for Never {
 }
 
 fn filer(root: &Path) -> Filer {
-    Filer { chat: Arc::new(Never), vaults: Vaults::new(root.to_path_buf()), last_notice: Default::default() }
+    Filer { chat: Arc::new(Never), vaults: Vaults::new(root.to_path_buf()), last_notice: Default::default(), window: Default::default() }
 }
 
 struct Msg {

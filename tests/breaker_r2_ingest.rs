@@ -195,7 +195,7 @@ fn files_in(dir: &Path) -> Vec<String> {
 async fn breaker_r2_live_failure_after_catch_up_is_still_told() {
     let inbox = scratch("live-after-catchup");
     let replies: Replies = Default::default();
-    let f = Filer { chat: Arc::new(Fail("http 401".into())), vaults: Vaults::new(vault_root(&inbox)), last_notice: Default::default() };
+    let f = Filer { chat: Arc::new(Fail("http 401".into())), vaults: Vaults::new(vault_root(&inbox)), last_notice: Default::default(), window: Default::default() };
     let old = spec(8001, "old dm", "2026-10-13T10:00:00-04:00");
     let hist = Hist { specs: vec![old], replies: replies.clone() };
     catch_up_with(&allow(), &inbox, &hist, &f).await;
@@ -214,7 +214,7 @@ async fn breaker_r2_live_failure_after_catch_up_is_still_told() {
 async fn breaker_r2_throttle_survives_error_text_that_changes_per_message() {
     let inbox = scratch("varying");
     let replies: Replies = Default::default();
-    let f = Filer { chat: Arc::new(Varying(AtomicUsize::new(0))), vaults: Vaults::new(vault_root(&inbox)), last_notice: Default::default() };
+    let f = Filer { chat: Arc::new(Varying(AtomicUsize::new(0))), vaults: Vaults::new(vault_root(&inbox)), last_notice: Default::default(), window: Default::default() };
     let specs: Vec<Spec> = (1..=100u64).map(|i| spec(9000 + i, &format!("old dm {i}"), "2026-10-13T10:00:00-04:00")).collect();
     let hist = Hist { specs, replies: replies.clone() };
     catch_up_with(&allow(), &inbox, &hist, &f).await;
@@ -236,6 +236,7 @@ async fn breaker_r2_question_filed_to_normal_folder_is_answered_not_filed() {
         ]),
         vaults: Vaults::new(root.clone()),
         last_notice: Default::default(),
+        window: Default::default(),
     };
     let m = spec(9201, "where did I put the passport?", "2026-10-14T23:06:00-04:00");
     ingest_with(&allow(), &inbox, &msg(&m, &replies), &f).await;
