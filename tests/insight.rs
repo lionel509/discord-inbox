@@ -130,35 +130,34 @@ fn ask_runs_command_and_times_out() {
     assert_eq!(insight::ask(&say("exit 1"), "x", Duration::from_secs(5)), None);
 }
 
+fn not_receipt() -> Insight {
+    Insight { receipt: false, merchant: "unknown".into(), total: "unknown".into(), category: "unknown".into() }
+}
+
 #[test]
 fn reply_text_fits_discord() {
     let r = receipt("Trader Joe's", "12.34", "groceries");
-    let long = "x".repeat(6000);
-    let text = insight::reply_text(&[("a.png".into(), long, Some(r.clone()))], Some("Budget left before this: $742.00 of $800.00 (2026-10)".into()));
+    let long = Insight { receipt: true, merchant: "m".repeat(6000), total: "1.00".into(), category: "other".into() };
+    let text = insight::reply_text(&[long], Some("Budget left before this: $742.00 of $800.00 (2026-10)".into()));
     assert!(text.chars().count() <= 2000, "{}", text.chars().count());
     assert!(text.ends_with('…'));
-    assert!(text.starts_with("Receipt: Trader Joe's · $12.34 · groceries"), "{text}");
+    assert!(text.starts_with("Receipt: mmmm"), "{text}");
 
-    let none = insight::reply_text(&[("a.png".into(), "TOTAL 1".into(), None)], None);
-    assert_eq!(none, "TOTAL 1");
+    assert_eq!(insight::reply_text(&[not_receipt()], None), "");
+    assert_eq!(insight::reply_text(&[not_receipt()], Some("Budget left before this: $1.00 of $2.00 (2026-10)".into())), "");
+    assert_eq!(insight::reply_text(std::slice::from_ref(&r), None), "Receipt: Trader Joe's · $12.34 · groceries");
 
-    let budget = insight::reply_text(&[("a.png".into(), "t".into(), Some(r.clone()))], Some("Budget left before this: $1.00 of $2.00 (2026-10)".into()));
+    let budget = insight::reply_text(std::slice::from_ref(&r), Some("Budget left before this: $1.00 of $2.00 (2026-10)".into()));
     assert!(budget.contains("Budget left before this"), "{budget}");
-    let no_budget = insight::reply_text(&[("a.png".into(), "t".into(), Some(r))], None);
+    let no_budget = insight::reply_text(std::slice::from_ref(&r), None);
     assert!(!no_budget.contains("Budget"), "{no_budget}");
 
-    let two = insight::reply_text(
-        &[
-            ("a.png".into(), "one".into(), Some(receipt("S", "1.00", "other"))),
-            ("b.png".into(), "two".into(), Some(Insight { receipt: false, merchant: "unknown".into(), total: "unknown".into(), category: "unknown".into() })),
-        ],
-        None,
-    );
-    assert!(two.contains("a.png:") && two.contains("b.png:"), "{two}");
-    assert!(two.contains("Not a receipt: b.png"), "{two}");
+    let two = insight::reply_text(&[receipt("S", "1.00", "other"), not_receipt()], None);
+    assert_eq!(two, "Receipt: S · $1.00 · other", "{two}");
+    assert!(!two.contains("Not a receipt") && !two.contains("TOTAL"), "{two}");
 
-    let unknown = insight::reply_text(&[("a.png".into(), "t".into(), Some(receipt("S", "unknown", "other")))], None);
-    assert!(unknown.starts_with("Receipt: S · unknown · other"), "{unknown}");
+    let unknown = insight::reply_text(&[receipt("S", "unknown", "other")], None);
+    assert_eq!(unknown, "Receipt: S · unknown · other");
 }
 
 #[test]
@@ -187,6 +186,7 @@ fn budget_skips_a_heading_without_money() {
 async fn model_command_keeps_a_quoted_path_and_masks_its_reply() {
     dir();
     // Both checks share one test because DISCORD_INBOX_INSIGHT is process-global.
+    let _env = INSIGHT_ENV.lock().unwrap_or_else(|p| p.into_inner());
     std::env::set_var("DISCORD_INBOX_INSIGHT", "\"/Users/test/Discord Inbox/bin/model\" --flag");
     assert_eq!(
         insight::model(),
@@ -216,6 +216,30 @@ async fn model_command_keeps_a_quoted_path_and_masks_its_reply() {
     assert!(!reply.contains("4111"), "{reply}");
     assert!(reply.contains("Receipt: VISA"), "{reply}");
     assert!(reply.contains("1111"), "{reply}");
+}
+
+/// Serialises the tests that set DISCORD_INBOX_INSIGHT, which is process-global.
+static INSIGHT_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A photo with no receipt: the model says so and compose gives nothing to say, so no OCR body reaches Discord.
+#[tokio::test]
+async fn compose_is_none_for_a_non_receipt() {
+    let _env = INSIGHT_ENV.lock().unwrap_or_else(|p| p.into_inner());
+    let stub = dir().join("insight_no_receipt.sh");
+    fs::write(&stub, "#!/bin/sh\ncat >/dev/null\nprintf 'receipt: no\\n'\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    std::env::set_var("DISCORD_INBOX_INSIGHT", stub.to_string_lossy().to_string());
+
+    let msg = discord_inbox::dump::Incoming {
+        msg_id: 2,
+        author_id: 1,
+        received: "2026-10-13T14:03:22Z".into(),
+        content: String::new(),
+        attachments: vec![("IMG_1343.png".into(), None)],
+        ocr: vec![(0, "IMG_1343 some screenshot text".into())],
+    };
+    assert_eq!(insight::compose(&msg).await, None);
 }
 
 /// Full-width digits (U+FF10..U+FF19) for a run of ASCII digits.

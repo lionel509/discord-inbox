@@ -945,7 +945,7 @@ async fn receipt_dm_replies_once_after_tick() {
     let text = &replies[0];
     assert!(text.contains("Receipt: Trader Joe's · $12.34 · groceries"), "{text}");
     assert!(text.contains("Budget left before this: $742.00 of $800.00 (2026-10)"), "{text}");
-    assert!(text.contains("TRADER JOES"), "{text}");
+    assert!(!text.contains("TRADER JOES"), "{text}");
     assert_eq!(ingest(&allow(), &inbox, &msg(&w, &s)).await, Outcome::Skipped);
     let hist = FakeHistory::new(&w, vec![s.clone()]);
     catch_up(&allow(), &inbox, &hist).await;
@@ -961,7 +961,6 @@ async fn reply_masks_card_digits() {
     assert_eq!(ingest(&allow(), &inbox, &msg(&w, &s)).await, Outcome::Saved);
     let replies = w.replies_for(101);
     assert_eq!(replies.len(), 1, "{replies:?}");
-    assert!(replies[0].contains("**** **** **** 1111"), "{}", replies[0]);
     assert!(!replies[0].contains("4111"), "{}", replies[0]);
 }
 
@@ -993,7 +992,7 @@ async fn no_reply_when_nothing_to_say() {
     assert_eq!(w.replies_for(104).len(), 1);
 }
 
-/// With the model down the reply is OCR only, and a failed send changes neither the note nor the tick.
+/// With the model down the reply is the failure notice only (no OCR text, no verdict), and a failed send changes neither the note nor the tick.
 #[tokio::test]
 async fn reply_without_model_or_on_send_failure_changes_nothing() {
     let inbox_a = scratch("reply-model-down");
@@ -1001,7 +1000,7 @@ async fn reply_without_model_or_on_send_failure_changes_nothing() {
     let down = spec(MAIN, MAIN_CH, 106, &[("receipt.png", b"receipt down")]);
     assert_eq!(ingest(&allow(), &inbox_a, &msg(&w_a, &down)).await, Outcome::Saved);
     let text = &w_a.replies_for(106)[0];
-    assert!(text.contains("MODELDOWN"), "{text}");
+    assert!(!text.contains("MODELDOWN"), "{text}");
     assert!(!text.contains("Receipt:") && !text.contains("Budget"), "{text}");
 
     let inbox_b = scratch("reply-clean");
@@ -1220,6 +1219,7 @@ fn filer(inbox: &Path, chat: &Arc<FakeChat>) -> Filer {
         chat: chat.clone(),
         vaults: Vaults::new(vault_root(inbox)),
         last_notice: Default::default(),
+        window: Default::default(),
     }
 }
 
@@ -1277,14 +1277,11 @@ async fn text_dm_filed_and_replied_no_tick() {
     assert!(text.contains("sketch of a solar fan") && text.contains("Hub: [[Ideas]]"), "{text}");
     let replies = w.replies_for(300);
     assert_eq!(replies.len(), 1, "{replies:?}");
-    assert!(
-        replies[0].starts_with("That is a solar fan project") && replies[0].ends_with("Saved to Citadel/Ideas for you 🐾"),
-        "{}",
-        replies[0]
-    );
+    assert_eq!(replies[0], "That is a solar fan project. Filed under Citadel.", "{}", replies[0]);
+    assert!(w.ops_for(300).contains(&("react", discord_inbox::ingest::FILED_MARK.to_string())), "{:?}", w.ops_for(300));
     assert!(replies[0].contains("That is a solar fan project"), "{}", replies[0]);
-    assert!(w.marks(300).is_empty(), "{:?}", w.marks(300));
-    assert_eq!(w.reacts(300), 0);
+    assert_eq!(w.marks(300), vec!["🐾"], "{:?}", w.marks(300));
+    assert_eq!(w.reacts(300), 1);
     assert_eq!(chat.calls(), 1);
 }
 
@@ -1376,7 +1373,7 @@ async fn receipt_gets_verdict_and_chat_in_one_masked_reply() {
         "State Street",
         "Trader Joes groceries",
         "receipts",
-        "Logged your Trader Joe's run.",
+        "Logged your Trader Joe's run. Card 4111 1111 1111 1111",
     )]);
     let f = filer(&inbox, &chat);
     let s = spec_text(MAIN, MAIN_CH, 350, "receipt", &[("receipt.png", b"receipt card")]);
@@ -1384,13 +1381,13 @@ async fn receipt_gets_verdict_and_chat_in_one_masked_reply() {
     let replies = w.replies_for(350);
     assert_eq!(replies.len(), 1, "{replies:?}");
     let text = &replies[0];
-    assert!(text.starts_with("Logged your Trader Joe's run.\n\nSaved to State Street for you 🐾"), "{text}");
+    assert!(text.starts_with("Logged your Trader Joe's run. Card **** **** **** 1111\n\nReceipt: Trader Joe's"), "{text}");
     assert!(text.contains("Logged your Trader Joe's run."), "{text}");
     assert!(text.contains("Receipt: Trader Joe's · $12.34 · groceries"), "{text}");
     assert!(text.contains("**** **** **** 1111") && !text.contains("4111"), "{text}");
     let prompts = chat.prompts.lock().unwrap().clone();
     assert!(prompts.iter().all(|p| !p.contains("4111")), "{prompts:?}");
-    assert!(w.marks(350).is_empty(), "{:?}", w.marks(350));
+    assert_eq!(w.marks(350), vec!["🐾"], "{:?}", w.marks(350));
 }
 
 /// A pending DM gets the hourglass first and is not answered early; when the retry completes, the hourglass goes and the DM is filed and answered.
@@ -1408,7 +1405,7 @@ async fn retry_completion_clears_hourglass_when_replied() {
     w.cdn_down.store(false, Ordering::SeqCst);
     let hist = FakeHistory::new(&w, vec![s.clone()]);
     catch_up_with(&allow(), &inbox, &hist, &f).await;
-    assert!(w.marks(360).is_empty(), "{:?}", w.marks(360));
+    assert_eq!(w.marks(360), vec!["🐾"], "{:?}", w.marks(360));
     assert!(
         w.ops_for(360).iter().any(|(k, e)| *k == "unreact" && e == "⏳"),
         "{:?}",
@@ -1634,11 +1631,8 @@ async fn list_item_appends_to_running_note() {
     assert!(fs::read_to_string(inbox.join(".filed")).unwrap().contains("Shopping List.md"));
     let replies = w.replies_for(340);
     assert_eq!(replies.len(), 1, "{replies:?}");
-    assert!(
-        replies[0].ends_with("Got it, added to your Shopping List 🐾"),
-        "{}",
-        replies[0]
-    );
+    assert_eq!(replies[0], "Added.", "{}", replies[0]);
+    assert!(w.ops_for(340).contains(&("react", discord_inbox::ingest::FILED_MARK.to_string())), "{:?}", w.ops_for(340));
     assert_eq!(chat.calls(), 1);
 }
 
@@ -1662,7 +1656,8 @@ async fn running_with_attachment_files_a_note() {
     assert!(files_in(&root.join("State Street")).contains(&"2026-10-13 Costco list.md".to_string()));
     let replies = w.replies_for(341);
     assert_eq!(replies.len(), 1, "{replies:?}");
-    assert!(replies[0].ends_with("Saved to State Street for you 🐾"), "{}", replies[0]);
+    assert_eq!(replies[0], "Filed.", "{}", replies[0]);
+    assert!(w.ops_for(341).contains(&("react", discord_inbox::ingest::FILED_MARK.to_string())), "{:?}", w.ops_for(341));
 }
 
 /// With no running note on disk, a list message is filed as an ordinary note in State Street.
@@ -1677,7 +1672,8 @@ async fn running_note_missing_files_a_note() {
     assert!(files_in(&root_of(&inbox).join("State Street")).contains(&"2026-10-13 Costco list.md".to_string()));
     let replies = w.replies_for(342);
     assert_eq!(replies.len(), 1, "{replies:?}");
-    assert!(replies[0].ends_with("Saved to State Street for you 🐾"), "{}", replies[0]);
+    assert_eq!(replies[0], "Filed.", "{}", replies[0]);
+    assert!(w.ops_for(342).contains(&("react", discord_inbox::ingest::FILED_MARK.to_string())), "{:?}", w.ops_for(342));
 }
 
 /// One notice per failure episode: a repeat of the same chat error gets ✅ only, and a success ends the episode.
@@ -1839,7 +1835,7 @@ async fn text_attachment_routes_on_its_text_not_a_lookup() {
     let replies = w.replies_for(390);
     assert_eq!(replies.len(), 1, "{replies:?}");
     assert!(replies[0].starts_with("Filed it."), "{}", replies[0]);
-    assert!(replies[0].ends_with("Saved to Citadel/Ideas for you 🐾"), "{}", replies[0]);
+    assert!(w.ops_for(390).contains(&("react", discord_inbox::ingest::FILED_MARK.to_string())), "{:?}", w.ops_for(390));
     let filed = all_files(&root_of(&inbox).join("Citadel/Ideas"));
     assert!(
         filed.iter().filter(|p| p.extension().is_some_and(|x| x == "md")).any(|p| fs::read_to_string(p).unwrap_or_default().contains(body)),
@@ -1857,7 +1853,7 @@ async fn blank_dm_never_calls_the_model() {
     let s = spec_text(MAIN, MAIN_CH, 391, "", &[]);
     assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
     assert_eq!(chat.calls(), 0, "the model was called for a blank DM");
-    assert_eq!(w.replies_for(391), vec!["Got it 🐾 It's saved in your Inbox.".to_string()]);
+    assert_eq!(w.replies_for(391), vec![discord_inbox::ingest::BLANK_REPLY.to_string()]);
 }
 
 /// The attachment text is read up to 20 000 chars, cut on a char boundary (#46 scope add).
@@ -1934,4 +1930,149 @@ async fn answer_path_writes_nothing_anywhere_under_root() {
     after.sort();
     assert_eq!(after, before);
     assert_eq!(w.replies_for(382), vec!["Cod with soy sauce.".to_string()]);
+}
+
+// ---- Warm replies (#67). Temp dirs and a made-up `Private` folder only. ----
+
+/// A filed text DM gets the model's reply and nothing else: no footer, and a 🐾 reaction on his message.
+#[tokio::test]
+async fn filed_reply_is_model_text_plus_paw() {
+    let inbox = scratch("warm-filed");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![answer("Citadel/Ideas", "Solar fan idea", "electronics", "That is a solar fan project.")]);
+    let f = filer(&inbox, &chat);
+    let s = spec_text(MAIN, MAIN_CH, 400, "sketch of a solar fan", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    let replies = w.replies_for(400);
+    assert_eq!(replies, vec!["That is a solar fan project.".to_string()], "{replies:?}");
+    let ops = w.ops_for(400);
+    assert!(ops.contains(&("react", discord_inbox::ingest::FILED_MARK.to_string())), "{ops:?}");
+    assert!(files_in(&root_of(&inbox).join("Citadel/Ideas")).contains(&"2026-10-13 Solar fan idea.md".to_string()));
+}
+
+/// A follow-up the model files under `Chat` goes nowhere: no note in any target folder, and the reply is the model text.
+#[tokio::test]
+async fn chat_decision_files_nothing() {
+    let inbox = scratch("warm-chat");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![answer("Chat", "Bottle", "", "Oh nice, that's the one.")]);
+    let f = filer(&inbox, &chat);
+    let s = spec_text(MAIN, MAIN_CH, 401, "it comes with the bottle tho", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    assert_eq!(w.replies_for(401), vec!["Oh nice, that's the one.".to_string()]);
+    assert!(!w.ops_for(401).iter().any(|(_, e)| e == discord_inbox::ingest::FILED_MARK), "{:?}", w.ops_for(401));
+    let root = root_of(&inbox);
+    for t in TARGETS.iter() {
+        assert!(files_in(&root.join(t.folder)).is_empty(), "{} got a note", t.folder);
+    }
+}
+
+/// The turn before reaches the next filing prompt, in the same channel only.
+#[tokio::test]
+async fn window_reaches_the_next_prompt() {
+    let inbox = scratch("warm-window");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![
+        answer("Citadel/Ideas", "Sodastream", "electronics", "Nice, filed under Citadel."),
+        answer("Chat", "Bottle", "", "Lol right."),
+        answer("Chat", "Other", "", "Hi there."),
+    ]);
+    let f = filer(&inbox, &chat);
+    let s1 = spec_text(MAIN, MAIN_CH, 402, "sodastream terra 89.99", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s1), &f).await, Outcome::Saved);
+    let s2 = spec_text(MAIN, MAIN_CH, 403, "it comes with the bottle tho", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s2), &f).await, Outcome::Saved);
+    let prompts = chat.prompts.lock().unwrap().clone();
+    assert_eq!(prompts.len(), 2, "{prompts:?}");
+    let p = &prompts[1];
+    assert!(p.contains("Earlier in this chat"), "{p}");
+    assert!(p.contains("Lionel: sodastream terra 89.99"), "{p}");
+    assert!(p.contains("Stormy: Nice, filed under Citadel."), "{p}");
+    assert!(p.contains("Now he says:\nit comes with the bottle tho"), "{p}");
+
+    let other = spec_text(MAIN, ALT_CH, 404, "hello from another chat", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &other), &f).await, Outcome::Saved);
+    let prompts = chat.prompts.lock().unwrap().clone();
+    assert!(!prompts[2].contains("Earlier in this chat"), "{}", prompts[2]);
+}
+
+/// The window also reaches the question path: every prompt after the first carries the earlier turn.
+#[tokio::test]
+async fn window_reaches_the_question_path() {
+    let inbox = scratch("warm-question");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![
+        answer("Citadel/Ideas", "Sodastream", "electronics", "Nice, filed under Citadel."),
+        answer("Answer", "", "", ""),
+        Ok("Get the Terra one.".to_string()),
+    ]);
+    let f = filer(&inbox, &chat);
+    let s1 = spec_text(MAIN, MAIN_CH, 405, "sodastream terra 89.99", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s1), &f).await, Outcome::Saved);
+    let s2 = spec_text(MAIN, MAIN_CH, 406, "which one should i get?", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s2), &f).await, Outcome::Saved);
+    let prompts = chat.prompts.lock().unwrap().clone();
+    assert!(prompts.len() >= 2, "{prompts:?}");
+    for p in &prompts[1..] {
+        assert!(p.contains("Earlier in this chat") && p.contains("Lionel: sodastream terra 89.99"), "{p}");
+    }
+}
+
+/// A retried turn that arrives late sorts by its own stamp, and a turn after `now` is not shown.
+#[test]
+fn window_reads_oldest_first_when_a_catch_up_turn_arrives_late() {
+    use discord_inbox::ingest::Window;
+    let at = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&chrono::Utc);
+    let win = Window::default();
+    win.push(5, "2026-10-14T12:02:00-04:00", "B later", "b reply");
+    win.push(5, "2026-10-14T12:01:00-04:00", "A earlier", "a reply");
+    let got: Vec<String> = win.recent_at(5, at("2026-10-14T12:05:00-04:00")).into_iter().map(|(him, _)| him).collect();
+    assert_eq!(got, vec!["A earlier", "B later"], "window must read oldest first");
+    let got = win.recent_at(5, at("2026-10-14T12:01:00-04:00"));
+    assert_eq!(got.len(), 1, "a turn after the message leaked into its prompt: {got:?}");
+    assert_eq!(got[0].0, "A earlier");
+}
+
+/// The window masks at its own boundary, keeps the last six turns oldest first, drops turns older than 30 minutes, and cuts long text.
+#[test]
+fn window_is_masked_and_bounded() {
+    use discord_inbox::ingest::Window;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let win = Window::default();
+    win.push(1, &now, "card 4111 1111 1111 1111 ssn 123-45-6789", "ok");
+    let got = win.recent(1);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert!(!got[0].0.contains("4111") && !got[0].0.contains("123-45-6789"), "{got:?}");
+    assert!(got[0].0.contains("**** **** **** 1111"), "{got:?}");
+
+    let win = Window::default();
+    for i in 0..8 {
+        win.push(2, &now, &format!("t{i}"), "r");
+    }
+    let got = win.recent(2);
+    assert_eq!(got.len(), 6, "{got:?}");
+    assert_eq!(got.first().unwrap().0, "t2");
+    assert_eq!(got.last().unwrap().0, "t7");
+
+    let win = Window::default();
+    let two_hours = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+    win.push(3, &two_hours, "old", "x");
+    assert!(win.recent(3).is_empty());
+
+    let win = Window::default();
+    win.push(4, &now, &"a".repeat(1000), &"b".repeat(1000));
+    let got = win.recent(4);
+    assert_eq!(got[0].0.chars().count(), 400);
+    assert_eq!(got[0].1.chars().count(), 400);
+}
+
+/// A forward has no text of its own: its text comes from the snapshot, and typed text always wins.
+#[test]
+fn blank_forward_text_comes_from_snapshot() {
+    use discord_inbox::ingest::forwarded_text;
+    assert_eq!(forwarded_text("", &["IPI: the lab is closed Friday".into()]), "IPI: the lab is closed Friday");
+    assert_eq!(forwarded_text("   ", &["one".into(), "two".into()]), "one\n\ntwo");
+    assert_eq!(forwarded_text("hi", &["x".into()]), "hi");
+    assert_eq!(forwarded_text("", &[]), "");
 }
