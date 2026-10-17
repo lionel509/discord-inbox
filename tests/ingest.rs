@@ -2100,6 +2100,25 @@ async fn question_about_a_screenshot_sends_the_redacted_ocr() {
     assert!(note(&inbox, 390).is_file(), "question note left Inbox");
 }
 
+/// A typed question longer than the filing cap keeps its tail on the question path: the lookup sees the whole text (#75).
+#[tokio::test]
+async fn long_question_keeps_its_tail_for_the_lookup() {
+    let inbox = scratch("long-question");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![
+        answer("Answer", "Long question", "misc", "Checking."),
+        Ok("Here is the answer.".to_string()),
+    ]);
+    let f = filer(&inbox, &chat);
+    let text = format!("{} TAILMARK?", "word ".repeat(1000));
+    assert!(text.chars().count() > discord_inbox::vaults::PROMPT_CHARS);
+    let s = spec_text(MAIN, MAIN_CH, 392, &text, &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    assert_eq!(chat.calls(), 2);
+    let prompts = chat.prompts.lock().unwrap().clone();
+    assert!(prompts[1].contains("TAILMARK?"), "question tail cut before the lookup: {} chars", prompts[1].chars().count());
+}
+
 /// A question with no "?" that the model answers with a look-it-up promise is answered, not left hanging (#73).
 #[tokio::test]
 async fn question_without_mark_that_got_a_promise_is_answered() {

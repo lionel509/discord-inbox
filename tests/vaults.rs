@@ -459,7 +459,15 @@ fn is_question_counts_fullwidth_question_mark() {
 /// Lookup promises phrased with search or see are caught too (#75).
 #[test]
 fn promised_catches_search_and_see_promises() {
-    for r in ["Let me search your notes for that", "I'll search through your notes", "Let me see what your notes say", "I'll look in your notes"] {
+    for r in [
+        "Let me search your notes for that",
+        "I'll search through your notes",
+        "Let me see what your notes say",
+        "I'll look in your notes",
+        "Give me a second to check your notes",
+        "Let me take a look at your notes for that",
+        "I'll go through your notes and get back to you",
+    ] {
         assert!(vaults::promised(r), "{r}");
     }
 }

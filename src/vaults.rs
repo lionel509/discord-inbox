@@ -239,12 +239,12 @@ pub fn is_question(content: &str) -> bool {
 }
 
 /// Lookup promises a reply can make that the bot cannot keep: it cannot come back later (#73). The prompt forbids them; this catches one that slips through.
-const PROMISES: [&str; 26] = [
-    "give me a sec", "give me a moment", "give me a minute", "one sec",
-    "let me dig", "let me check", "let me look", "let me find", "let me peek", "let me pull",
+const PROMISES: [&str; 31] = [
+    "give me a sec", "give me a second", "give me a moment", "give me a minute", "one sec",
+    "let me dig", "let me check", "let me look", "let me take a look", "let me go through", "let me find", "let me peek", "let me pull",
     "let me search", "let me see what your notes",
     "lemme check", "lemme look", "lemme dig", "lemme search",
-    "i'll check", "i'll look", "i'll dig", "i'll find", "i'll peek", "i'll pull", "i'll search",
+    "i'll check", "i'll look", "i'll take a look", "i'll go through", "i'll dig", "i'll find", "i'll peek", "i'll pull", "i'll search",
     "i will check", "i will look", "i will search",
 ];
 
