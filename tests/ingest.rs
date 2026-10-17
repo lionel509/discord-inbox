@@ -2216,4 +2216,24 @@ async fn filed_reply_keeps_its_words_when_the_lookup_fails() {
     assert_eq!(replies.len(), 1, "{replies:?}");
     assert!(replies[0].contains("Filed it as an idea."), "{}", replies[0]);
     assert!(!replies[0].contains("Let me check"), "{}", replies[0]);
+    assert!(replies[0].ends_with("(I couldn't peek at your notes just now, sorry!)"), "{}", replies[0]);
+}
+
+/// The filed fact and the promise share one sentence: the note's folder is still named (#73).
+#[tokio::test]
+async fn filed_one_sentence_reply_still_says_where_when_the_lookup_fails() {
+    let inbox = scratch("promise-filed-one");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![
+        answer("Citadel/Ideas", "Keep", "docs", "Filed it under Citadel/Ideas and I'll check it against your notes later."),
+        Err("http 500".to_string()),
+    ]);
+    let f = filer(&inbox, &chat);
+    let s = spec_text(MAIN, MAIN_CH, 396, "is this worth keeping?", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    let replies = w.replies_for(396);
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert!(replies[0].contains("Citadel/Ideas"), "{}", replies[0]);
+    assert!(!replies[0].contains("I'll check"), "{}", replies[0]);
+    assert!(replies[0].ends_with("(I couldn't peek at your notes just now, sorry!)"), "{}", replies[0]);
 }

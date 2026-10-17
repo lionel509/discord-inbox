@@ -509,7 +509,8 @@ pub async fn ingest_with<M: Inbound>(
                     Err(e) => {
                         eprintln!("discord-inbox: lookup for {id} failed: {e}");
                         let kept = vaults::without_promises(&d.reply);
-                        let said = if kept.is_empty() { "I tried to look that up for you and couldn't get to your notes 😿" } else { kept.as_str() };
+                        let filed_in = d.target.map(|t| format!("Filed it in {}.", t.folder));
+                        let said = if kept.is_empty() && filed_in.is_some() { filed_in.as_deref().unwrap() } else if kept.is_empty() { "I tried to look that up for you and couldn't get to your notes 😿" } else { kept.as_str() };
                         format!("{said}\n\n(I couldn't peek at your notes just now, sorry!)")
                     }
                 };

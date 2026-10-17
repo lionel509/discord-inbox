@@ -502,3 +502,32 @@ fn answer_prompt_says_a_note_that_will_not_open_is_never_retried() {
     let (system, _) = vaults::answer_prompt("what can I make?", &[]);
     assert!(system.contains("list_folder of its folder and is never retried"), "{system}");
 }
+
+/// A `.` inside a token (price, e.g., filename) does not end a sentence (#73).
+#[test]
+fn without_promises_keeps_dots_inside_tokens() {
+    assert_eq!(vaults::without_promises("Let me check the $12.00 receipt against your notes."), "");
+    assert_eq!(vaults::without_promises("I'll dig through your notes, e.g. the ledger."), "");
+    assert_eq!(vaults::without_promises("Saved to notes/2026.10.md. I'll check later."), "Saved to notes/2026.10.md.");
+}
+
+/// Generated replies from a pool of sentences: no promise survives.
+#[test]
+fn without_promises_never_leaves_a_promise() {
+    let pool = [
+        "Filed it as an idea.", "It was $12.00 total!", "Let me check the $12.00 receipt", "I'll look at notes/2026.10.md later.",
+        "Give me a sec", "Saved \u{1f43e}", "Let me dig, e.g. the ledger?", "Fine\u{2026}", "Lemme search\n", "Nothing to add",
+    ];
+    let mut seed: u64 = 73;
+    for _ in 0..500 {
+        let mut reply = String::new();
+        for _ in 0..(1 + (seed % 4)) {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            reply.push_str(pool[((seed >> 33) as usize) % pool.len()]);
+            reply.push(' ');
+        }
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let out = vaults::without_promises(&reply);
+        assert!(!vaults::promised(&out), "{reply:?} -> {out:?}");
+    }
+}

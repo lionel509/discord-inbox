@@ -266,7 +266,21 @@ pub fn promised(reply: &str) -> bool {
 
 /// `reply` minus the sentences `promised` flags (#73). Separators stay; empty when nothing readable is left.
 pub fn without_promises(reply: &str) -> String {
-    let kept: String = reply.split_inclusive(['.', '!', '?', '\u{2026}', '\u{3002}', '\u{ff01}', '\u{ff1f}', '\n']).filter(|p| !promised(p)).collect();
+    let mut parts: Vec<&str> = Vec::new();
+    let (mut start, mut chars) = (0, reply.char_indices().peekable());
+    while let Some((i, c)) = chars.next() {
+        let end = match c {
+            '\u{2026}' | '\u{3002}' | '\u{ff01}' | '\u{ff1f}' | '\n' => true,
+            '.' | '!' | '?' => chars.peek().map_or(true, |&(_, n)| n.is_whitespace() || matches!(n, '.' | '!' | '?')),
+            _ => false,
+        };
+        if end {
+            parts.push(&reply[start..i + c.len_utf8()]);
+            start = i + c.len_utf8();
+        }
+    }
+    parts.push(&reply[start..]);
+    let kept: String = parts.into_iter().filter(|p| !promised(p)).collect();
     if kept.chars().any(|c| c.is_alphanumeric()) { kept.trim().to_string() } else { String::new() }
 }
 
