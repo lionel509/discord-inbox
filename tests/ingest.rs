@@ -2181,3 +2181,21 @@ async fn filed_note_with_a_promise_still_files() {
     assert_eq!(chat.calls(), 1);
     assert!(w.ops_for(393).contains(&("react", discord_inbox::ingest::FILED_MARK.to_string())), "{:?}", w.ops_for(393));
 }
+
+/// A filed question whose lookup fails never repeats the model's promise either (#77).
+#[tokio::test]
+async fn filed_question_lookup_failure_does_not_repeat_the_promise() {
+    let inbox = scratch("promise-filed-fail");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![
+        answer("Citadel/Ideas", "Passport", "docs", "Let me dig through your notes for that, give me a sec 🐾"),
+        Err("http 500".to_string()),
+    ]);
+    let f = filer(&inbox, &chat);
+    let s = spec_text(MAIN, MAIN_CH, 394, "where did I put my passport?", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    let replies = w.replies_for(394);
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert!(!replies[0].contains("give me a sec"), "{}", replies[0]);
+    assert!(replies[0].ends_with("(I couldn't peek at your notes just now, sorry!)"), "{}", replies[0]);
+}
