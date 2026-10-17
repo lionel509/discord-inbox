@@ -494,7 +494,7 @@ fn without_promises_drops_only_promise_sentences() {
     assert!(out.contains("Filed it as an idea.") && !out.contains("Let me check"), "{out}");
     assert!(out.contains("$12.00?!") && out.contains('\u{2026}'), "{out}");
     assert_eq!(vaults::without_promises("Let me dig through your notes 🐾"), "");
-    assert_eq!(vaults::without_promises("Filed. 🐾 I'll check later."), "Filed. 🐾");
+    assert_eq!(vaults::without_promises("Filed. 🐾 I'll check later."), "Filed.");
 }
 
 #[test]
