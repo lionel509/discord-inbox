@@ -487,3 +487,18 @@ fn user_prompt_within_keeps_a_long_question() {
     assert_eq!(vaults::user_prompt_within(&long, &[], vaults::LOOKUP_CHARS).chars().count(), 5000);
     assert_eq!(vaults::user_prompt(&long, &[]).chars().count(), vaults::PROMPT_CHARS);
 }
+
+#[test]
+fn without_promises_drops_only_promise_sentences() {
+    let out = vaults::without_promises("Filed it as an idea. Let me check it against your old notes later. It was $12.00?! Fine\u{2026}");
+    assert!(out.contains("Filed it as an idea.") && !out.contains("Let me check"), "{out}");
+    assert!(out.contains("$12.00?!") && out.contains('\u{2026}'), "{out}");
+    assert_eq!(vaults::without_promises("Let me dig through your notes 🐾"), "");
+    assert_eq!(vaults::without_promises("Filed. 🐾 I'll check later."), "Filed. 🐾");
+}
+
+#[test]
+fn answer_prompt_says_a_note_that_will_not_open_is_never_retried() {
+    let (system, _) = vaults::answer_prompt("what can I make?", &[]);
+    assert!(system.contains("list_folder of its folder and is never retried"), "{system}");
+}

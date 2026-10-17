@@ -2200,3 +2200,20 @@ async fn filed_question_lookup_failure_does_not_repeat_the_promise() {
     assert!(replies[0].ends_with("(I couldn't peek at your notes just now, sorry!)"), "{}", replies[0]);
 }
 
+
+#[tokio::test]
+async fn filed_reply_keeps_its_words_when_the_lookup_fails() {
+    let inbox = scratch("promise-filed-keeps");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![
+        answer("Citadel/Ideas", "Keep", "docs", "Filed it as an idea. Let me check it against your old notes later."),
+        Err("http 500".to_string()),
+    ]);
+    let f = filer(&inbox, &chat);
+    let s = spec_text(MAIN, MAIN_CH, 395, "is this worth keeping?", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    let replies = w.replies_for(395);
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert!(replies[0].contains("Filed it as an idea."), "{}", replies[0]);
+    assert!(!replies[0].contains("Let me check"), "{}", replies[0]);
+}

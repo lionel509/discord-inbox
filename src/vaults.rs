@@ -221,7 +221,7 @@ pub fn answer_prompt(question: &str, notes: &[(String, String)]) -> (String, Str
          Start with a search or a hub note like \"<Vault>/Home.md\", use at most a few lookups, then answer. \
          Names in the question may be misspelled (\"orianna\" = Oriana). \
          List the items you find. If the notes do not hold the answer, say so in one sentence, and say what you searched: never that a note is missing unless read_note or list_folder showed it missing. \
-         1 to 6 sentences, in the user's language. Never include card numbers. For a recipe or \"what can I make\" question: read \"{PANTRY}\" first and prefer its oldest rows, then the staples notes; cook for one; never alcohol (no wine, mirin, sake, Shaoxing) and nothing caffeinated. The message may begin with \"Earlier in this chat\"; that is context only: answer the part after \"Now he says:\" alone. The message may carry \"Attached text:\" blocks: words read off a screenshot he sent (a product page, a label, a receipt); treat them as part of the question."
+         1 to 6 sentences, in the user's language. Never include card numbers. For a recipe or \"what can I make\" question: read \"{PANTRY}\" first (that note may not exist yet: a note that will not open gets one list_folder of its folder and is never retried) and prefer its oldest rows, then the staples notes; cook for one; never alcohol (no wine, mirin, sake, Shaoxing) and nothing caffeinated. The message may begin with \"Earlier in this chat\"; that is context only: answer the part after \"Now he says:\" alone. The message may carry \"Attached text:\" blocks: words read off a screenshot he sent (a product page, a label, a receipt); treat them as part of the question."
     );
     let mut user = question.to_string();
     if !notes.is_empty() {
@@ -262,6 +262,12 @@ pub fn promised(reply: &str) -> bool {
             before_ok && after_ok && !ordinary
         })
     })
+}
+
+/// `reply` minus the sentences `promised` flags (#73). Separators stay; empty when nothing readable is left.
+pub fn without_promises(reply: &str) -> String {
+    let kept: String = reply.split_inclusive(['.', '!', '?', '\u{2026}', '\u{3002}', '\u{ff01}', '\u{ff1f}', '\n']).filter(|p| !promised(p)).collect();
+    if kept.chars().any(|c| c.is_alphanumeric()) { kept.trim().to_string() } else { String::new() }
 }
 
 /// Prefixes the last few turns of the DM (#67) so a follow-up reads in context. No turns: `user` unchanged.
