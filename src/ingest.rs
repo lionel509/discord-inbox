@@ -142,7 +142,7 @@ fn local_date(received: &str) -> String {
 
 async fn chat_decision(filer: &Filer, msg: &Incoming, turns: &[(String, String)]) -> Result<Decision, String> {
     let system = vaults::system_prompt();
-    let user = prompt_text(msg, turns);
+    let user = prompt_text(msg, turns, vaults::PROMPT_CHARS);
     let chat = filer.chat.clone();
     let text = tokio::task::spawn_blocking(move || chat.ask(&system, &user))
         .await
@@ -249,10 +249,11 @@ fn message_text(typed: &str, attachments: &[(String, Option<Vec<u8>>)]) -> Strin
     parts.join("\n\n")
 }
 
-/// What the model reads for a DM: the redacted text, then each redacted OCR block, behind the window (#67, #73). Filing and questions both use it.
-fn prompt_text(msg: &Incoming, turns: &[(String, String)]) -> String {
+/// What the model reads for a DM: the redacted text, then each redacted OCR block, behind the window (#67, #73). Filing caps it at
+/// `PROMPT_CHARS`, a question at `LOOKUP_CHARS` so a long pasted question keeps its tail (#75).
+fn prompt_text(msg: &Incoming, turns: &[(String, String)], limit: usize) -> String {
     let ocr: Vec<String> = msg.ocr.iter().map(|(_, t)| sensitive(t)).collect();
-    vaults::with_window(turns, &vaults::user_prompt(&sensitive(&msg.content), &ocr))
+    vaults::with_window(turns, &vaults::user_prompt_within(&sensitive(&msg.content), &ocr, limit))
 }
 
 /// The text a DM carries for the window: what he typed, then each attachment by name only (never its OCR text) (#67).
@@ -487,7 +488,7 @@ pub async fn ingest_with<M: Inbound>(
             if d.answer || vaults::is_question(&incoming.content) || promised {
                 // A question: the agent searches and reads the notes itself (#49), file nothing, keep the Inbox note.
                 let lookup = crate::tools::Lookup::new(filer.vaults.root().to_path_buf(), inbox.to_path_buf());
-                let question = prompt_text(&incoming, &turns);
+                let question = prompt_text(&incoming, &turns, vaults::LOOKUP_CHARS);
                 let chat = filer.chat.clone();
                 let looked = typing_while(m, tokio::task::spawn_blocking(move || crate::agent::answer(chat.as_ref(), &lookup, &question)))
                     .await

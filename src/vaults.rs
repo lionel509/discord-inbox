@@ -194,12 +194,17 @@ pub fn system_prompt() -> String {
 }
 
 pub fn user_prompt(content: &str, ocr: &[String]) -> String {
+    user_prompt_within(content, ocr, PROMPT_CHARS)
+}
+
+/// The same text, cut to `limit` characters: a filing prompt uses `PROMPT_CHARS`, a question `LOOKUP_CHARS` (#75).
+pub fn user_prompt_within(content: &str, ocr: &[String], limit: usize) -> String {
     let mut s = String::from(content);
     for block in ocr {
         s.push_str("\n\nAttached text:\n");
         s.push_str(block);
     }
-    s.chars().take(PROMPT_CHARS).collect()
+    s.chars().take(limit).collect()
 }
 
 /// `(system, user)` for the second ask that answers a question from the
@@ -228,24 +233,35 @@ pub fn answer_prompt(question: &str, notes: &[(String, String)]) -> (String, Str
     (system, user.chars().take(LOOKUP_CHARS).collect())
 }
 
-/// A question: the text ends in `?`, ignoring trailing `!`, emoji and spaces (#73). Only adds questions to the model's `Answer`.
+/// A question: the text ends in `?` or the fullwidth `？`, ignoring trailing `!`, emoji and spaces (#73, #75). Only adds questions to the model's `Answer`.
 pub fn is_question(content: &str) -> bool {
-    content.trim_end().trim_end_matches(|c: char| !c.is_alphanumeric() && c != '?').ends_with('?')
+    content.trim_end().trim_end_matches(|c: char| !c.is_alphanumeric() && c != '?' && c != '？').ends_with(['?', '？'])
 }
 
 /// Lookup promises a reply can make that the bot cannot keep: it cannot come back later (#73). The prompt forbids them; this catches one that slips through.
-const PROMISES: [&str; 21] = [
+const PROMISES: [&str; 26] = [
     "give me a sec", "give me a moment", "give me a minute", "one sec",
     "let me dig", "let me check", "let me look", "let me find", "let me peek", "let me pull",
-    "lemme check", "lemme look", "lemme dig",
-    "i'll check", "i'll look", "i'll dig", "i'll find", "i'll peek", "i'll pull",
-    "i will check", "i will look",
+    "let me search", "let me see what your notes",
+    "lemme check", "lemme look", "lemme dig", "lemme search",
+    "i'll check", "i'll look", "i'll dig", "i'll find", "i'll peek", "i'll pull", "i'll search",
+    "i will check", "i will look", "i will search",
 ];
 
-/// True when a reply promises a lookup it cannot deliver (#73). Curly apostrophes count as straight ones.
+/// True when a reply promises a lookup it cannot deliver (#73). A phrase counts only as whole words, and not when the
+/// next word makes it ordinary: "look forward", or "check in" / "check out" (#75). Curly apostrophes count as straight ones.
 pub fn promised(reply: &str) -> bool {
-    let lower = reply.to_lowercase().replace('\u{2019}', "'");
-    PROMISES.iter().any(|p| lower.contains(p))
+    let lower = reply.to_lowercase().replace(['\u{2018}', '\u{2019}', '\u{02bc}'], "'");
+    PROMISES.iter().any(|p| {
+        lower.match_indices(p).any(|(at, _)| {
+            let before_ok = lower[..at].chars().next_back().map_or(true, |c| !c.is_alphanumeric());
+            let rest = &lower[at + p.len()..];
+            let after_ok = rest.chars().next().map_or(true, |c| !c.is_alphanumeric());
+            let next = rest.trim_start().split(|c: char| !c.is_alphanumeric()).next().unwrap_or("");
+            let ordinary = next == "forward" || (p.ends_with("check") && (next == "in" || next == "out"));
+            before_ok && after_ok && !ordinary
+        })
+    })
 }
 
 /// Prefixes the last few turns of the DM (#67) so a follow-up reads in context. No turns: `user` unchanged.

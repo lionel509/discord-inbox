@@ -447,3 +447,35 @@ fn promised_matches_lookup_promises_only() {
         assert!(!vaults::promised(r), "{r}");
     }
 }
+
+/// A fullwidth question mark (Chinese or Japanese IME) ends a question too (#75).
+#[test]
+fn is_question_counts_fullwidth_question_mark() {
+    for q in ["你要吗？", "ok？ 😺"] {
+        assert!(vaults::is_question(q), "{q}");
+    }
+}
+
+/// Lookup promises phrased with search or see are caught too (#75).
+#[test]
+fn promised_catches_search_and_see_promises() {
+    for r in ["Let me search your notes for that", "I'll search through your notes", "Let me see what your notes say", "I'll look in your notes"] {
+        assert!(vaults::promised(r), "{r}");
+    }
+}
+
+/// Words that only contain a promise phrase, and "look forward" / "check in" / "check out", are not promises (#75).
+#[test]
+fn promised_ignores_words_that_only_contain_a_phrase() {
+    for r in ["Oh, someone secretly bought you that gift", "I'll checkout the new menu", "I'll look forward to it", "I'll check in on you tomorrow", "I'll check out the menu"] {
+        assert!(!vaults::promised(r), "{r}");
+    }
+}
+
+/// A question keeps its whole text up to the limit the caller asks for (#75).
+#[test]
+fn user_prompt_within_keeps_a_long_question() {
+    let long = "q".repeat(5000);
+    assert_eq!(vaults::user_prompt_within(&long, &[], vaults::LOOKUP_CHARS).chars().count(), 5000);
+    assert_eq!(vaults::user_prompt(&long, &[]).chars().count(), vaults::PROMPT_CHARS);
+}
