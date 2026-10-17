@@ -2076,3 +2076,89 @@ fn blank_forward_text_comes_from_snapshot() {
     assert_eq!(forwarded_text("hi", &["x".into()]), "hi");
     assert_eq!(forwarded_text("", &[]), "");
 }
+
+/// A question about a screenshot sees the screenshot's text (redacted), as the filing prompt does (#73).
+#[tokio::test]
+async fn question_about_a_screenshot_sends_the_redacted_ocr() {
+    let inbox = scratch("question-ocr");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![
+        answer("Answer", "Which one", "shopping", "Checking."),
+        Ok("Go with the second one.".to_string()),
+    ]);
+    let f = filer(&inbox, &chat);
+    let s = spec_text(MAIN, MAIN_CH, 390, "which one should i get", &[("card.png", b"card bytes")]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    assert_eq!(chat.calls(), 2);
+    let prompts = chat.prompts.lock().unwrap().clone();
+    assert!(prompts[1].contains("which one should i get"), "{}", prompts[1]);
+    assert!(prompts[1].contains("Attached text:"), "{}", prompts[1]);
+    assert!(prompts[1].contains("TRADER JOES"), "{}", prompts[1]);
+    assert!(!prompts[1].contains("4111"), "card digits reached the model: {}", prompts[1]);
+    let replies = w.replies_for(390);
+    assert!(replies[0].starts_with("Go with the second one."), "{replies:?}");
+    assert!(note(&inbox, 390).is_file(), "question note left Inbox");
+}
+
+/// A question with no "?" that the model answers with a look-it-up promise is answered, not left hanging (#73).
+#[tokio::test]
+async fn question_without_mark_that_got_a_promise_is_answered() {
+    let inbox = scratch("promise-answered");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![
+        answer("Inbox", "William debt", "money", "Let me dig through your notes for that, give me a sec 🐾"),
+        Ok("William owes you $12.00.".to_string()),
+    ]);
+    let f = filer(&inbox, &chat);
+    let root = root_of(&inbox);
+    let rec = root.join("State Street/Assets/Receivables");
+    fs::create_dir_all(&rec).unwrap();
+    fs::write(rec.join("Who Owes Me.md"), "| Who | Owes |\n| William | $12.00 |\n").unwrap();
+    let mut before = Vec::new();
+    tree_of(&root, &inbox, &mut before);
+    before.sort();
+
+    let s = spec_text(MAIN, MAIN_CH, 391, "how much does willam owe me", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    assert_eq!(chat.calls(), 2);
+    let prompts = chat.prompts.lock().unwrap().clone();
+    assert!(prompts[1].contains("how much does willam owe me"), "{}", prompts[1]);
+    assert_eq!(w.replies_for(391), vec!["William owes you $12.00.".to_string()]);
+    assert!(w.marks(391).is_empty(), "{:?}", w.marks(391));
+    assert!(note(&inbox, 391).is_file(), "question note left Inbox");
+    let mut after = Vec::new();
+    tree_of(&root, &inbox, &mut after);
+    after.sort();
+    assert_eq!(after, before, "the answer path filed or wrote something under the vault");
+}
+
+/// When the promised lookup fails, the bot does not repeat the promise back to him (#73).
+#[tokio::test]
+async fn promise_then_lookup_failure_does_not_repeat_the_promise() {
+    let inbox = scratch("promise-fail");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![
+        answer("Inbox", "William debt", "money", "Let me dig through your notes for that, give me a sec 🐾"),
+        Err("timeout".to_string()),
+    ]);
+    let f = filer(&inbox, &chat);
+    let s = spec_text(MAIN, MAIN_CH, 392, "how much does willam owe me", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    let replies = w.replies_for(392);
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert!(!replies[0].contains("give me a sec"), "{}", replies[0]);
+    assert!(replies[0].ends_with("(I couldn't peek at your notes just now, sorry!)"), "{}", replies[0]);
+}
+
+/// The promise net only fires when nothing was filed: a filed note with a promise-y reply still files (#73).
+#[tokio::test]
+async fn filed_note_with_a_promise_still_files() {
+    let inbox = scratch("promise-filed");
+    let w = World::new(&inbox);
+    let chat = FakeChat::new(vec![answer("Citadel/Ideas", "Solar fan idea", "electronics", "I'll check what parts it needs later")]);
+    let f = filer(&inbox, &chat);
+    let s = spec_text(MAIN, MAIN_CH, 393, "solar fan idea for the balcony", &[]);
+    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
+    assert_eq!(chat.calls(), 1);
+    assert!(w.ops_for(393).contains(&("react", discord_inbox::ingest::FILED_MARK.to_string())), "{:?}", w.ops_for(393));
+}

@@ -415,3 +415,13 @@ fn with_window_formats_turns() {
         "Earlier in this chat, oldest first:\nLionel: a\nStormy: b\nLionel: c\nStormy: d\n\nNow he says:\nq"
     );
 }
+
+/// The prompts name attached screenshot text and the no-promise rule (#73).
+#[test]
+fn prompts_name_attached_text_and_the_no_promise_rule() {
+    let (system, _) = vaults::answer_prompt("q", &[]);
+    assert!(system.contains("Attached text:"), "{system}");
+    let filing = vaults::system_prompt();
+    assert!(filing.contains("never promise to check"), "{filing}");
+    assert!(filing.contains("how much does William owe me"), "{filing}");
+}
