@@ -214,3 +214,14 @@ fn single_cjk_character_query_is_kept() {
     let hits = lk.search_notes("学", None).expect("one-character query");
     assert!(hits.contains("学习.md"), "hits = {hits}");
 }
+
+/// A misspelled name finds its note: a word one edit away from the query word counts as a hit, so a
+/// name typed "orianna" finds "Oriana" in the ledger (#73). Made-up name.
+#[test]
+fn search_finds_a_misspelled_name() {
+    let (root, inbox) = fixture("misspelled");
+    put(&root.join(discord_inbox::vaults::LEDGER), "| Who | Owes |\n| Oriana | $12.00 |\n");
+    let hits = Lookup::new(root, inbox).search_notes("orianna", None).unwrap();
+    assert!(hits.lines().next().unwrap().ends_with("Who Owes Me.md"), "{hits}");
+    assert!(hits.contains("Oriana"), "{hits}");
+}
