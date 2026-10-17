@@ -415,3 +415,139 @@ fn with_window_formats_turns() {
         "Earlier in this chat, oldest first:\nLionel: a\nStormy: b\nLionel: c\nStormy: d\n\nNow he says:\nq"
     );
 }
+
+/// The prompts name attached screenshot text and the no-promise rule (#73).
+#[test]
+fn prompts_name_attached_text_and_the_no_promise_rule() {
+    let (system, _) = vaults::answer_prompt("q", &[]);
+    assert!(system.contains("Attached text:"), "{system}");
+    let filing = vaults::system_prompt();
+    assert!(filing.contains("never promise to check"), "{filing}");
+    assert!(filing.contains("how much does Jordan owe me"), "{filing}");
+}
+
+/// A question ends in "?" even with a trailing "!", emoji or spaces; plain text does not (#73).
+#[test]
+fn is_question_sees_through_trailing_punctuation() {
+    for q in ["ok?", "ok? ", "really?!", "ok?? 😺"] {
+        assert!(vaults::is_question(q), "{q}");
+    }
+    for s in ["", "what 😺", "how much does jordn owe me"] {
+        assert!(!vaults::is_question(s), "{s}");
+    }
+}
+
+/// Only a reply that promises a lookup counts; a plain answer or a reaction does not (#73).
+#[test]
+fn promised_matches_lookup_promises_only() {
+    for r in ["Let me dig through your notes… give me a sec", "I’ll check the ledger", "One sec, lemme look"] {
+        assert!(vaults::promised(r), "{r}");
+    }
+    for r in ["Jordan owes you $12.00.", "Nice, the Fresh is the better pick 🐾", "Noted."] {
+        assert!(!vaults::promised(r), "{r}");
+    }
+}
+
+/// A fullwidth question mark (Chinese or Japanese IME) ends a question too (#75).
+#[test]
+fn is_question_counts_fullwidth_question_mark() {
+    for q in ["你要吗？", "ok？ 😺"] {
+        assert!(vaults::is_question(q), "{q}");
+    }
+}
+
+/// Lookup promises phrased with search or see are caught too (#75).
+#[test]
+fn promised_catches_search_and_see_promises() {
+    for r in [
+        "Let me search your notes for that",
+        "I'll search through your notes",
+        "Let me see what your notes say",
+        "I'll look in your notes",
+        "Give me a second to check your notes",
+        "Let me take a look at your notes for that",
+        "I'll go through your notes and get back to you",
+    ] {
+        assert!(vaults::promised(r), "{r}");
+    }
+}
+
+/// Words that only contain a promise phrase, and "look forward" / "check in" / "check out", are not promises (#75).
+#[test]
+fn promised_ignores_words_that_only_contain_a_phrase() {
+    for r in ["Oh, someone secretly bought you that gift", "I'll checkout the new menu", "I'll look forward to it", "I'll check in on you tomorrow", "I'll check out the menu"] {
+        assert!(!vaults::promised(r), "{r}");
+    }
+}
+
+/// A question keeps its whole text up to the limit the caller asks for (#75).
+#[test]
+fn user_prompt_within_keeps_a_long_question() {
+    let long = "q".repeat(5000);
+    assert_eq!(vaults::user_prompt_within(&long, &[], vaults::LOOKUP_CHARS).chars().count(), 5000);
+    assert_eq!(vaults::user_prompt(&long, &[]).chars().count(), vaults::PROMPT_CHARS);
+}
+
+#[test]
+fn without_promises_drops_only_promise_sentences() {
+    let out = vaults::without_promises("Filed it as an idea. Let me check it against your old notes later. It was $12.00?! Fine\u{2026}");
+    assert!(out.contains("Filed it as an idea.") && !out.contains("Let me check"), "{out}");
+    assert!(out.contains("$12.00?!") && out.contains('\u{2026}'), "{out}");
+    assert_eq!(vaults::without_promises("Let me dig through your notes 🐾"), "");
+    assert_eq!(vaults::without_promises("Filed. 🐾 I'll check later."), "Filed.");
+}
+
+#[test]
+fn answer_prompt_says_a_note_that_will_not_open_is_never_retried() {
+    let (system, _) = vaults::answer_prompt("what can I make?", &[]);
+    assert!(system.contains("list_folder of its folder and is never retried"), "{system}");
+}
+
+/// A `.` inside a token (price, e.g., filename) does not end a sentence (#73).
+#[test]
+fn without_promises_keeps_dots_inside_tokens() {
+    assert_eq!(vaults::without_promises("Let me check the $12.00 receipt against your notes."), "");
+    assert!(!vaults::promised(&vaults::without_promises("I'll dig through your notes, e.g. the ledger.")));
+    assert_eq!(vaults::without_promises("Saved to notes/2026.10.md. I'll check later."), "Saved to notes/2026.10.md.");
+}
+
+/// Generated replies from a pool of sentences: no promise survives.
+#[test]
+fn without_promises_never_leaves_a_promise() {
+    let plain = [
+        "Filed it as an idea.", "It was $12.00 total!", "Fine\u{2026}", "**Filed it as an idea.**", "I wrote \"keep it.\"",
+    ];
+    let pool = [
+        "Filed it as an idea.", "It was $12.00 total!", "Let me check the $12.00 receipt", "I'll look at notes/2026.10.md later.",
+        "Give me a sec", "Saved \u{1f43e}", "Let me dig, e.g. the ledger?", "Fine\u{2026}", "Lemme search\n", "Nothing to add",
+        "**Filed it as an idea.**", "I wrote \"keep it.\"",
+    ];
+    let mut seed: u64 = 73;
+    for _ in 0..500 {
+        let mut reply = String::new();
+        let mut picked: Vec<&str> = Vec::new();
+        let mut prev_ends = true; // an unterminated entry runs into the next sentence by design
+        for _ in 0..(1 + (seed % 4)) {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let p = pool[((seed >> 33) as usize) % pool.len()];
+            if plain.contains(&p) && prev_ends { picked.push(p); }
+            prev_ends = p.ends_with(['.', '!', '?', '\u{2026}', '\n', '*', '"']);
+            reply.push_str(p);
+            reply.push(' ');
+        }
+        let out = vaults::without_promises(&reply);
+        assert!(!vaults::promised(&out), "{reply:?} -> {out:?}");
+        for p in picked {
+            let first = p.split_whitespace().next().unwrap();
+            assert!(out.contains(first), "{reply:?} -> {out:?} lost {p:?}");
+        }
+    }
+}
+
+/// Closing markup after a terminator stays with its sentence (#73).
+#[test]
+fn without_promises_keeps_sentences_ending_in_markup() {
+    assert_eq!(vaults::without_promises("**Filed it as an idea.** Let me check your notes."), "**Filed it as an idea.**");
+    assert_eq!(vaults::without_promises("Filed it as an idea.\u{1f63a} Let me check your notes."), "Filed it as an idea.\u{1f63a}");
+    assert_eq!(vaults::without_promises("I wrote \"keep it.\" Let me check your notes."), "I wrote \"keep it.\"");
+}

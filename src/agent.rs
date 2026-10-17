@@ -71,7 +71,9 @@ pub fn answer(chat: &dyn Chat, lookup: &Lookup, question: &str) -> Result<Answer
                         "error: lookup limit reached".to_string()
                     } else {
                         calls += 1;
-                        match lookup.call(&c.name, &c.arguments) {
+                        let r = lookup.call(&c.name, &c.arguments);
+                        eprintln!("discord-inbox: lookup {} {} -> {}", c.name, c.arguments, if r.is_ok() { "ok" } else { "err" });
+                        match r {
                             Ok(s) => s,
                             Err(e) => format!("error: {e}"),
                         }
