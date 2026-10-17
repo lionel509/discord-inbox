@@ -15,9 +15,9 @@ fn chat_prompt_carries_the_persona() {
 
 #[test]
 fn answer_prompt_carries_the_persona_and_the_name_note() {
-    let (system, _) = answer_prompt("how much does orianna owe me", &[]);
+    let (system, _) = answer_prompt("how much does willam owe me", &[]);
     assert!(system.contains(PERSONA_HEAD), "{system}");
     assert!(system.contains(PERSONA_TAIL), "{system}");
     assert!(system.contains(PERSONA_WARM), "{system}");
-    assert!(system.contains("misspelled") && system.contains("\"orianna\" = Oriana"), "{system}");
+    assert!(system.contains("misspelled") && system.contains("\"willam\" = William"), "{system}");
 }

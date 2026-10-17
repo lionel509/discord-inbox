@@ -24,7 +24,7 @@ fn fixture(name: &str) -> (PathBuf, PathBuf) {
     put(&root.join("Private/secret.md"), SECRET);
     put(&root.join("Fidelity/Pantry/Pantry.md"), "cod fillets, soy sauce, gochujang, rice\n");
     put(&root.join("Fidelity/Pantry/Korean Shelf.md"), "gochujang and doenjang\n");
-    put(&root.join("State Street/Assets/Receivables/Who Owes Me.md"), "| Oriana | $12.00 |\n");
+    put(&root.join("State Street/Assets/Receivables/Who Owes Me.md"), "| William | $12.00 |\n");
     put(&root.join("Fidelity/.trash/old.md"), SECRET);
     put(&root.join("Fidelity/.obsidian/x.md"), SECRET);
     put(&root.join("BlackRock/.git/x.md"), SECRET);

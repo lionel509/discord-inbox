@@ -186,7 +186,7 @@ async fn breaker_empty_answer_sends_nonempty_reply() {
     let root = new_root("emptyans");
     let chat = Script::new(vec![answering("On it."), Ok(String::new())]);
     let f = filer(&root, chat);
-    let (m, replies, _) = msg(1427000000000000003, "how much does orianna owe me?", true, false);
+    let (m, replies, _) = msg(1427000000000000003, "how much does willam owe me?", true, false);
     let _ = ingest_with(&allow(), &inbox_of(&root), &m, &f).await;
     let got = replies.lock().unwrap().clone();
     assert_eq!(got.len(), 1, "expected one reply, got {got:?}");
