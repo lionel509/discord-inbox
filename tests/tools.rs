@@ -157,7 +157,7 @@ fn no_tool_output_ever_leaks_the_sentinel() {
     let lk = Lookup::new(root.clone(), inbox);
     let frags = [
         "Fidelity", "Pantry", "Pantry.md", "Shelf", "secret.md", "Private", "..", ".", ".trash", ".obsidian", ".git",
-        "Inbox", ".filed", "link.md", "Bridgewater", "/", "\\", "",
+        "Inbox", ".filed", "link.md", "Bridgewater", "/", "\\", "", "secrat", "privte", "tokem",
     ];
     let abs = root.display().to_string();
     let mut seed: u64 = 49;
@@ -213,4 +213,15 @@ fn single_cjk_character_query_is_kept() {
     let lk = discord_inbox::tools::Lookup::new(root, base.join("Inbox"));
     let hits = lk.search_notes("学", None).expect("one-character query");
     assert!(hits.contains("学习.md"), "hits = {hits}");
+}
+
+/// A misspelled name finds its note: a word one edit away from the query word counts as a hit, so a
+/// name typed "jordn" finds "Jordan" in a note (#73). Made-up name and path.
+#[test]
+fn search_finds_a_misspelled_name() {
+    let (root, inbox) = fixture("misspelled");
+    put(&root.join("Citadel/Ledger/IOUs.md"), "| Who | Owes |\n| Jordan | 12.00 |\n");
+    let hits = Lookup::new(root, inbox).search_notes("jordn", None).unwrap();
+    assert!(hits.lines().next().unwrap().ends_with("IOUs.md"), "{hits}");
+    assert!(hits.contains("Jordan"), "{hits}");
 }

@@ -79,6 +79,33 @@ fn snippet(text: &str, lower: &str, words: &[String]) -> String {
     chars[start..end].iter().collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Query words this long or longer also match a word one edit away, so a misspelled name still finds its note (#73).
+const NEAR_MIN: usize = 5;
+
+/// True when `a` and `b` differ by one inserted, deleted or substituted character.
+fn one_edit(a: &str, b: &str) -> bool {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let (long, short) = if a.len() >= b.len() { (&a, &b) } else { (&b, &a) };
+    if long.len() - short.len() > 1 || a == b {
+        return false;
+    }
+    let i = long.iter().zip(short.iter()).take_while(|(x, y)| x == y).count();
+    if long.len() == short.len() {
+        long[i + 1..] == short[i + 1..]
+    } else {
+        long[i + 1..] == short[i..]
+    }
+}
+
+/// The words of `lower` one edit away from query word `w`; none when `w` is short or already in the text.
+fn near_words(lower: &str, w: &str) -> Vec<String> {
+    if w.chars().count() < NEAR_MIN || lower.contains(w) {
+        return Vec::new();
+    }
+    lower.split(|c: char| !c.is_alphanumeric()).filter(|t| one_edit(t, w)).map(str::to_string).collect()
+}
+
 impl Lookup {
     pub fn new(root: PathBuf, inbox: PathBuf) -> Lookup {
         Lookup { root, inbox }
@@ -171,16 +198,23 @@ impl Lookup {
             let lower = text.to_lowercase();
             let display_lower = display.to_lowercase();
             let mut score = 0usize;
+            let mut close: Vec<String> = Vec::new();
             for w in &words {
                 if display_lower.contains(w.as_str()) {
                     score += 3;
                 }
                 score += lower.matches(w.as_str()).count().min(5);
+                let near = near_words(&lower, w);
+                if !near.is_empty() {
+                    score += 2;
+                    close.extend(near);
+                }
             }
             if score == 0 {
                 continue;
             }
-            let snip = snippet(&text, &lower, &words);
+            let find: Vec<String> = words.iter().cloned().chain(close).collect();
+            let snip = snippet(&text, &lower, &find);
             hits.push((score, display, snip));
         }
         hits.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));

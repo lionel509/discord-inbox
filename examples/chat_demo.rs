@@ -1,6 +1,11 @@
-//! Offline chat-and-filing demo. Three text DMs run through the real `ingest_with` against a temp
-//! copy of the folder layout (never `~/Documents`), with a scripted chat. `--live` reruns the same
-//! three DMs through MiMo Flash (at most 3 real calls) when the OpenRouter key file exists.
+//! Offline chat-and-filing demo. Text DMs run through the real `ingest_with` against a temp copy of
+//! the folder layout (never `~/Documents`), with a scripted chat. The first run is three filing DMs.
+//! The second section runs the #73 question cases: a screenshot with a question (the OCR text the
+//! model sees is printed, redacted), a question with no "?" that gets a lookup promise (the promise
+//! is never sent; the answer is), and the same DM when the lookup fails (the promise is not repeated).
+//! `--live` reruns the first section through MiMo Flash (at most 3 real calls) when the key file exists.
+//!
+//! The screenshot case reads text with the Apple Vision helper that build.rs compiles (macOS only).
 //!
 //! Run: `cargo run --release --example chat_demo [-- --live]`
 use discord_inbox::allowlist;
@@ -22,10 +27,19 @@ const DMS: [&str; 3] = [
     "recipe: scallion pancakes, flour water salt, fry till crisp",
     "my knee hurts when I go up stairs",
 ];
+/// A made-up receipt photo with a made-up card number; the card number must be masked before the model sees it.
+const CARD: &[u8] = include_bytes!("assets/card.png");
+/// The promise the chat model makes on the question path (#73). Its text must never reach Discord.
+const PROMISE: &str = "Let me dig through your notes for that, give me a sec 🐾";
+
+/// One DM: its text and its attachments (name, bytes).
+type Dm = (&'static str, Vec<(&'static str, Vec<u8>)>);
 
 struct DemoMsg {
     id: u64,
     text: String,
+    files: Vec<(&'static str, Vec<u8>)>,
+    sent: Arc<Mutex<Vec<String>>>,
 }
 
 impl Inbound for DemoMsg {
@@ -45,10 +59,10 @@ impl Inbound for DemoMsg {
         self.text.clone()
     }
     fn attachment_names(&self) -> Vec<String> {
-        Vec::new()
+        self.files.iter().map(|(n, _)| n.to_string()).collect()
     }
-    async fn download(&self, _i: usize) -> Result<Vec<u8>, String> {
-        Err("no attachments".into())
+    async fn download(&self, i: usize) -> Result<Vec<u8>, String> {
+        self.files.get(i).map(|(_, b)| b.clone()).ok_or("no attachment".into())
     }
     async fn react(&self, _e: &str) -> Result<(), String> {
         Ok(())
@@ -61,16 +75,37 @@ impl Inbound for DemoMsg {
     }
     async fn reply(&self, text: &str) -> Result<(), String> {
         println!("-- reply --\n{text}");
+        self.sent.lock().unwrap().push(text.to_string());
         Ok(())
     }
 }
 
-struct Scripted(Mutex<VecDeque<String>>);
+/// Answers from a script, one entry per model call. With `show`, prints what the model was sent and what it said.
+struct Scripted {
+    replies: Mutex<VecDeque<Result<String, String>>>,
+    show: bool,
+}
 
 impl Chat for Scripted {
-    fn ask(&self, _system: &str, _user: &str) -> Result<String, String> {
-        self.0.lock().unwrap().pop_front().ok_or("script empty".into())
+    fn ask(&self, _system: &str, user: &str) -> Result<String, String> {
+        let next = self.replies.lock().unwrap().pop_front().unwrap_or(Err("script empty".into()));
+        if self.show {
+            println!("-- model sees --\n{user}");
+            match &next {
+                Ok(t) => println!("-- model says --\n{t}"),
+                Err(e) => println!("-- model fails --\n{e}"),
+            }
+        }
+        next
     }
+}
+
+fn scripted(replies: Vec<Result<String, String>>, show: bool) -> Arc<dyn Chat> {
+    Arc::new(Scripted { replies: Mutex::new(replies.into()), show })
+}
+
+fn decision(folder: &str, title: &str, tags: &str, reply: &str) -> Result<String, String> {
+    Ok(format!("FOLDER: {folder}\nTITLE: {title}\nTAGS: {tags}\nREPLY:\n{reply}\n"))
 }
 
 fn layout() -> (PathBuf, PathBuf) {
@@ -96,7 +131,8 @@ fn tree(dir: &Path, base: &Path) {
     }
 }
 
-async fn run(label: &str, chat: Arc<dyn Chat>) -> bool {
+/// Runs the DMs in order. `forbid` is text that must not appear in any reply sent.
+async fn run(label: &str, chat: Arc<dyn Chat>, dms: &[Dm], forbid: Option<&str>) -> bool {
     println!("=== {label} ===");
     let (inbox, root) = layout();
     let filer = Filer {
@@ -106,15 +142,28 @@ async fn run(label: &str, chat: Arc<dyn Chat>) -> bool {
         window: Default::default(),
     };
     let allow = allowlist::parse(&format!("{SENDER}\n")).expect("demo allowlist");
+    let sent = Arc::new(Mutex::new(Vec::new()));
     let mut ok = true;
-    for (k, text) in DMS.iter().enumerate() {
+    for (k, (text, files)) in dms.iter().enumerate() {
         println!("DM: {text}");
+        if !files.is_empty() {
+            let names: Vec<&str> = files.iter().map(|(n, _)| *n).collect();
+            println!("attached: {}", names.join(", "));
+        }
         let m = DemoMsg {
             id: FIRST_ID + k as u64,
             text: text.to_string(),
+            files: files.clone(),
+            sent: sent.clone(),
         };
         if ingest_with(&allow, &inbox, &m, &filer).await != Outcome::Saved {
             ok = false;
+        }
+        if let Some(bad) = forbid {
+            if sent.lock().unwrap().iter().any(|r| r.contains(bad)) {
+                println!("FAIL: a reply contains {bad:?}");
+                ok = false;
+            }
         }
     }
     println!("-- tree --");
@@ -130,21 +179,64 @@ async fn run(label: &str, chat: Arc<dyn Chat>) -> bool {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> ExitCode {
-    let script = [
-        "FOLDER: Citadel/Ideas\nTITLE: Lego sorting robot arm\nTAGS: robotics, lego\nREPLY:\nNice idea, filed with your project ideas.",
-        "FOLDER: Fidelity/Want to Make\nTITLE: Scallion pancakes\nTAGS: recipe\nREPLY:\nSaved the recipe.",
-        "FOLDER: Inbox\nTITLE: Knee pain\nTAGS: health\nREPLY:\nSorry about the knee. Kept it in Inbox, and it may be worth a doctor's look if it lingers.",
+    let filing: Vec<Dm> = DMS.iter().map(|t| (*t, Vec::new())).collect();
+    let script = vec![
+        decision("Citadel/Ideas", "Lego sorting robot arm", "robotics, lego", "Nice idea, filed with your project ideas."),
+        decision("Fidelity/Want to Make", "Scallion pancakes", "recipe", "Saved the recipe."),
+        decision("Inbox", "Knee pain", "health", "Sorry about the knee. Kept it in Inbox, and it may be worth a doctor's look if it lingers."),
     ];
-    let scripted = Arc::new(Scripted(Mutex::new(
-        script.iter().map(|s| s.to_string()).collect(),
-    )));
-    let mut pass = run("scripted chat", scripted).await;
+    let mut pass = run("scripted chat", scripted(script, false), &filing, None).await;
     if std::env::args().any(|a| a == "--live") {
         match OpenRouter::from_key_file(&chat::key_path()) {
-            Some(c) => pass &= run("live MiMo Flash", Arc::new(c)).await,
+            Some(c) => pass &= run("live MiMo Flash", Arc::new(c), &filing, None).await,
             None => println!("no key, live skipped"),
         }
     }
+
+    // #73: a screenshot with a question. The model sees the OCR text after redaction, then answers from it.
+    let screenshot: Vec<Dm> = vec![("what does this say", vec![("card.png", CARD.to_vec())])];
+    pass &= run(
+        "question: screenshot",
+        scripted(
+            vec![
+                decision("Answer", "Card receipt", "shopping", "Checking the picture."),
+                Ok("It says TRADER JOES, a total of 12.40. The card number is masked, so I can't read it.".to_string()),
+            ],
+            true,
+        ),
+        &screenshot,
+        None,
+    )
+    .await;
+
+    // #73: a question with no "?" that gets a lookup promise. The promise is never sent; the answer is.
+    let promise: Vec<Dm> = vec![("where did i put my passport", Vec::new())];
+    pass &= run(
+        "question: promise, no question mark",
+        scripted(
+            vec![
+                decision("Inbox", "Passport spot", "misc", PROMISE),
+                Ok("Your passport is in the blue folder on the shelf.".to_string()),
+            ],
+            true,
+        ),
+        &promise,
+        Some("give me a sec"),
+    )
+    .await;
+
+    // The same DM when the lookup fails: the reply keeps the words but not the promise, and is sent once.
+    pass &= run(
+        "question: promise, then lookup fails",
+        scripted(
+            vec![decision("Inbox", "Passport spot", "misc", PROMISE), Err("http 500".to_string())],
+            true,
+        ),
+        &promise,
+        Some("give me a sec"),
+    )
+    .await;
+
     println!("{}", if pass { "PASS" } else { "FAIL" });
     if pass {
         ExitCode::SUCCESS

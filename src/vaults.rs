@@ -171,7 +171,7 @@ pub fn system_prompt() -> String {
         "You file one message from the owner into his vault and reply to it.\n\
          Pick the folder whose key fits best. Keys:\n",
     );
-    s.push_str("Answer — the message asks a question or wants something looked up, with or without a question mark (\"whats on my costco list\", \"where did I put my passport\"): answer it, file nothing; a request for ideas or advice from his notes is also Answer (\"with the ingredients in my pantry what can i make with cod\", \"which one should i get\"): answer it, file nothing\n");
+    s.push_str("Answer — the message asks a question or wants something looked up, with or without a question mark (\"whats on my costco list\", \"where did I put my passport\", \"how much does Jordan owe me\"): answer it, file nothing; a request for ideas or advice from his notes is also Answer (\"with the ingredients in my pantry what can i make with cod\", \"which one should i get\"): answer it, file nothing\n");
     s.push_str("Chat — a short conversational follow-up, aside or thanks that adds nothing worth keeping on its own (\"it comes with the bottle tho\", \"lol ok\", \"thanks\"): reply like a friend, file nothing\n");
     for t in TARGETS.iter() {
         s.push_str(&format!("{} — {}\n", t.key, t.hint));
@@ -186,7 +186,7 @@ pub fn system_prompt() -> String {
          TITLE: <3 to 8 words>\n\
          TAGS: <up to 3 comma-separated lowercase words>\n\
          REPLY:\n\
-         <1 to 3 sentences, like a text from a friend: answer or react to what he said; never say that you saved, filed or noted it, a reaction on his message does that>\n\n\
+         <1 to 3 sentences, like a text from a friend: answer or react to what he said; never say that you saved, filed or noted it, a reaction on his message does that; never promise to check, dig or look something up later: you cannot come back, so if answering needs his notes the folder is Answer>\n\n\
          The message may begin with \"Earlier in this chat\"; that is context only: file and reply to the part after \"Now he says:\" alone.\n\
          Reply in the user's language. Never include card numbers.",
     );
@@ -194,12 +194,17 @@ pub fn system_prompt() -> String {
 }
 
 pub fn user_prompt(content: &str, ocr: &[String]) -> String {
+    user_prompt_within(content, ocr, PROMPT_CHARS)
+}
+
+/// The same text, cut to `limit` characters: a filing prompt uses `PROMPT_CHARS`, a question `LOOKUP_CHARS` (#75).
+pub fn user_prompt_within(content: &str, ocr: &[String], limit: usize) -> String {
     let mut s = String::from(content);
     for block in ocr {
         s.push_str("\n\nAttached text:\n");
         s.push_str(block);
     }
-    s.chars().take(PROMPT_CHARS).collect()
+    s.chars().take(limit).collect()
 }
 
 /// `(system, user)` for the second ask that answers a question from the
@@ -215,8 +220,8 @@ pub fn answer_prompt(question: &str, notes: &[(String, String)]) -> (String, Str
          Berkshire (business), Goldman (career), Fidelity (kitchen: what is in the fridge is \"{PANTRY}\" with a Bought date and Days per row; staples are \"{staple_a}\" and \"{staple_b}\"), Citadel (projects), Mirae (languages), Bridgewater (audits), Inbox (recent messages), ! Todo (tasks). \
          Start with a search or a hub note like \"<Vault>/Home.md\", use at most a few lookups, then answer. \
          Names in the question may be misspelled (\"willam\" = William). \
-         List the items you find. If the notes do not hold the answer, say so in one sentence. \
-         1 to 6 sentences, in the user's language. Never include card numbers. For a recipe or \"what can I make\" question: read \"{PANTRY}\" first and prefer its oldest rows, then the staples notes; cook for one; never alcohol (no wine, mirin, sake, Shaoxing) and nothing caffeinated. The message may begin with \"Earlier in this chat\"; that is context only: answer the part after \"Now he says:\" alone."
+         List the items you find. If the notes do not hold the answer, say so in one sentence, and say what you searched: never that a note is missing unless read_note or list_folder showed it missing. \
+         1 to 6 sentences, in the user's language. Never include card numbers. For a recipe or \"what can I make\" question: read \"{PANTRY}\" first (that note may not exist yet: a note that will not open gets one list_folder of its folder and is never retried) and prefer its oldest rows, then the staples notes; cook for one; never alcohol (no wine, mirin, sake, Shaoxing) and nothing caffeinated. The message may begin with \"Earlier in this chat\"; that is context only: answer the part after \"Now he says:\" alone. The message may carry \"Attached text:\" blocks: words read off a screenshot he sent (a product page, a label, a receipt); treat them as part of the question."
     );
     let mut user = question.to_string();
     if !notes.is_empty() {
@@ -226,6 +231,56 @@ pub fn answer_prompt(question: &str, notes: &[(String, String)]) -> (String, Str
         }
     }
     (system, user.chars().take(LOOKUP_CHARS).collect())
+}
+
+/// A question: the text ends in `?` or the fullwidth `？`, ignoring trailing `!`, emoji and spaces (#73, #75). Only adds questions to the model's `Answer`.
+pub fn is_question(content: &str) -> bool {
+    content.trim_end().trim_end_matches(|c: char| !c.is_alphanumeric() && c != '?' && c != '？').ends_with(['?', '？'])
+}
+
+/// Lookup promises a reply can make that the bot cannot keep: it cannot come back later (#73). The prompt forbids them; this catches one that slips through.
+const PROMISES: [&str; 31] = [
+    "give me a sec", "give me a second", "give me a moment", "give me a minute", "one sec",
+    "let me dig", "let me check", "let me look", "let me take a look", "let me go through", "let me find", "let me peek", "let me pull",
+    "let me search", "let me see what your notes",
+    "lemme check", "lemme look", "lemme dig", "lemme search",
+    "i'll check", "i'll look", "i'll take a look", "i'll go through", "i'll dig", "i'll find", "i'll peek", "i'll pull", "i'll search",
+    "i will check", "i will look", "i will search",
+];
+
+/// True when a reply promises a lookup it cannot deliver (#73). A phrase counts only as whole words, and not when the
+/// next word makes it ordinary: "look forward", or "check in" / "check out" (#75). Curly apostrophes count as straight ones.
+pub fn promised(reply: &str) -> bool {
+    let lower = reply.to_lowercase().replace(['\u{2018}', '\u{2019}', '\u{02bc}'], "'");
+    PROMISES.iter().any(|p| {
+        lower.match_indices(p).any(|(at, _)| {
+            let before_ok = lower[..at].chars().next_back().map_or(true, |c| !c.is_alphanumeric());
+            let rest = &lower[at + p.len()..];
+            let after_ok = rest.chars().next().map_or(true, |c| !c.is_alphanumeric());
+            let next = rest.trim_start().split(|c: char| !c.is_alphanumeric()).next().unwrap_or("");
+            let ordinary = next == "forward" || (p.ends_with("check") && (next == "in" || next == "out"));
+            before_ok && after_ok && !ordinary
+        })
+    })
+}
+
+/// `reply` minus the sentences `promised` flags (#73). A sentence ends at a whitespace-delimited word whose trailing
+/// non-alphanumeric characters include `.`, `!`, `?` or a newline (so `$12.00` and `notes/2026.10.md` stay whole and
+/// `idea.**`, `it."`, `idea.😺` end their sentence), and at `…`, `。`, `！`, `？` anywhere. Separators stay; empty when
+/// nothing readable is left.
+pub fn without_promises(reply: &str) -> String {
+    let hard = |c: char| matches!(c, '\u{2026}' | '\u{3002}' | '\u{ff01}' | '\u{ff1f}');
+    let (mut kept, mut sentence) = (String::new(), String::new());
+    for word in reply.split_inclusive(|c: char| c.is_whitespace() || hard(c)) {
+        sentence.push_str(word);
+        let core = word.trim_end_matches(|c: char| !c.is_alphanumeric());
+        if word[core.len()..].chars().any(|c| matches!(c, '.' | '!' | '?' | '\n') || hard(c)) {
+            if !promised(&sentence) { kept.push_str(&sentence); }
+            sentence.clear();
+        }
+    }
+    if !promised(&sentence) { kept.push_str(&sentence); }
+    if kept.chars().any(char::is_alphanumeric) { kept.trim().to_string() } else { String::new() }
 }
 
 /// Prefixes the last few turns of the DM (#67) so a follow-up reads in context. No turns: `user` unchanged.

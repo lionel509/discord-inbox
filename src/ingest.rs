@@ -142,8 +142,7 @@ fn local_date(received: &str) -> String {
 
 async fn chat_decision(filer: &Filer, msg: &Incoming, turns: &[(String, String)]) -> Result<Decision, String> {
     let system = vaults::system_prompt();
-    let ocr: Vec<String> = msg.ocr.iter().map(|(_, t)| sensitive(t)).collect();
-    let user = vaults::with_window(turns, &vaults::user_prompt(&sensitive(&msg.content), &ocr));
+    let user = prompt_text(msg, turns, vaults::PROMPT_CHARS);
     let chat = filer.chat.clone();
     let text = tokio::task::spawn_blocking(move || chat.ask(&system, &user))
         .await
@@ -248,6 +247,13 @@ fn message_text(typed: &str, attachments: &[(String, Option<Vec<u8>>)]) -> Strin
         }
     }
     parts.join("\n\n")
+}
+
+/// What the model reads for a DM: the redacted text, then each redacted OCR block, behind the window (#67, #73). Filing caps it at
+/// `PROMPT_CHARS`, a question at `LOOKUP_CHARS` so a long pasted question keeps its tail (#75).
+fn prompt_text(msg: &Incoming, turns: &[(String, String)], limit: usize) -> String {
+    let ocr: Vec<String> = msg.ocr.iter().map(|(_, t)| sensitive(t)).collect();
+    vaults::with_window(turns, &vaults::user_prompt_within(&sensitive(&msg.content), &ocr, limit))
 }
 
 /// The text a DM carries for the window: what he typed, then each attachment by name only (never its OCR text) (#67).
@@ -477,10 +483,12 @@ pub async fn ingest_with<M: Inbound>(
         Ok(d) => {
             *filer.last_notice.lock().unwrap_or_else(|p| p.into_inner()) = None;
             let verdict = crate::insight::compose(&incoming).await;
-            if d.answer || incoming.content.trim_end().ends_with('?') {
+            // A reply that promises a lookup, on a message that filed nothing, is a question too: the bot cannot come back later (#73).
+            let promised = d.target.is_none() && vaults::promised(&d.reply);
+            if d.answer || vaults::is_question(&incoming.content) || promised {
                 // A question: the agent searches and reads the notes itself (#49), file nothing, keep the Inbox note.
                 let lookup = crate::tools::Lookup::new(filer.vaults.root().to_path_buf(), inbox.to_path_buf());
-                let question = vaults::with_window(&turns, &sensitive(&incoming.content));
+                let question = prompt_text(&incoming, &turns, vaults::LOOKUP_CHARS);
                 let chat = filer.chat.clone();
                 let looked = typing_while(m, tokio::task::spawn_blocking(move || crate::agent::answer(chat.as_ref(), &lookup, &question)))
                     .await
@@ -500,7 +508,10 @@ pub async fn ingest_with<M: Inbound>(
                     }
                     Err(e) => {
                         eprintln!("discord-inbox: lookup for {id} failed: {e}");
-                        format!("{}\n\n(I couldn't peek at your notes just now, sorry!)", d.reply)
+                        let kept = vaults::without_promises(&d.reply);
+                        let filed_in = d.target.map(|t| format!("Filed it in {}.", t.folder));
+                        let said = if kept.is_empty() && filed_in.is_some() { filed_in.as_deref().unwrap() } else if kept.is_empty() { "I tried to look that up for you and couldn't get to your notes 😿" } else { kept.as_str() };
+                        format!("{said}\n\n(I couldn't peek at your notes just now, sorry!)")
                     }
                 };
                 let text = reply_text(&body, verdict.as_deref());
