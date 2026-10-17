@@ -508,7 +508,7 @@ pub async fn ingest_with<M: Inbound>(
                     }
                     Err(e) => {
                         eprintln!("discord-inbox: lookup for {id} failed: {e}");
-                        let said = if promised { "I tried to look that up for you and couldn't get to your notes 😿" } else { d.reply.as_str() };
+                        let said = if vaults::promised(&d.reply) { "I tried to look that up for you and couldn't get to your notes 😿" } else { d.reply.as_str() };
                         format!("{said}\n\n(I couldn't peek at your notes just now, sorry!)")
                     }
                 };
