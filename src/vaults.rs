@@ -264,33 +264,23 @@ pub fn promised(reply: &str) -> bool {
     })
 }
 
-/// `reply` minus the sentences `promised` flags (#73). Separators stay; empty when nothing readable is left.
+/// `reply` minus the sentences `promised` flags (#73). A sentence ends at a whitespace-delimited word whose trailing
+/// non-alphanumeric characters include `.`, `!`, `?` or a newline (so `$12.00` and `notes/2026.10.md` stay whole and
+/// `idea.**`, `it."`, `idea.😺` end their sentence), and at `…`, `。`, `！`, `？` anywhere. Separators stay; empty when
+/// nothing readable is left.
 pub fn without_promises(reply: &str) -> String {
-    let mut parts: Vec<&str> = Vec::new();
-    let (mut start, mut chars) = (0, reply.char_indices().peekable());
-    while let Some((i, c)) = chars.next() {
-        let mut end = i + c.len_utf8();
-        let hit = match c {
-            '\u{2026}' | '\u{3002}' | '\u{ff01}' | '\u{ff1f}' | '\n' => true,
-            '.' | '!' | '?' => {
-                // Closing markup (`**`, quotes, emoji) stays with the sentence; a letter or digit right after means no boundary.
-                while let Some(&(j, n)) = chars.peek() {
-                    if n.is_alphanumeric() || n.is_whitespace() { break; }
-                    chars.next();
-                    end = j + n.len_utf8();
-                }
-                chars.peek().map_or(true, |&(_, n)| n.is_whitespace())
-            }
-            _ => false,
-        };
-        if hit {
-            parts.push(&reply[start..end]);
-            start = end;
+    let hard = |c: char| matches!(c, '\u{2026}' | '\u{3002}' | '\u{ff01}' | '\u{ff1f}');
+    let (mut kept, mut sentence) = (String::new(), String::new());
+    for word in reply.split_inclusive(|c: char| c.is_whitespace() || hard(c)) {
+        sentence.push_str(word);
+        let core = word.trim_end_matches(|c: char| !c.is_alphanumeric());
+        if word[core.len()..].chars().any(|c| matches!(c, '.' | '!' | '?' | '\n') || hard(c)) {
+            if !promised(&sentence) { kept.push_str(&sentence); }
+            sentence.clear();
         }
     }
-    parts.push(&reply[start..]);
-    let kept: String = parts.into_iter().filter(|p| !promised(p)).collect();
-    if kept.chars().any(|c| c.is_alphanumeric()) { kept.trim().to_string() } else { String::new() }
+    if !promised(&sentence) { kept.push_str(&sentence); }
+    if kept.chars().any(char::is_alphanumeric) { kept.trim().to_string() } else { String::new() }
 }
 
 /// Prefixes the last few turns of the DM (#67) so a follow-up reads in context. No turns: `user` unchanged.
