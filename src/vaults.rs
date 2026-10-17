@@ -171,7 +171,7 @@ pub fn system_prompt() -> String {
         "You file one message from the owner into his vault and reply to it.\n\
          Pick the folder whose key fits best. Keys:\n",
     );
-    s.push_str("Answer — the message asks a question or wants something looked up, with or without a question mark (\"whats on my costco list\", \"where did I put my passport\", \"how much does William owe me\"): answer it, file nothing; a request for ideas or advice from his notes is also Answer (\"with the ingredients in my pantry what can i make with cod\", \"which one should i get\"): answer it, file nothing\n");
+    s.push_str("Answer — the message asks a question or wants something looked up, with or without a question mark (\"whats on my costco list\", \"where did I put my passport\", \"how much does Oriana owe me\"): answer it, file nothing; a request for ideas or advice from his notes is also Answer (\"with the ingredients in my pantry what can i make with cod\", \"which one should i get\"): answer it, file nothing\n");
     s.push_str("Chat — a short conversational follow-up, aside or thanks that adds nothing worth keeping on its own (\"it comes with the bottle tho\", \"lol ok\", \"thanks\"): reply like a friend, file nothing\n");
     for t in TARGETS.iter() {
         s.push_str(&format!("{} — {}\n", t.key, t.hint));
@@ -219,8 +219,8 @@ pub fn answer_prompt(question: &str, notes: &[(String, String)]) -> (String, Str
          Paths look like \"Fidelity/Pantry/Pantry.md\". The vaults are: BlackRock (school), State Street (money; the IOU ledger is \"{LEDGER}\", the shopping list is \"{shopping}\"), \
          Berkshire (business), Goldman (career), Fidelity (kitchen: what is in the fridge is \"{PANTRY}\" with a Bought date and Days per row; staples are \"{staple_a}\" and \"{staple_b}\"), Citadel (projects), Mirae (languages), Bridgewater (audits), Inbox (recent messages), ! Todo (tasks). \
          Start with a search or a hub note like \"<Vault>/Home.md\", use at most a few lookups, then answer. \
-         Names in the question may be misspelled (\"willam\" = William). \
-         List the items you find. If the notes do not hold the answer, say so in one sentence. \
+         Names in the question may be misspelled (\"orianna\" = Oriana). \
+         List the items you find. If the notes do not hold the answer, say so in one sentence, and say what you searched: never that a note is missing unless read_note or list_folder showed it missing. \
          1 to 6 sentences, in the user's language. Never include card numbers. For a recipe or \"what can I make\" question: read \"{PANTRY}\" first and prefer its oldest rows, then the staples notes; cook for one; never alcohol (no wine, mirin, sake, Shaoxing) and nothing caffeinated. The message may begin with \"Earlier in this chat\"; that is context only: answer the part after \"Now he says:\" alone. The message may carry \"Attached text:\" blocks: words read off a screenshot he sent (a product page, a label, a receipt); treat them as part of the question."
     );
     let mut user = question.to_string();

@@ -423,7 +423,7 @@ fn prompts_name_attached_text_and_the_no_promise_rule() {
     assert!(system.contains("Attached text:"), "{system}");
     let filing = vaults::system_prompt();
     assert!(filing.contains("never promise to check"), "{filing}");
-    assert!(filing.contains("how much does William owe me"), "{filing}");
+    assert!(filing.contains("how much does Oriana owe me"), "{filing}");
 }
 
 /// A question ends in "?" even with a trailing "!", emoji or spaces; plain text does not (#73).
@@ -432,7 +432,7 @@ fn is_question_sees_through_trailing_punctuation() {
     for q in ["ok?", "ok? ", "really?!", "ok?? 😺"] {
         assert!(vaults::is_question(q), "{q}");
     }
-    for s in ["", "what 😺", "how much does willam owe me"] {
+    for s in ["", "what 😺", "how much does orianna owe me"] {
         assert!(!vaults::is_question(s), "{s}");
     }
 }
@@ -443,7 +443,7 @@ fn promised_matches_lookup_promises_only() {
     for r in ["Let me dig through your notes… give me a sec", "I’ll check the ledger", "One sec, lemme look"] {
         assert!(vaults::promised(r), "{r}");
     }
-    for r in ["William owes you $12.00.", "Nice, the Fresh is the better pick 🐾", "Noted."] {
+    for r in ["Oriana owes you $12.00.", "Nice, the Fresh is the better pick 🐾", "Noted."] {
         assert!(!vaults::promised(r), "{r}");
     }
 }

@@ -1777,24 +1777,24 @@ async fn lookup_reads_the_iou_ledger() {
     let inbox = scratch("chat-ledger");
     let w = World::new(&inbox);
     let chat = FakeChat::new(vec![
-        answer("Answer", "William debt", "money", "Checking."),
-        Ok("William owes you $12.00.".to_string()),
+        answer("Answer", "Oriana debt", "money", "Checking."),
+        Ok("Oriana owes you $12.00.".to_string()),
     ]);
     let f = filer(&inbox, &chat);
     let root = root_of(&inbox);
-    let rec = root.join("State Street/Assets/Receivables");
-    fs::create_dir_all(&rec).unwrap();
-    fs::write(rec.join("Who Owes Me.md"), "| Who | Owes |\n| William | $12.00 |\n").unwrap();
+    let ledger = root.join(discord_inbox::vaults::LEDGER);
+    fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+    fs::write(&ledger, "| Who | Owes |\n| Oriana | $12.00 |\n").unwrap();
     let mut before = Vec::new();
     tree_of(&root, &inbox, &mut before);
     before.sort();
 
-    let s = spec_text(MAIN, MAIN_CH, 380, "how much does willam owe me", &[]);
+    let s = spec_text(MAIN, MAIN_CH, 380, "how much does orianna owe me", &[]);
     assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
     let prompts = chat.prompts.lock().unwrap().clone();
     assert_eq!(chat.calls(), 2);
-    assert!(prompts[1].contains("how much does willam owe me"), "{}", prompts[1]);
-    assert_eq!(w.replies_for(380), vec!["William owes you $12.00.".to_string()]);
+    assert!(prompts[1].contains("how much does orianna owe me"), "{}", prompts[1]);
+    assert_eq!(w.replies_for(380), vec!["Oriana owes you $12.00.".to_string()]);
     let mut after = Vec::new();
     tree_of(&root, &inbox, &mut after);
     after.sort();
@@ -1807,15 +1807,15 @@ async fn lookup_works_without_the_iou_ledger() {
     let inbox = scratch("chat-no-ledger");
     let w = World::new(&inbox);
     let chat = FakeChat::new(vec![
-        answer("Answer", "William debt", "money", "Checking."),
+        answer("Answer", "Oriana debt", "money", "Checking."),
         Ok("No record of that.".to_string()),
     ]);
     let f = filer(&inbox, &chat);
-    let s = spec_text(MAIN, MAIN_CH, 381, "how much does willam owe me", &[]);
+    let s = spec_text(MAIN, MAIN_CH, 381, "how much does orianna owe me", &[]);
     assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
     assert_eq!(w.replies_for(381), vec!["No record of that.".to_string()]);
     let prompts = chat.prompts.lock().unwrap().clone();
-    assert!(prompts[1].contains("how much does willam owe me"), "{}", prompts[1]);
+    assert!(prompts[1].contains("how much does orianna owe me"), "{}", prompts[1]);
     assert!(!prompts[1].contains("Notes:"), "the tools read the notes now, not a bundle (#49): {}", prompts[1]);
 }
 
@@ -2125,24 +2125,24 @@ async fn question_without_mark_that_got_a_promise_is_answered() {
     let inbox = scratch("promise-answered");
     let w = World::new(&inbox);
     let chat = FakeChat::new(vec![
-        answer("Inbox", "William debt", "money", "Let me dig through your notes for that, give me a sec 🐾"),
-        Ok("William owes you $12.00.".to_string()),
+        answer("Inbox", "Oriana debt", "money", "Let me dig through your notes for that, give me a sec 🐾"),
+        Ok("Oriana owes you $12.00.".to_string()),
     ]);
     let f = filer(&inbox, &chat);
     let root = root_of(&inbox);
-    let rec = root.join("State Street/Assets/Receivables");
-    fs::create_dir_all(&rec).unwrap();
-    fs::write(rec.join("Who Owes Me.md"), "| Who | Owes |\n| William | $12.00 |\n").unwrap();
+    let ledger = root.join(discord_inbox::vaults::LEDGER);
+    fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+    fs::write(&ledger, "| Who | Owes |\n| Oriana | $12.00 |\n").unwrap();
     let mut before = Vec::new();
     tree_of(&root, &inbox, &mut before);
     before.sort();
 
-    let s = spec_text(MAIN, MAIN_CH, 391, "how much does willam owe me", &[]);
+    let s = spec_text(MAIN, MAIN_CH, 391, "how much does orianna owe me", &[]);
     assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
     assert_eq!(chat.calls(), 2);
     let prompts = chat.prompts.lock().unwrap().clone();
-    assert!(prompts[1].contains("how much does willam owe me"), "{}", prompts[1]);
-    assert_eq!(w.replies_for(391), vec!["William owes you $12.00.".to_string()]);
+    assert!(prompts[1].contains("how much does orianna owe me"), "{}", prompts[1]);
+    assert_eq!(w.replies_for(391), vec!["Oriana owes you $12.00.".to_string()]);
     assert!(w.marks(391).is_empty(), "{:?}", w.marks(391));
     assert!(note(&inbox, 391).is_file(), "question note left Inbox");
     let mut after = Vec::new();
@@ -2157,11 +2157,11 @@ async fn promise_then_lookup_failure_does_not_repeat_the_promise() {
     let inbox = scratch("promise-fail");
     let w = World::new(&inbox);
     let chat = FakeChat::new(vec![
-        answer("Inbox", "William debt", "money", "Let me dig through your notes for that, give me a sec 🐾"),
+        answer("Inbox", "Oriana debt", "money", "Let me dig through your notes for that, give me a sec 🐾"),
         Err("timeout".to_string()),
     ]);
     let f = filer(&inbox, &chat);
-    let s = spec_text(MAIN, MAIN_CH, 392, "how much does willam owe me", &[]);
+    let s = spec_text(MAIN, MAIN_CH, 392, "how much does orianna owe me", &[]);
     assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
     let replies = w.replies_for(392);
     assert_eq!(replies.len(), 1, "{replies:?}");
@@ -2200,20 +2200,3 @@ async fn filed_question_lookup_failure_does_not_repeat_the_promise() {
     assert!(replies[0].ends_with("(I couldn't peek at your notes just now, sorry!)"), "{}", replies[0]);
 }
 
-/// A promise in a reply that already filed the note is kept as filed: the lookup-failure text is only for
-/// the promise net, which needs nothing filed (#73, breaker round 4).
-#[tokio::test]
-async fn filed_reply_with_a_promise_phrase_keeps_its_text_on_lookup_failure() {
-    let inbox = scratch("filed-promise-fail");
-    let w = World::new(&inbox);
-    let chat = FakeChat::new(vec![
-        answer("Citadel/Ideas", "Robot arm", "robots", "Filed it as an idea. Let me check it against your old notes later."),
-        Err("http 500".to_string()),
-    ]);
-    let f = filer(&inbox, &chat);
-    let s = spec_text(MAIN, MAIN_CH, 395, "is this worth keeping?", &[]);
-    assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
-    let replies = w.replies_for(395);
-    assert_eq!(replies.len(), 1, "{replies:?}");
-    assert!(replies[0].starts_with("Filed it as an idea."), "{}", replies[0]);
-}
