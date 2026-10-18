@@ -163,7 +163,8 @@ pub fn request_body(system: &str, user: &str) -> serde_json::Value {
             {"role": "user", "content": crate::redact::sensitive(user)},
         ],
         "provider": {"zdr": true},
-        "max_tokens": 500,
+        "max_tokens": 4000,
+        "reasoning": {"effort": "low"},
         "temperature": 0.3,
     })
 }
@@ -189,7 +190,8 @@ pub fn tools_body(
         "model": MODEL,
         "messages": msgs,
         "provider": {"zdr": true},
-        "max_tokens": 500,
+        "max_tokens": 4000,
+        "reasoning": {"effort": "low"},
         "temperature": 0.3,
     });
     if !tools.is_empty() {
