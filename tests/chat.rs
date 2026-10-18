@@ -58,10 +58,20 @@ fn from_key_file_missing_empty_and_trimmed() {
 fn request_body_pins_model_and_zdr() {
     let body = chat::request_body("system text", "user text");
     assert_eq!(body["provider"]["zdr"], serde_json::Value::Bool(true), "{body}");
-    assert_eq!(body["model"], "xiaomi/mimo-v2.6-flash", "{body}");
-    assert_eq!(body["max_tokens"], 500, "{body}");
+    assert_eq!(body["model"], "xiaomi/mimo-v2.6-pro", "{body}");
+    assert_eq!(body["max_tokens"], 4000, "{body}");
+    assert_eq!(body["reasoning"]["effort"], "low", "{body}");
     assert_eq!(body["messages"][0]["role"], "system", "{body}");
     assert_eq!(body["messages"][1]["content"], "user text", "{body}");
+}
+
+/// Pro reasons before it answers; at 500 tokens the reply came back null with finish_reason length (#90).
+#[test]
+fn tools_body_pins_pro_budget_and_low_reasoning() {
+    let msgs = vec![json!({"role": "user", "content": "hi"})];
+    let b = chat::tools_body(&msgs, &[], false);
+    assert_eq!(b["max_tokens"], 4000, "{b}");
+    assert_eq!(b["reasoning"]["effort"], "low", "{b}");
 }
 
 // ---- #49: function calling on the same transport ----
