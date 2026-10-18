@@ -4,6 +4,7 @@ pub mod chat;
 pub mod dump;
 pub mod ingest;
 pub mod insight;
+pub mod task;
 pub mod tools;
 pub mod vaults;
 pub mod when;
