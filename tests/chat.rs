@@ -58,7 +58,7 @@ fn from_key_file_missing_empty_and_trimmed() {
 fn request_body_pins_model_and_zdr() {
     let body = chat::request_body("system text", "user text");
     assert_eq!(body["provider"]["zdr"], serde_json::Value::Bool(true), "{body}");
-    assert_eq!(body["model"], "xiaomi/mimo-v2.6-flash", "{body}");
+    assert_eq!(body["model"], "xiaomi/mimo-v2.6-pro", "{body}");
     assert_eq!(body["max_tokens"], 500, "{body}");
     assert_eq!(body["messages"][0]["role"], "system", "{body}");
     assert_eq!(body["messages"][1]["content"], "user text", "{body}");
