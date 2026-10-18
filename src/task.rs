@@ -113,6 +113,11 @@ pub fn settings_json(root: &Path, inbox: &Path) -> String {
         deny.push(format!("Read({}/**)", rule(g)));
         deny.push(format!("Edit({}/**)", rule(g)));
     }
+    // Nested repos (and worktree/submodule `.git` pointer files) at any depth are fenced the same way.
+    let nested = format!("{}/**/.git", rule(root));
+    deny.push(format!("Read({nested}/**)"));
+    deny.push(format!("Edit({nested}/**)"));
+    deny.push(format!("Edit({nested})"));
     for cmd in ["rm", "git", "curl", "wget", "pip", "pip3", "uv", "brew", "npm", "sudo", "ssh", "open"] {
         deny.push(format!("Bash({cmd} *)"));
     }

@@ -180,3 +180,28 @@ async fn attachment_never_spawns_the_helper() {
     assert!(!out.join("ran").exists(), "a DM with an attachment stays on the filing path");
     assert!(!replies.iter().any(|r| r.contains("Booked it")), "{replies:?}");
 }
+
+struct TaskLabel;
+impl Chat for TaskLabel {
+    fn ask(&self, _system: &str, _user: &str) -> Result<String, String> {
+        Ok("FOLDER: Task\nTITLE: x\nTAGS: a\nREPLY:\nok".to_string())
+    }
+}
+
+#[tokio::test]
+async fn model_task_label_routes_to_the_helper() {
+    let _g = ENV.lock().unwrap_or_else(|p| p.into_inner());
+    let (inbox, root, out) = setup("label");
+    set_env(&fake(&out), None);
+    let f = filer(&root, Arc::new(TaskLabel));
+    let (o, replies) = say(&inbox, &f, 7, "yes the roll was 100 total", &[]).await;
+    assert!(matches!(o, Outcome::Saved), "{o:?}");
+    assert_eq!(replies, vec!["Booked it 🐾".to_string()]);
+    assert!(fs::read_to_string(out.join("stdin")).unwrap().contains("the roll was 100"));
+
+    let (_i2, _r2, out2) = setup("label-off");
+    set_env(&fake(&out2), Some("off"));
+    let _ = say(&inbox, &f, 8, "yes the roll was 100 total", &[]).await;
+    clear_env();
+    assert!(!out2.join("ran").exists(), "tasks off must not spawn the helper");
+}

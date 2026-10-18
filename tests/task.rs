@@ -358,3 +358,14 @@ fn commit_ignores_vault_hooks() {
         assert!(!m.exists(), "vault hook ran: {}", m.display());
     }
 }
+
+#[test]
+fn nested_repo_git_dirs_are_fenced() {
+    let _g = lock();
+    let r = root("nested");
+    let deny = strings(&settings(&r)["permissions"]["deny"]);
+    let base = format!("//{}/**/.git", rule_path(&r));
+    for want in [format!("Read({base}/**)"), format!("Edit({base}/**)"), format!("Edit({base})")] {
+        assert!(deny.contains(&want), "missing {want} in {deny:?}");
+    }
+}
