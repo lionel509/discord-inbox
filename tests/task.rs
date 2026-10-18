@@ -91,7 +91,7 @@ fn settings_denies_every_foreign_dir() {
     assert_eq!(read_list.len(), FOREIGN.len(), "sandbox read list holds exactly the foreign dirs");
     // Every vault's .git is fenced too: Read and Edit deny rules, and the sandbox write list (#85 review).
     assert_eq!(write_list.len(), FOREIGN.len() + ROOTS.len(), "sandbox write list: foreign dirs plus every .git");
-    assert_eq!(deny.iter().filter(|d| d.starts_with("Read(")).count(), FOREIGN.len() + ROOTS.len());
+    assert_eq!(deny.iter().filter(|d| d.starts_with("Read(")).count(), FOREIGN.len() + ROOTS.len() + 1);
     for name in ROOTS {
         let g = r.join(name).join(".git");
         let gs = g.to_string_lossy().to_string();
