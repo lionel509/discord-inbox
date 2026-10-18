@@ -25,7 +25,7 @@ Env overrides: `DISCORD_INBOX_ALLOWED_IDS_FILE`, `DISCORD_INBOX_DIR`, `DISCORD_I
 
 ## Chat replies and filing
 
-Each text DM is sent to `xiaomi/mimo-v2.6-flash` on OpenRouter (zero data retention on, 30 s timeout). The key is read from `~/.config/discord-inbox/openrouter_key` (override: `DISCORD_INBOX_OPENROUTER_KEY_FILE`); with no key the bot starts anyway and chat replies are off. Vault root: `$DISCORD_INBOX_VAULTS_DIR`, default `~/Documents`.
+Each text DM is sent to `xiaomi/mimo-v2.6-pro` on OpenRouter (zero data retention on, 30 s timeout). The key is read from `~/.config/discord-inbox/openrouter_key` (override: `DISCORD_INBOX_OPENROUTER_KEY_FILE`); with no key the bot starts anyway and chat replies are off. Vault root: `$DISCORD_INBOX_VAULTS_DIR`, default `~/Documents`.
 
 The model picks one folder from a fixed table, matched exactly; its text never becomes part of a path, and a folder that does not exist is never created. Anything else stays in Inbox.
 

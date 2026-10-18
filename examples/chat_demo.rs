@@ -3,7 +3,7 @@
 //! The second section runs the #73 question cases: a screenshot with a question (the OCR text the
 //! model sees is printed, redacted), a question with no "?" that gets a lookup promise (the promise
 //! is never sent; the answer is), and the same DM when the lookup fails (the promise is not repeated).
-//! `--live` reruns the first section through MiMo Flash (at most 3 real calls) when the key file exists.
+//! `--live` reruns the first section through MiMo Pro (at most 3 real calls) when the key file exists.
 //!
 //! The screenshot case reads text with the Apple Vision helper that build.rs compiles (macOS only).
 //!
@@ -188,7 +188,7 @@ async fn main() -> ExitCode {
     let mut pass = run("scripted chat", scripted(script, false), &filing, None).await;
     if std::env::args().any(|a| a == "--live") {
         match OpenRouter::from_key_file(&chat::key_path()) {
-            Some(c) => pass &= run("live MiMo Flash", Arc::new(c), &filing, None).await,
+            Some(c) => pass &= run("live MiMo Pro", Arc::new(c), &filing, None).await,
             None => println!("no key, live skipped"),
         }
     }

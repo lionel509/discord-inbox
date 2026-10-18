@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub const MODEL: &str = "xiaomi/mimo-v2.6-flash";
+pub const MODEL: &str = "xiaomi/mimo-v2.6-pro";
 pub const TIMEOUT: Duration = Duration::from_secs(30);
 const URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 
