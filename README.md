@@ -56,6 +56,10 @@ Demo: `cargo run --release --example chat_demo [-- --live]` (temp folders only).
 
 Say `restock` to Stormy after a grocery trip and the food lines land in `Fidelity/Pantry/On Hand.md`. `restock 2026-10-02` picks another day, and `restock all` allows a solo Costco receipt with no split. The source is the split note for that day (only the rows whose Who names Lionel), otherwise the receipts filed that day; a Costco receipt with no split note is refused unless `all` is given. Items are matched against a fixed list of food words, so anything else never enters the note. `out of cod` drops a row, and recipe questions read `On Hand.md` first. The bot rewrites `On Hand.md` whole, so prose outside its table is not kept; hand-added table rows survive.
 
+## Small tasks
+
+A text DM that reads like money (a bank text such as "X sent you $N", or "I'm sending X back $N" with a number) and any DM the chat model files as `Task` goes to a headless `claude -p` run with `xiaomi/mimo-v2.6-flash` through the local router (`DISCORD_INBOX_TASK_MODEL` and `DISCORD_INBOX_ROUTER` override them; `DISCORD_INBOX_TASKS=off` turns the path off). The run's working folder is the vault root, so the umbrella and vault CLAUDE.md files apply. It may read and edit the editable vaults, and it may run only `ledger.py` pinned to `State Street` under the root. Every other top-level folder is denied to Read, Edit and the OS sandbox; there is no network, no git, no rm. The bot commits only what that run changed, one commit per vault, and the reply names each commit's short SHA (`📝 State Street @ abc1234: …`) so an undo is one `git revert`. Messages with attachments stay on the filing path. The demo is `sh examples/task_demo.sh "<message>"`, which runs on a scratch copy of the finance vault only.
+
 ## Privacy
 
 One function, `redact::sensitive`, runs on every text that is written to disk, sent to a model, or sent back to Discord. It masks, in code and with no model:

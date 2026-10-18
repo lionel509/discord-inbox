@@ -72,6 +72,8 @@ pub struct Decision {
     pub reply: String,
     pub answer: bool,
     pub running: Option<&'static Running>,
+    /// Stormy's small-task path (#84): the helper does it in the vaults and files nothing here.
+    pub task: bool,
 }
 
 impl Vaults {
@@ -173,6 +175,7 @@ pub fn system_prompt() -> String {
     );
     s.push_str("Answer — the message asks a question or wants something looked up, with or without a question mark (\"whats on my costco list\", \"where did I put my passport\", \"how much does Jordan owe me\"): answer it, file nothing; a request for ideas or advice from his notes is also Answer (\"with the ingredients in my pantry what can i make with cod\", \"which one should i get\"): answer it, file nothing\n");
     s.push_str("Chat — a short conversational follow-up, aside or thanks that adds nothing worth keeping on its own (\"it comes with the bottle tho\", \"lol ok\", \"thanks\"): reply like a friend, file nothing\n");
+    s.push_str("Task — the message asks Stormy to do something in his notes: book or log money (\"Kevin sent you $25\", a Zelle or Venmo text, \"I'm sending Paco back 50\"), record that something is done, add a line to a note, or answers a question Stormy asked while doing such a task: do it, file nothing\n");
     for t in TARGETS.iter() {
         s.push_str(&format!("{} — {}\n", t.key, t.hint));
     }
@@ -304,6 +307,7 @@ fn norm(s: &str) -> String {
 pub fn parse_decision(vaults: &Vaults, text: &str) -> Decision {
     let mut target = None;
     let mut answer = false;
+    let mut task = false;
     let mut running = None;
     let mut seen_folder = false;
     let mut title = String::new();
@@ -331,6 +335,8 @@ pub fn parse_decision(vaults: &Vaults, text: &str) -> Decision {
                     seen_folder = true;
                     if norm(rest) == "answer" {
                         answer = true;
+                    } else if norm(rest) == "task" {
+                        task = true;
                     } else if norm(rest) == "chat" {
                         // A follow-up that files nothing (#67): target, running and answer stay unset.
                     } else if let Some(r) = vaults.running(rest) {
@@ -361,7 +367,7 @@ pub fn parse_decision(vaults: &Vaults, text: &str) -> Decision {
     };
     let reply = reply.trim().to_string();
     let reply = if reply.is_empty() { "Noted.".to_string() } else { reply };
-    Decision { target, title, tags, reply, answer, running }
+    Decision { target, title, tags, reply, answer, running, task }
 }
 
 /// Letters, digits, space, `-` and `_` only; runs of spaces collapsed; at most

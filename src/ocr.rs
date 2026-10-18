@@ -1,5 +1,6 @@
 //! Local OCR of image attachments: Apple Vision through the helper build.rs compiles from src/vision.swift. The text goes only into the note: never a log line, never a file of its own.
 use std::io::{Read, Write};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
@@ -36,13 +37,22 @@ pub fn run(cmd: &Path, image: &[u8], timeout: Duration) -> Option<String> {
 
 /// `run` with arguments, for any bounded helper that reads its input on stdin (the local model in insight.rs).
 pub fn run_args(cmd: &Path, args: &[String], image: &[u8], timeout: Duration) -> Option<String> {
-    let mut child = Command::new(cmd)
+    run_in(cmd, args, image, timeout, None)
+}
+
+/// `run_args` in `cwd` when given. The helper leads its own process group, so a timeout kills the grandchildren it started too (#84).
+pub fn run_in(cmd: &Path, args: &[String], image: &[u8], timeout: Duration, cwd: Option<&Path>) -> Option<String> {
+    let mut command = Command::new(cmd);
+    command
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+        .process_group(0);
+    if let Some(dir) = cwd {
+        command.current_dir(dir);
+    }
+    let mut child = command.spawn().ok()?;
     let (Some(mut input), Some(mut output)) = (child.stdin.take(), child.stdout.take()) else {
         kill(&mut child);
         return None;
@@ -91,8 +101,19 @@ pub fn run_args(cmd: &Path, args: &[String], image: &[u8], timeout: Duration) ->
 }
 
 fn kill(child: &mut Child) {
+    // Negative pid: the whole process group the helper leads (see run_in), then the helper itself.
+    #[cfg(unix)]
+    unsafe {
+        kill_group(-(child.id() as i32), 9);
+    }
     let _ = child.kill();
     let _ = child.wait();
+}
+
+#[cfg(unix)]
+extern "C" {
+    #[link_name = "kill"]
+    fn kill_group(pid: i32, sig: i32) -> i32;
 }
 
 /// OCR text for each image attachment, as `(attachment index, text)`. Runs the helper on a blocking thread

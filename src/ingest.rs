@@ -3,6 +3,7 @@ use crate::allowlist::Allowlist;
 use crate::dump::{self, Incoming};
 use crate::chat::{Chat, NoChat};
 use crate::redact::sensitive;
+use crate::task;
 use crate::vaults::{self, Decision, Vaults};
 use std::collections::{BTreeMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -148,6 +149,45 @@ async fn chat_decision(filer: &Filer, msg: &Incoming, turns: &[(String, String)]
         .await
         .map_err(|e| e.to_string())??;
     Ok(vaults::parse_decision(&filer.vaults, &text))
+}
+
+/// Stormy's small-task path (#84): the helper works in the vaults, the bot commits what changed and names the SHA in the reply.
+async fn task_reply<M: Inbound>(filer: &Filer, inbox: &Path, m: &M, incoming: &Incoming, turns: &[(String, String)]) -> Outcome {
+    let id = m.msg_id();
+    let prompt = prompt_text(incoming, turns, vaults::LOOKUP_CHARS);
+    let title: String = sensitive(&incoming.content).lines().next().unwrap_or("").chars().take(60).collect();
+    let root = filer.vaults.root().to_path_buf();
+    let inbox = inbox.to_path_buf();
+    let work = tokio::task::spawn_blocking(move || {
+        let before = task::snapshot(&root);
+        let said = task::run(&root, &inbox, &prompt, task::TIMEOUT);
+        let commits = task::commit_changes(&root, &before, &format!("stormy: {title}"));
+        (said, commits)
+    });
+    let (said, commits): (Option<String>, Vec<(String, String, Vec<String>)>) = match typing_while(m, work).await {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("discord-inbox: task for {id} failed: {e}");
+            (None, Vec::new())
+        }
+    };
+    let mut body = said.clone().unwrap_or_else(|| "I couldn't finish that one 😿 Nothing came back from my helper.".to_string());
+    for (vault, sha, paths) in &commits {
+        body.push_str(&format!("\n📝 {vault} @ {sha}: {}", paths.join(", ")));
+    }
+    let text = reply_text(&body, None);
+    match m.reply(&text).await {
+        Ok(()) => {
+            clear(m).await;
+            filer.window.push(m.channel_id(), &incoming.received, &turn_text(incoming), &text);
+        }
+        Err(e) => {
+            eprintln!("discord-inbox: reply on {id} failed: {e}");
+            mark(m, SAVED_MARK).await;
+        }
+    }
+    eprintln!("discord-inbox: task for {id}: {}, {} commits", if said.is_some() { "replied" } else { "no reply" }, commits.len());
+    Outcome::Saved
 }
 
 /// Appends a list message to its running note. `None` (no running note, attachments, or a failed append) means the caller files it as today.
@@ -428,6 +468,11 @@ pub async fn ingest_with<M: Inbound>(
         }
         return Outcome::Saved;
     }
+    // Aged against the incoming message's own stamp, so a replayed DM sees the turns around it.
+    let now = chrono::DateTime::parse_from_rfc3339(&incoming.received)
+        .map(|d| d.with_timezone(&chrono::Utc))
+        .unwrap_or_else(|_| chrono::Utc::now());
+    let turns = filer.window.recent_at(m.channel_id(), now);
     // Pantry commands (#50) are answered from the vault notes, before any model call.
     if incoming.attachments.is_empty() {
         if let Some(cmd) = crate::pantry::command(&incoming.content) {
@@ -451,11 +496,10 @@ pub async fn ingest_with<M: Inbound>(
             return Outcome::Saved;
         }
     }
-    // Aged against the incoming message's own stamp, so a replayed DM sees the turns around it.
-    let now = chrono::DateTime::parse_from_rfc3339(&incoming.received)
-        .map(|d| d.with_timezone(&chrono::Utc))
-        .unwrap_or_else(|_| chrono::Utc::now());
-    let turns = filer.window.recent_at(m.channel_id(), now);
+    // Money texts (#84) go to the small-task helper before the chat model is asked.
+    if incoming.attachments.is_empty() && task::enabled() && task::wanted(&incoming.content) {
+        return task_reply(filer, inbox, m, &incoming, &turns).await;
+    }
     match typing_while(m, chat_decision(filer, &incoming, &turns)).await {
         Err(e) => {
             eprintln!("discord-inbox: chat for {id} failed: {e}");
@@ -482,6 +526,10 @@ pub async fn ingest_with<M: Inbound>(
         }
         Ok(d) => {
             *filer.last_notice.lock().unwrap_or_else(|p| p.into_inner()) = None;
+            // The model filed this as a task (#84): the helper does it in the vaults, nothing is filed here.
+            if d.task && incoming.attachments.is_empty() && task::enabled() {
+                return task_reply(filer, inbox, m, &incoming, &turns).await;
+            }
             let verdict = crate::insight::compose(&incoming).await;
             // A reply that promises a lookup, on a message that filed nothing, is a question too: the bot cannot come back later (#73).
             let promised = d.target.is_none() && vaults::promised(&d.reply);
