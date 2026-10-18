@@ -2,7 +2,7 @@
 //! `claude -p` run in the vault root. Claude Code settings and the OS sandbox fence it; the prompt is not the fence.
 //! The bot, not the agent, commits what changed and reports the commit SHA, so every write has an undo handle.
 use crate::tools::ROOTS;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -107,10 +107,17 @@ pub fn settings_json(root: &Path, inbox: &Path) -> String {
     for d in &foreign {
         deny.push(format!("Edit({}/**)", rule(d)));
     }
+    // A vault's `.git` runs hooks and filters when git works in it, so the helper may not write or read it.
+    let git_dirs: Vec<PathBuf> = ROOTS.iter().map(|r| root.join(r).join(".git")).collect();
+    for g in &git_dirs {
+        deny.push(format!("Read({}/**)", rule(g)));
+        deny.push(format!("Edit({}/**)", rule(g)));
+    }
     for cmd in ["rm", "git", "curl", "wget", "pip", "pip3", "uv", "brew", "npm", "sudo", "ssh", "open"] {
         deny.push(format!("Bash({cmd} *)"));
     }
     let names: Vec<String> = foreign.iter().map(|d| d.to_string_lossy().to_string()).collect();
+    let write_names: Vec<String> = names.iter().cloned().chain(git_dirs.iter().map(|g| g.to_string_lossy().to_string())).collect();
     serde_json::json!({
         "disableAllHooks": true,
         "permissions": { "allow": allow, "deny": deny },
@@ -119,7 +126,7 @@ pub fn settings_json(root: &Path, inbox: &Path) -> String {
             "autoAllowBashIfSandboxed": false,
             "allowUnsandboxedCommands": false,
             "failIfUnavailable": true,
-            "filesystem": { "denyRead": names, "denyWrite": names },
+            "filesystem": { "denyRead": names, "denyWrite": write_names },
             "network": { "allowedDomains": [] }
         }
     })
@@ -156,8 +163,8 @@ pub fn run(root: &Path, inbox: &Path, prompt: &str, timeout: Duration) -> Option
     crate::ocr::run_in(Path::new("/usr/bin/env"), &args, prompt.as_bytes(), timeout, Some(root))
 }
 
-/// The changed paths of each editable vault that is a git repo, before or after the run.
-pub type Snapshot = BTreeMap<String, BTreeSet<String>>;
+/// The changed paths of each editable vault that is a git repo, each with a digest of what it holds now.
+pub type Snapshot = BTreeMap<String, BTreeMap<String, u64>>;
 
 pub fn snapshot(root: &Path) -> Snapshot {
     let mut out = Snapshot::new();
@@ -170,39 +177,61 @@ pub fn snapshot(root: &Path) -> Snapshot {
     out
 }
 
+/// A git call the bot makes in a vault. Hooks and fsmonitor are off, so no code in a vault's `.git` runs with Lionel's rights.
+fn git(dir: &Path) -> Command {
+    let mut c = Command::new("git");
+    c.current_dir(dir).args(["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]).stdin(Stdio::null()).stderr(Stdio::null());
+    c
+}
+
 /// Modified, deleted and untracked (not ignored) paths, NUL-separated so nothing is quoted or trimmed.
-fn changed(dir: &Path) -> BTreeSet<String> {
-    let out = Command::new("git")
-        .current_dir(dir)
-        .args(["ls-files", "-z", "--modified", "--deleted", "--others", "--exclude-standard"])
-        .stderr(Stdio::null())
-        .output();
+fn changed(dir: &Path) -> BTreeMap<String, u64> {
+    let out = git(dir).args(["ls-files", "-z", "--modified", "--deleted", "--others", "--exclude-standard"]).output();
     match out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).split('\0').filter(|p| !p.is_empty()).map(String::from).collect(),
-        _ => BTreeSet::new(),
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .split('\0')
+            .filter(|p| !p.is_empty())
+            .map(|p| (p.to_string(), digest(&dir.join(p))))
+            .collect(),
+        _ => BTreeMap::new(),
+    }
+}
+
+/// A hash of what a path holds, or 0 when it is gone. The same digest before and after means the run did not touch it,
+/// even if Lionel already had the file dirty.
+fn digest(p: &Path) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    match fs::read(p) {
+        Ok(bytes) => {
+            let mut h = DefaultHasher::new();
+            bytes.hash(&mut h);
+            h.finish().max(1)
+        }
+        Err(_) => 0,
     }
 }
 
 fn git_ok(dir: &Path, args: &[&str]) -> bool {
-    Command::new("git").current_dir(dir).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+    git(dir).args(args).stdout(Stdio::null()).status().is_ok_and(|s| s.success())
 }
 
-/// Commits, per vault, only the paths that became changed during the run. Returns `(vault, short sha, paths)` for each commit.
+/// Commits, per vault, only the paths whose content the run changed. Returns `(vault, short sha, paths)` for each commit.
+/// Hooks are off (`core.hooksPath`) and the commit skips them (`--no-verify`).
 pub fn commit_changes(root: &Path, before: &Snapshot, message: &str) -> Vec<(String, String, Vec<String>)> {
     let mut done = Vec::new();
     for (vault, now) in snapshot(root) {
         let old = before.get(&vault).cloned().unwrap_or_default();
-        let paths: Vec<String> = now.difference(&old).cloned().collect();
+        let paths: Vec<String> = now.iter().filter(|(p, h)| old.get(*p) != Some(*h)).map(|(p, _)| p.clone()).collect();
         if paths.is_empty() {
             continue;
         }
         let dir = root.join(&vault);
         let mut add: Vec<&str> = vec!["add", "--"];
         add.extend(paths.iter().map(String::as_str));
-        let mut commit: Vec<&str> = vec!["commit", "-q", "-m", message, "--"];
+        let mut commit: Vec<&str> = vec!["commit", "-q", "--no-verify", "-m", message, "--"];
         commit.extend(paths.iter().map(String::as_str));
         let sha = (git_ok(&dir, &add) && git_ok(&dir, &commit)).then(|| {
-            let o = Command::new("git").current_dir(&dir).args(["rev-parse", "--short", "HEAD"]).stderr(Stdio::null()).output();
+            let o = git(&dir).args(["rev-parse", "--short", "HEAD"]).output();
             o.ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         });
         match sha.flatten() {

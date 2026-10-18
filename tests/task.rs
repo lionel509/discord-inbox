@@ -89,14 +89,23 @@ fn settings_denies_every_foreign_dir() {
         assert!(write_list.contains(&ps), "{name}: sandbox denyWrite");
     }
     assert_eq!(read_list.len(), FOREIGN.len(), "sandbox read list holds exactly the foreign dirs");
-    assert_eq!(write_list.len(), FOREIGN.len(), "sandbox write list holds exactly the foreign dirs");
-    assert_eq!(deny.iter().filter(|d| d.starts_with("Read(")).count(), FOREIGN.len());
+    // Every vault's .git is fenced too: Read and Edit deny rules, and the sandbox write list (#85 review).
+    assert_eq!(write_list.len(), FOREIGN.len() + ROOTS.len(), "sandbox write list: foreign dirs plus every .git");
+    assert_eq!(deny.iter().filter(|d| d.starts_with("Read(")).count(), FOREIGN.len() + ROOTS.len());
+    for name in ROOTS {
+        let g = r.join(name).join(".git");
+        let gs = g.to_string_lossy().to_string();
+        assert!(deny.contains(&format!("Read(//{}/**)", rule_path(&g))), "{name}: .git Read deny");
+        assert!(deny.contains(&format!("Edit(//{}/**)", rule_path(&g))), "{name}: .git Edit deny");
+        assert!(write_list.contains(&gs), "{name}: .git sandbox denyWrite");
+    }
 
     for name in ROOTS.iter().copied().chain([INBOX]) {
         let p = r.join(name);
         let ps = p.to_string_lossy().to_string();
         assert!(!read_list.contains(&ps) && !write_list.contains(&ps), "{name} must stay open");
-        assert!(!deny.iter().any(|d| d.contains(&format!("//{}/", rule_path(&p)))), "{name} must not be in a deny rule");
+        let git_rule = format!("//{}/.git/", rule_path(&p));
+        assert!(!deny.iter().any(|d| d.contains(&format!("//{}/", rule_path(&p))) && !d.contains(&git_rule)), "{name} must not be in a deny rule");
     }
     assert!(!deny.iter().chain(&read_list).chain(&write_list).any(|d| d.contains("Home.md")), "a plain file is not a folder fence");
 
@@ -296,4 +305,56 @@ fn task_folder_is_a_task_not_an_answer() {
     let a = parse_decision(&v, "FOLDER: Answer\nREPLY:\nok");
     assert!(a.answer && !a.task);
     assert!(system_prompt().contains("Task — "));
+}
+
+/// Lionel already had this file dirty; the helper then rewrites it. The reply must still name a commit (breaker B1).
+#[test]
+fn commit_sees_edit_to_already_dirty_file() {
+    let r = root("dirty");
+    let ss = r.join("State Street");
+    git(&ss, &["init", "-q"]);
+    git(&ss, &["config", "user.name", "Test"]);
+    git(&ss, &["config", "user.email", "test@example.invalid"]);
+    git(&ss, &["config", "commit.gpgsign", "false"]);
+    fs::write(ss.join("Notes.md"), "a").unwrap();
+    git(&ss, &["add", "-A"]);
+    git(&ss, &["commit", "-q", "-m", "init"]);
+    fs::write(ss.join("Notes.md"), "a-lionel-wip").unwrap();
+
+    let before = task::snapshot(&r);
+    fs::write(ss.join("Notes.md"), "a-lionel-wip\n- Paco Nhan $25.40 Zelle").unwrap();
+    let done = task::commit_changes(&r, &before, "stormy: test");
+    assert_eq!(done.len(), 1, "expected a commit naming the helper's change; got {done:?}");
+    assert_eq!(done[0].2, vec!["Notes.md".to_string()]);
+    assert!(git(&ss, &["status", "--porcelain"]).is_empty(), "working tree still dirty");
+}
+
+/// A vault's hooks never run for the bot's commit: a pre-commit and a post-commit that leave markers must leave none.
+#[test]
+fn commit_ignores_vault_hooks() {
+    use std::os::unix::fs::PermissionsExt;
+    let r = root("hooks");
+    let ss = r.join("State Street");
+    git(&ss, &["init", "-q"]);
+    git(&ss, &["config", "user.name", "Test"]);
+    git(&ss, &["config", "user.email", "test@example.invalid"]);
+    git(&ss, &["config", "commit.gpgsign", "false"]);
+    fs::write(ss.join("Notes.md"), "a").unwrap();
+    git(&ss, &["add", "-A"]);
+    git(&ss, &["commit", "-q", "-m", "init"]);
+
+    let markers: Vec<PathBuf> = ["pre", "post"].iter().map(|h| r.join(format!("hook-{h}-ran"))).collect();
+    for (h, m) in ["pre-commit", "post-commit"].iter().zip(&markers) {
+        let p = ss.join(".git/hooks").join(h);
+        fs::write(&p, format!("#!/bin/sh\ntouch '{}'\n", m.display())).unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let before = task::snapshot(&r);
+    fs::write(ss.join("Entry.md"), "helper booking").unwrap();
+    let done = task::commit_changes(&r, &before, "stormy: test");
+    assert_eq!(done.len(), 1, "the commit must still be made: {done:?}");
+    for m in &markers {
+        assert!(!m.exists(), "vault hook ran: {}", m.display());
+    }
 }
