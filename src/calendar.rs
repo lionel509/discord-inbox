@@ -27,11 +27,16 @@ const PREFIXES: &[&str] = &[
 ];
 const SUFFIXES: &[&str] = &[" done", " ✅", " - done"];
 // A word right before a finish suffix that makes it not finished: "HW 3 not done", "well done", "almost done".
-const NEGATIONS: &[&str] = &["not", "never", "no", "yet", "almost", "nearly", "half", "well"];
+const NEGATIONS: &[&str] = &[
+    "not", "never", "no", "yet", "almost", "nearly", "half", "well", "quite", "mostly", "partly", "barely", "hardly", "near", "been",
+    "havent", "hasnt", "isnt", "arent", "wasnt", "didnt", "aint",
+];
 
 /// The task text when the message says something is finished, else `None`.
 pub fn wanted(content: &str) -> Option<String> {
-    let t = content.trim();
+    // Curly apostrophes (iOS Smart Punctuation) become plain ones before anything else.
+    let norm = content.replace('\u{2019}', "'");
+    let t = norm.trim();
     // ASCII lowercase keeps every byte offset, so the slices below line up with `t`.
     let lower = t.to_ascii_lowercase();
     let rest = match PREFIXES.iter().filter(|p| lower.starts_with(*p)).max_by_key(|p| p.len()) {

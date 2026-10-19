@@ -252,3 +252,23 @@ fn parse_pick_none_beats_a_mentioned_tag() {
     assert_eq!(calendar::parse_pick("NONE. #2 is closest but it's a midterm", 3), Pick::None);
     assert_eq!(calendar::parse_pick("none, not #1", 3), Pick::None);
 }
+
+#[test]
+fn wanted_rejects_negated_finishes() {
+    for m in [
+        "HW 3 isn\u{2019}t done", "math hw 3 wasn\u{2019}t done", "HW 3 isnt done", "HW 3 arent done", "lab 2 havent done",
+        "HW 3 hasn't been done", "HW 3 not quite done", "HW 3 hardly done", "HW 3 nowhere near done", "HW 3 mostly done",
+        "lab 2 partly done",
+    ] {
+        assert_eq!(discord_inbox::calendar::wanted(m), None, "{m}");
+    }
+}
+
+#[test]
+fn wanted_positive_guards() {
+    use discord_inbox::calendar::wanted;
+    assert_eq!(wanted("HW 3 done").as_deref(), Some("HW 3"));
+    assert_eq!(wanted("math assignment done").as_deref(), Some("math assignment"));
+    assert_eq!(wanted("I'm done with math hw 3").as_deref(), Some("math hw 3"));
+    assert_eq!(wanted("I\u{2019}m done with math hw 3").as_deref(), Some("math hw 3"));
+}
