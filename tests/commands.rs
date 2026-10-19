@@ -45,22 +45,41 @@ fn commands_text_lists_the_basics() {
 #[test]
 fn forget_drops_older_turns_and_refuses_late_pushes() {
     let w = Window::default();
-    w.push(5, "2026-10-14T16:01:00Z", "a", "b");
-    w.push(6, "2026-10-14T16:01:00Z", "c", "d");
-    w.forget(5, "2026-10-14T16:02:00Z");
-    // A reply to a turn sent before the /clear lands after it: its memory is refused.
-    w.push(5, "2026-10-14T16:01:30Z", "late", "late");
+    w.push(5, 100, "2026-10-14T16:01:00Z", "a", "b");
+    w.push(6, 100, "2026-10-14T16:01:00Z", "c", "d");
+    w.forget(5, 200);
+    // A reply to a message sent before the /clear lands after it: its memory is refused.
+    w.push(5, 150, "2026-10-14T16:01:30Z", "late", "late");
     assert!(w.recent_at(5, at("2026-10-14T16:10:00Z")).is_empty());
     // A turn after the /clear is kept.
-    w.push(5, "2026-10-14T16:03:00Z", "new", "new");
+    w.push(5, 300, "2026-10-14T16:03:00Z", "new", "new");
     assert_eq!(w.recent_at(5, at("2026-10-14T16:10:00Z")), vec![("new".to_string(), "new".to_string())]);
     // Other channels are untouched.
     assert_eq!(w.recent_at(6, at("2026-10-14T16:10:00Z")).len(), 1);
 }
 
 #[test]
+fn turn_sent_in_the_same_second_after_clear_is_kept() {
+    // Whole-second stamps: the clear and the next message share 16:00:00, so the message id decides (#94).
+    let w = Window::default();
+    w.push(5, 100, "2026-10-14T16:00:00Z", "before", "b");
+    w.forget(5, 200);
+    w.push(5, 201, "2026-10-14T16:00:00Z", "after", "a");
+    assert_eq!(w.recent_at(5, at("2026-10-14T16:05:00Z")), vec![("after".to_string(), "a".to_string())]);
+}
+
+#[test]
+fn turn_sent_in_the_same_second_before_clear_is_refused() {
+    let w = Window::default();
+    w.forget(5, 200);
+    w.push(5, 150, "2026-10-14T16:00:00Z", "early", "e");
+    assert!(w.recent_at(5, at("2026-10-14T16:05:00Z")).is_empty());
+}
+
+#[test]
 fn forget_invariant_holds_for_generated_sequences() {
     // Fixed-seed LCG: no external RNG crate. Stamps sit in one 30-minute band so every kept turn is inside the window.
+    // Message ids rise with each op (as Discord's do); the clear and the message at an op take ids 2*op and 2*op+1.
     let mut seed: u64 = 0x92;
     let mut next = move |n: u64| {
         seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
@@ -71,8 +90,8 @@ fn forget_invariant_holds_for_generated_sequences() {
     for _ in 0..500 {
         let shared = Window::default();
         let twin = Window::default();
-        let mut pushed: [std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>; 3] = Default::default();
-        let mut forgot: [Option<chrono::DateTime<chrono::Utc>>; 3] = [None; 3];
+        let mut pushed_id: [std::collections::HashMap<String, u64>; 3] = Default::default();
+        let mut forgot: [Option<u64>; 3] = [None; 3];
         for op in 0..30u64 {
             let ch = 1 + next(2);
             let m = next(30);
@@ -82,29 +101,30 @@ fn forget_invariant_holds_for_generated_sequences() {
             } else {
                 format!("2026-10-14T12:{m:02}:{s:02}-04:00")
             };
-            let when = at(&stamp);
             if next(4) == 0 {
-                shared.forget(ch, &stamp);
+                let id = 2 * op;
+                shared.forget(ch, id);
                 let c = ch as usize;
-                forgot[c] = Some(forgot[c].map_or(when, |f| f.max(when)));
+                forgot[c] = Some(forgot[c].map_or(id, |f| f.max(id)));
                 if ch == 2 {
-                    twin.forget(2, &stamp);
+                    twin.forget(2, id);
                 }
             } else {
                 let him = format!("him{op}");
-                shared.push(ch, &stamp, &him, "her");
-                pushed[ch as usize].insert(him.clone(), when);
+                let id = 2 * op + 1;
+                shared.push(ch, id, &stamp, &him, "her");
+                pushed_id[ch as usize].insert(him.clone(), id);
                 if ch == 2 {
-                    twin.push(2, &stamp, &him, "her");
+                    twin.push(2, id, &stamp, &him, "her");
                 }
             }
             for c in [1u64, 2] {
                 for (him, _) in shared.recent_at(c, now) {
                     survivors_checked += 1;
-                    let stamp = pushed[c as usize][&him];
-                    // (a) nothing at or before this channel's last forget survives.
+                    let id = pushed_id[c as usize][&him];
+                    // (a) nothing from a message at or before this channel's last clear survives.
                     if let Some(f) = forgot[c as usize] {
-                        assert!(stamp > f, "{him} at {stamp} survived forget {f} on channel {c}");
+                        assert!(id > f, "{him} (msg {id}) survived forget {f} on channel {c}");
                     }
                 }
             }
@@ -202,9 +222,9 @@ async fn clear_dm_posts_blank_block_and_forgets() {
     let (inbox, root) = setup("clear");
     let f = filer(&root);
     for (i, t) in ["14:50", "14:55", "14:59"].iter().enumerate() {
-        f.window.push(CH, &format!("2026-10-02T{t}:00Z"), &format!("him{i}"), "her");
+        f.window.push(CH, i as u64 + 1, &format!("2026-10-02T{t}:00Z"), &format!("him{i}"), "her");
     }
-    f.window.push(9, "2026-10-02T14:59:00Z", "other", "her");
+    f.window.push(9, 4, "2026-10-02T14:59:00Z", "other", "her");
     let replies = Arc::new(Mutex::new(Vec::new()));
     let m = Msg { id: 92002, text: "/clear".into(), replies: replies.clone() };
     let out = ingest_with(&allow(), &inbox, &m, &f).await;

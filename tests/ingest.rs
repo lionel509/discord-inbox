@@ -2024,8 +2024,8 @@ fn window_reads_oldest_first_when_a_catch_up_turn_arrives_late() {
     use discord_inbox::ingest::Window;
     let at = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&chrono::Utc);
     let win = Window::default();
-    win.push(5, "2026-10-14T12:02:00-04:00", "B later", "b reply");
-    win.push(5, "2026-10-14T12:01:00-04:00", "A earlier", "a reply");
+    win.push(5, 1, "2026-10-14T12:02:00-04:00", "B later", "b reply");
+    win.push(5, 2, "2026-10-14T12:01:00-04:00", "A earlier", "a reply");
     let got: Vec<String> = win.recent_at(5, at("2026-10-14T12:05:00-04:00")).into_iter().map(|(him, _)| him).collect();
     assert_eq!(got, vec!["A earlier", "B later"], "window must read oldest first");
     let got = win.recent_at(5, at("2026-10-14T12:01:00-04:00"));
@@ -2040,7 +2040,7 @@ fn window_is_masked_and_bounded() {
     let now = chrono::Utc::now().to_rfc3339();
 
     let win = Window::default();
-    win.push(1, &now, "card 4111 1111 1111 1111 ssn 123-45-6789", "ok");
+    win.push(1, 3, &now, "card 4111 1111 1111 1111 ssn 123-45-6789", "ok");
     let got = win.recent(1);
     assert_eq!(got.len(), 1, "{got:?}");
     assert!(!got[0].0.contains("4111") && !got[0].0.contains("123-45-6789"), "{got:?}");
@@ -2048,7 +2048,7 @@ fn window_is_masked_and_bounded() {
 
     let win = Window::default();
     for i in 0..8 {
-        win.push(2, &now, &format!("t{i}"), "r");
+        win.push(2, 4, &now, &format!("t{i}"), "r");
     }
     let got = win.recent(2);
     assert_eq!(got.len(), 6, "{got:?}");
@@ -2057,11 +2057,11 @@ fn window_is_masked_and_bounded() {
 
     let win = Window::default();
     let two_hours = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
-    win.push(3, &two_hours, "old", "x");
+    win.push(3, 5, &two_hours, "old", "x");
     assert!(win.recent(3).is_empty());
 
     let win = Window::default();
-    win.push(4, &now, &"a".repeat(1000), &"b".repeat(1000));
+    win.push(4, 6, &now, &"a".repeat(1000), &"b".repeat(1000));
     let got = win.recent(4);
     assert_eq!(got[0].0.chars().count(), 400);
     assert_eq!(got[0].1.chars().count(), 400);

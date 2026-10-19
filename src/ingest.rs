@@ -79,6 +79,8 @@ pub struct Filer {
 }
 
 struct Turn {
+    /// The triggering message's Discord id: snowflakes order sub-second, the rfc3339 stamp does not (#94).
+    id: u64,
     at: chrono::DateTime<chrono::Utc>,
     him: String,
     her: String,
@@ -88,7 +90,7 @@ struct Turn {
 #[derive(Default)]
 struct Lane {
     turns: VecDeque<Turn>,
-    cleared: Option<chrono::DateTime<chrono::Utc>>,
+    cleared: Option<u64>,
 }
 
 /// A message's UTC rfc3339 stamp; one that does not parse counts as now.
@@ -103,15 +105,16 @@ fn stamp(received: &str) -> chrono::DateTime<chrono::Utc> {
 pub struct Window(StdMutex<BTreeMap<u64, Lane>>);
 
 impl Window {
-    /// Records one turn. `received` is the message's UTC rfc3339 stamp; a stamp that does not parse counts as now.
-    pub fn push(&self, channel: u64, received: &str, him: &str, her: &str) {
+    /// Records one turn of message `msg_id`. `received` is its UTC rfc3339 stamp (used for the age window); a stamp that does not parse counts as now.
+    pub fn push(&self, channel: u64, msg_id: u64, received: &str, him: &str, her: &str) {
         let at = stamp(received);
         let cut = |s: &str| sensitive(s).chars().take(WINDOW_CHARS).collect::<String>();
-        let turn = Turn { at, him: cut(him), her: cut(her) };
+        let turn = Turn { id: msg_id, at, him: cut(him), her: cut(her) };
         let mut map = self.0.lock().unwrap_or_else(|p| p.into_inner());
         let lane = map.entry(channel).or_default();
-        // A turn at or before a `/clear` is refused: a reply still in flight when the clear landed (#92).
-        if lane.cleared.is_some_and(|c| turn.at <= c) {
+        // A turn of a message at or before a `/clear` is refused: a reply still in flight when the clear landed (#92).
+        // Compared by message id, so a message sent after the clear is kept even in the same second (#94).
+        if lane.cleared.is_some_and(|c| msg_id <= c) {
             return;
         }
         let q = &mut lane.turns;
@@ -123,13 +126,12 @@ impl Window {
         }
     }
 
-    /// Drops the turns of `channel` stamped at or before `received`, and refuses later pushes at or before it (#92).
-    pub fn forget(&self, channel: u64, received: &str) {
-        let at = stamp(received);
+    /// Drops the turns of `channel` from messages at or before the `/clear` `msg_id`, and refuses later pushes from them (#92, #94).
+    pub fn forget(&self, channel: u64, msg_id: u64) {
         let mut map = self.0.lock().unwrap_or_else(|p| p.into_inner());
         let lane = map.entry(channel).or_default();
-        lane.turns.retain(|t| t.at > at);
-        lane.cleared = Some(lane.cleared.map_or(at, |c| c.max(at)));
+        lane.turns.retain(|t| t.id > msg_id);
+        lane.cleared = Some(lane.cleared.map_or(msg_id, |c| c.max(msg_id)));
     }
 
     /// The turns of `channel` within the window's age of now, oldest first, as `(him, her)`.
@@ -460,7 +462,7 @@ pub async fn ingest_with<M: Inbound>(
             let text = match cmd {
                 crate::commands::Slash::Commands => crate::commands::COMMANDS_TEXT.to_string(),
                 crate::commands::Slash::Clear => {
-                    filer.window.forget(m.channel_id(), &incoming.received);
+                    filer.window.forget(m.channel_id(), id);
                     crate::commands::clear_text()
                 }
             };
@@ -564,7 +566,7 @@ pub async fn ingest_with<M: Inbound>(
                 match m.reply(&text).await {
                     Ok(()) => {
                         clear(m).await;
-                        filer.window.push(m.channel_id(), &incoming.received, &turn_text(&incoming), &text);
+                        filer.window.push(m.channel_id(), id, &incoming.received, &turn_text(&incoming), &text);
                     }
                     Err(e) => {
                         eprintln!("discord-inbox: reply on {id} failed: {e}");
@@ -596,7 +598,7 @@ pub async fn ingest_with<M: Inbound>(
                             eprintln!("discord-inbox: react on {id} failed: {e}");
                         }
                     }
-                    filer.window.push(m.channel_id(), &incoming.received, &turn_text(&incoming), &text);
+                    filer.window.push(m.channel_id(), id, &incoming.received, &turn_text(&incoming), &text);
                 }
                 Err(e) => {
                     eprintln!("discord-inbox: reply on {id} failed: {e}");

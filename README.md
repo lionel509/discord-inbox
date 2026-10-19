@@ -54,7 +54,7 @@ Demo: `cargo run --release --example chat_demo [-- --live]` (temp folders only).
 
 ## Commands
 
-Typed DM commands, matched exactly and not Discord slash commands. `/commands` lists the basics. `/clear` posts a block of blank lines so the chat scrolls clear, and Stormy forgets its last few messages in that DM; the saved notes in Inbox stay.
+Typed DM commands, matched exactly and not Discord slash commands. `/commands` lists the basics. `/clear` posts a block of blank lines so the chat scrolls clear, and Stormy forgets its last few messages in that DM; the saved notes in Inbox stay. A reply Stormy was already writing when `/clear` landed may still post below the blank lines, but its turn is not remembered.
 
 ## Pantry
 
