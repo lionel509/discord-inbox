@@ -79,31 +79,59 @@ pub struct Filer {
 }
 
 struct Turn {
+    /// The triggering message's Discord id: snowflakes order sub-second, the rfc3339 stamp does not (#94).
+    id: u64,
     at: chrono::DateTime<chrono::Utc>,
     him: String,
     her: String,
 }
 
+/// One channel's turns, plus the stamp of the last `/clear` there (#92).
+#[derive(Default)]
+struct Lane {
+    turns: VecDeque<Turn>,
+    cleared: Option<u64>,
+}
+
+/// A message's UTC rfc3339 stamp; one that does not parse counts as now.
+fn stamp(received: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(received)
+        .map(|d| d.with_timezone(&chrono::Utc))
+        .unwrap_or_else(|_| chrono::Utc::now())
+}
+
 /// The recent DM turns per channel (#67). Masked and capped on the way in; read back oldest first.
 #[derive(Default)]
-pub struct Window(StdMutex<BTreeMap<u64, VecDeque<Turn>>>);
+pub struct Window(StdMutex<BTreeMap<u64, Lane>>);
 
 impl Window {
-    /// Records one turn. `received` is the message's UTC rfc3339 stamp; a stamp that does not parse counts as now.
-    pub fn push(&self, channel: u64, received: &str, him: &str, her: &str) {
-        let at = chrono::DateTime::parse_from_rfc3339(received)
-            .map(|d| d.with_timezone(&chrono::Utc))
-            .unwrap_or_else(|_| chrono::Utc::now());
+    /// Records one turn of message `msg_id`. `received` is its UTC rfc3339 stamp (used for the age window); a stamp that does not parse counts as now.
+    pub fn push(&self, channel: u64, msg_id: u64, received: &str, him: &str, her: &str) {
+        let at = stamp(received);
         let cut = |s: &str| sensitive(s).chars().take(WINDOW_CHARS).collect::<String>();
-        let turn = Turn { at, him: cut(him), her: cut(her) };
+        let turn = Turn { id: msg_id, at, him: cut(him), her: cut(her) };
         let mut map = self.0.lock().unwrap_or_else(|p| p.into_inner());
-        let q = map.entry(channel).or_default();
+        let lane = map.entry(channel).or_default();
+        // A turn of a message at or before a `/clear` is refused: a reply still in flight when the clear landed (#92).
+        // Compared by message id, so a message sent after the clear is kept even in the same second (#94).
+        if lane.cleared.is_some_and(|c| msg_id <= c) {
+            return;
+        }
+        let q = &mut lane.turns;
         // Keep the queue sorted by stamp: a retried message can arrive after newer turns.
         let pos = q.iter().position(|t| t.at > turn.at).unwrap_or(q.len());
         q.insert(pos, turn);
         while q.len() > WINDOW_TURNS {
             q.pop_front();
         }
+    }
+
+    /// Drops the turns of `channel` from messages at or before the `/clear` `msg_id`, and refuses later pushes from them (#92, #94).
+    pub fn forget(&self, channel: u64, msg_id: u64) {
+        let mut map = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let lane = map.entry(channel).or_default();
+        lane.turns.retain(|t| t.id > msg_id);
+        lane.cleared = Some(lane.cleared.map_or(msg_id, |c| c.max(msg_id)));
     }
 
     /// The turns of `channel` within the window's age of now, oldest first, as `(him, her)`.
@@ -116,7 +144,7 @@ impl Window {
         let cutoff = now - chrono::Duration::seconds(WINDOW_AGE_SECS);
         let map = self.0.lock().unwrap_or_else(|p| p.into_inner());
         map.get(&channel)
-            .map(|q| q.iter().filter(|t| t.at >= cutoff && t.at <= now).map(|t| (t.him.clone(), t.her.clone())).collect())
+            .map(|l| l.turns.iter().filter(|t| t.at >= cutoff && t.at <= now).map(|t| (t.him.clone(), t.her.clone())).collect())
             .unwrap_or_default()
     }
 }
@@ -428,6 +456,26 @@ pub async fn ingest_with<M: Inbound>(
         }
         return Outcome::Saved;
     }
+    // Typed commands (#92): `/commands` lists them, `/clear` blanks the chat and forgets our last few turns.
+    if incoming.attachments.is_empty() {
+        if let Some(cmd) = crate::commands::parse(&incoming.content) {
+            let text = match cmd {
+                crate::commands::Slash::Commands => crate::commands::COMMANDS_TEXT.to_string(),
+                crate::commands::Slash::Clear => {
+                    filer.window.forget(m.channel_id(), id);
+                    crate::commands::clear_text()
+                }
+            };
+            match m.reply(&text).await {
+                Ok(()) => clear(m).await,
+                Err(e) => {
+                    eprintln!("discord-inbox: reply on {id} failed: {e}");
+                    mark(m, SAVED_MARK).await;
+                }
+            }
+            return Outcome::Saved;
+        }
+    }
     // Pantry commands (#50) are answered from the vault notes, before any model call.
     if incoming.attachments.is_empty() {
         if let Some(cmd) = crate::pantry::command(&incoming.content) {
@@ -518,7 +566,7 @@ pub async fn ingest_with<M: Inbound>(
                 match m.reply(&text).await {
                     Ok(()) => {
                         clear(m).await;
-                        filer.window.push(m.channel_id(), &incoming.received, &turn_text(&incoming), &text);
+                        filer.window.push(m.channel_id(), id, &incoming.received, &turn_text(&incoming), &text);
                     }
                     Err(e) => {
                         eprintln!("discord-inbox: reply on {id} failed: {e}");
@@ -550,7 +598,7 @@ pub async fn ingest_with<M: Inbound>(
                             eprintln!("discord-inbox: react on {id} failed: {e}");
                         }
                     }
-                    filer.window.push(m.channel_id(), &incoming.received, &turn_text(&incoming), &text);
+                    filer.window.push(m.channel_id(), id, &incoming.received, &turn_text(&incoming), &text);
                 }
                 Err(e) => {
                     eprintln!("discord-inbox: reply on {id} failed: {e}");
