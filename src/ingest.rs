@@ -453,11 +453,12 @@ pub async fn ingest_with<M: Inbound>(
     }
     // School-calendar check-off (#95): "done with <task>" marks the matching event. Answered before any chat call; no match falls through to chat.
     if incoming.attachments.is_empty() {
-        if let Some(task) = crate::calendar::wanted(&incoming.content) {
+        if crate::calendar::wanted(&incoming.content).is_some() {
             if let Some(cal) = crate::calendar::Cal::from_env() {
                 let today = local_date(&incoming.received);
                 let chat = filer.chat.clone();
-                let r = typing_while(m, tokio::task::spawn_blocking(move || crate::calendar::finish(chat.as_ref(), &cal, &task, &today)))
+                let message = incoming.content.clone();
+                let r = typing_while(m, tokio::task::spawn_blocking(move || crate::calendar::finish(chat.as_ref(), &cal, &message, &today)))
                     .await
                     .map_err(|e| e.to_string())
                     .and_then(|r| r);

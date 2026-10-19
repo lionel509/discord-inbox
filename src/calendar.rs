@@ -26,6 +26,8 @@ const PREFIXES: &[&str] = &[
     "turned in ",
 ];
 const SUFFIXES: &[&str] = &[" done", " ✅", " - done"];
+// A word right before a finish suffix that makes it not finished: "HW 3 not done", "well done", "almost done".
+const NEGATIONS: &[&str] = &["not", "never", "no", "yet", "almost", "nearly", "half", "well"];
 
 /// The task text when the message says something is finished, else `None`.
 pub fn wanted(content: &str) -> Option<String> {
@@ -36,21 +38,36 @@ pub fn wanted(content: &str) -> Option<String> {
         Some(p) => &t[p.len()..],
         None => {
             let s = SUFFIXES.iter().find(|s| lower.ends_with(*s))?;
-            &t[..t.len() - s.len()]
+            let head = &t[..t.len() - s.len()];
+            if unfinished(head) {
+                return None;
+            }
+            head
         }
     };
     let rest = rest.trim();
     (!rest.is_empty()).then(|| rest.to_string())
 }
 
-/// Calendar names from the calendars file: one per line, `#` comments and blanks skipped, leading BOMs stripped, duplicates dropped.
+/// True when the last word before a suffix negates or qualifies the finish.
+fn unfinished(head: &str) -> bool {
+    let last = head
+        .split_whitespace()
+        .last()
+        .unwrap_or("")
+        .trim_matches(|c: char| !c.is_alphanumeric() && c != '\'')
+        .to_ascii_lowercase();
+    NEGATIONS.contains(&last.as_str()) || last.ends_with("n't")
+}
+
+/// Calendar names from the calendars file: one per line, whole-line `#` comments and blanks skipped (a `#` inside a name is kept), leading BOMs stripped, duplicates dropped.
 pub fn parse_calendars(text: &str) -> Vec<String> {
     // Editors can stack BOMs; only leading ones are stripped, as in allowlist.rs.
     let text = text.trim_start_matches('\u{feff}');
     let mut out: Vec<String> = Vec::new();
     for raw in text.lines() {
-        let line = raw.split('#').next().unwrap_or("").trim();
-        if line.is_empty() || out.iter().any(|n| n == line) {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || out.iter().any(|n| n == line) {
             continue;
         }
         out.push(line.to_string());
@@ -212,9 +229,9 @@ pub fn candidates(events: &[Event], today: &str) -> Vec<Event> {
 }
 
 /// (system, user) for the one-shot pick. The model answers with a tag only.
-pub fn pick_prompt(task: &str, today: &str, open: &[Event]) -> (String, String) {
+pub fn pick_prompt(message: &str, today: &str, open: &[Event]) -> (String, String) {
     let system = "You match one finished task to one calendar event. Reply with only the tag, like `#3`, of the single event the message says is finished. Reply `NONE` if no listed event clearly matches. Do not pick an event just because it is nearest.";
-    let mut user = format!("Today: {today}\nMessage: {task}\n\nEvents:\n");
+    let mut user = format!("Today: {today}\nMessage: {message}\n\nEvents:\n");
     for (i, e) in open.iter().enumerate() {
         user += &format!("#{} {} {}: {}\n", i + 1, e.date, e.calendar, e.summary);
     }
@@ -230,6 +247,10 @@ pub enum Pick {
 
 /// Every distinct `#<digits>` in the reply that is in 1..=n, as 0-based indexes. Anything else in the reply is ignored, and nothing defaults to `#1`.
 pub fn parse_pick(reply: &str, n: usize) -> Pick {
+    // NONE wins over any tag the reply also mentions ("NONE. #2 is closest but not it").
+    if reply.split(|c: char| !c.is_ascii_alphabetic()).any(|w| w.eq_ignore_ascii_case("none")) {
+        return Pick::None;
+    }
     let bytes = reply.as_bytes();
     let mut picks: Vec<usize> = Vec::new();
     let mut i = 0;
@@ -268,13 +289,14 @@ pub enum Finish {
 }
 
 /// Lists, asks the model for one pick, and checks off the pick. Several picks asks the user which one, and writes nothing.
-pub fn finish(chat: &dyn Chat, cal: &Cal, task: &str, today: &str) -> Result<Finish, String> {
+pub fn finish(chat: &dyn Chat, cal: &Cal, message: &str, today: &str) -> Result<Finish, String> {
     let events = list(cal)?;
     let open = candidates(&events, today);
     if open.is_empty() {
         return Ok(Finish::NoMatch);
     }
-    let (system, user) = pick_prompt(task, today, &open);
+    // The whole message goes to the model, so "not done" reaches it intact.
+    let (system, user) = pick_prompt(message, today, &open);
     let reply = chat.ask(&system, &user)?;
     match parse_pick(&reply, open.len()) {
         Pick::None => Ok(Finish::NoMatch),

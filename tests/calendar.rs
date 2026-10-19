@@ -233,3 +233,22 @@ fn only_configured_calendars_ever_reach_osascript() {
         }
     }
 }
+
+#[test]
+fn negated_or_qualified_done_is_not_a_finish() {
+    for no in ["HW 3 not done", "lab 2 not done", "the steak was well done", "hw 3 almost done", "hw 3 nearly done", "hw 3 isn't done", "not done", "still not done with the seltzer run"] {
+        assert_eq!(calendar::wanted(no), None, "{no:?}");
+    }
+}
+
+#[test]
+fn parse_calendars_keeps_hash_inside_a_name() {
+    let names = calendar::parse_calendars("MATH 101 #2\nPHYS 102 - Exams\n# whole-line comment\n");
+    assert_eq!(names, vec!["MATH 101 #2", "PHYS 102 - Exams"]);
+}
+
+#[test]
+fn parse_pick_none_beats_a_mentioned_tag() {
+    assert_eq!(calendar::parse_pick("NONE. #2 is closest but it's a midterm", 3), Pick::None);
+    assert_eq!(calendar::parse_pick("none, not #1", 3), Pick::None);
+}
