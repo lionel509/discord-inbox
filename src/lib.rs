@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod allowlist;
 pub mod chat;
+pub mod commands;
 pub mod dump;
 pub mod ingest;
 pub mod insight;

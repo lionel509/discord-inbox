@@ -52,6 +52,10 @@ A tick no longer means "saved". ✅ now means "saved but could not reply" (no ke
 
 Demo: `cargo run --release --example chat_demo [-- --live]` (temp folders only).
 
+## Commands
+
+Typed DM commands, matched exactly and not Discord slash commands. `/commands` lists the basics. `/clear` posts a block of blank lines so the chat scrolls clear, and Stormy forgets its last few messages in that DM; the saved notes in Inbox stay.
+
 ## Pantry
 
 Say `restock` to Stormy after a grocery trip and the food lines land in `Fidelity/Pantry/On Hand.md`. `restock 2026-10-02` picks another day, and `restock all` allows a solo Costco receipt with no split. The source is the split note for that day (only the rows whose Who names Lionel), otherwise the receipts filed that day; a Costco receipt with no split note is refused unless `all` is given. Items are matched against a fixed list of food words, so anything else never enters the note. `out of cod` drops a row, and recipe questions read `On Hand.md` first. The bot rewrites `On Hand.md` whole, so prose outside its table is not kept; hand-added table rows survive.

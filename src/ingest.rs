@@ -84,26 +84,52 @@ struct Turn {
     her: String,
 }
 
+/// One channel's turns, plus the stamp of the last `/clear` there (#92).
+#[derive(Default)]
+struct Lane {
+    turns: VecDeque<Turn>,
+    cleared: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// A message's UTC rfc3339 stamp; one that does not parse counts as now.
+fn stamp(received: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(received)
+        .map(|d| d.with_timezone(&chrono::Utc))
+        .unwrap_or_else(|_| chrono::Utc::now())
+}
+
 /// The recent DM turns per channel (#67). Masked and capped on the way in; read back oldest first.
 #[derive(Default)]
-pub struct Window(StdMutex<BTreeMap<u64, VecDeque<Turn>>>);
+pub struct Window(StdMutex<BTreeMap<u64, Lane>>);
 
 impl Window {
     /// Records one turn. `received` is the message's UTC rfc3339 stamp; a stamp that does not parse counts as now.
     pub fn push(&self, channel: u64, received: &str, him: &str, her: &str) {
-        let at = chrono::DateTime::parse_from_rfc3339(received)
-            .map(|d| d.with_timezone(&chrono::Utc))
-            .unwrap_or_else(|_| chrono::Utc::now());
+        let at = stamp(received);
         let cut = |s: &str| sensitive(s).chars().take(WINDOW_CHARS).collect::<String>();
         let turn = Turn { at, him: cut(him), her: cut(her) };
         let mut map = self.0.lock().unwrap_or_else(|p| p.into_inner());
-        let q = map.entry(channel).or_default();
+        let lane = map.entry(channel).or_default();
+        // A turn at or before a `/clear` is refused: a reply still in flight when the clear landed (#92).
+        if lane.cleared.is_some_and(|c| turn.at <= c) {
+            return;
+        }
+        let q = &mut lane.turns;
         // Keep the queue sorted by stamp: a retried message can arrive after newer turns.
         let pos = q.iter().position(|t| t.at > turn.at).unwrap_or(q.len());
         q.insert(pos, turn);
         while q.len() > WINDOW_TURNS {
             q.pop_front();
         }
+    }
+
+    /// Drops the turns of `channel` stamped at or before `received`, and refuses later pushes at or before it (#92).
+    pub fn forget(&self, channel: u64, received: &str) {
+        let at = stamp(received);
+        let mut map = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let lane = map.entry(channel).or_default();
+        lane.turns.retain(|t| t.at > at);
+        lane.cleared = Some(lane.cleared.map_or(at, |c| c.max(at)));
     }
 
     /// The turns of `channel` within the window's age of now, oldest first, as `(him, her)`.
@@ -116,7 +142,7 @@ impl Window {
         let cutoff = now - chrono::Duration::seconds(WINDOW_AGE_SECS);
         let map = self.0.lock().unwrap_or_else(|p| p.into_inner());
         map.get(&channel)
-            .map(|q| q.iter().filter(|t| t.at >= cutoff && t.at <= now).map(|t| (t.him.clone(), t.her.clone())).collect())
+            .map(|l| l.turns.iter().filter(|t| t.at >= cutoff && t.at <= now).map(|t| (t.him.clone(), t.her.clone())).collect())
             .unwrap_or_default()
     }
 }
@@ -427,6 +453,26 @@ pub async fn ingest_with<M: Inbound>(
             }
         }
         return Outcome::Saved;
+    }
+    // Typed commands (#92): `/commands` lists them, `/clear` blanks the chat and forgets our last few turns.
+    if incoming.attachments.is_empty() {
+        if let Some(cmd) = crate::commands::parse(&incoming.content) {
+            let text = match cmd {
+                crate::commands::Slash::Commands => crate::commands::COMMANDS_TEXT.to_string(),
+                crate::commands::Slash::Clear => {
+                    filer.window.forget(m.channel_id(), &incoming.received);
+                    crate::commands::clear_text()
+                }
+            };
+            match m.reply(&text).await {
+                Ok(()) => clear(m).await,
+                Err(e) => {
+                    eprintln!("discord-inbox: reply on {id} failed: {e}");
+                    mark(m, SAVED_MARK).await;
+                }
+            }
+            return Outcome::Saved;
+        }
     }
     // Pantry commands (#50) are answered from the vault notes, before any model call.
     if incoming.attachments.is_empty() {
