@@ -1,6 +1,7 @@
 #!/bin/sh
 # Stands in for osascript in tests and the demo (#95). Reads and ignores stdin; never touches a real calendar.
 # Every call is appended to $DISCORD_INBOX_CALENDAR_LOG when set, so a test can see the exact argv.
+# A check-off is kept in $DISCORD_INBOX_CALENDAR_STATE (one uid per line) when set, so a later list shows it, as Calendar.app would.
 cat >/dev/null
 [ "$1" = "-" ] && shift
 if [ -n "$DISCORD_INBOX_CALENDAR_LOG" ]; then
@@ -15,17 +16,24 @@ rows() {
   printf 'u-phys-lab\tPHYS 102 - Exams\t2026-10-28\tLab 2 report due\n'
   printf 'u-home-1\tHome\t2026-10-19\tPersonal thing\n'
 }
+# The rows with the recorded check-offs applied.
+apply() {
+  rows | awk -F'\t' -v st="${DISCORD_INBOX_CALENDAR_STATE:-/dev/null}" '
+    BEGIN { while ((getline u < st) > 0) done[u] = 1 }
+    { if (($1 in done) && $4 !~ /^✅/) $4 = "✅ " $4; print }' OFS='\t'
+}
 case "$1" in
   list)
     shift
     set_=$(printf '\t%s' "$@")"\t"
-    rows | awk -F'\t' -v set="$set_" 'index(set, "\t" $2 "\t")'
+    apply | awk -F'\t' -v set="$set_" 'index(set, "\t" $2 "\t")'
     ;;
   check)
-    line=$(rows | awk -F'\t' -v u="$3" -v c="$2" '$1 == u && $2 == c')
+    line=$(apply | awk -F'\t' -v u="$3" -v c="$2" '$1 == u && $2 == c')
     [ -z "$line" ] && exit 1
     summary=$(printf '%s' "$line" | awk -F'\t' '{ print $4 }')
     case "$summary" in "✅"*) ;; *) summary="✅ $summary" ;; esac
+    if [ -n "$DISCORD_INBOX_CALENDAR_STATE" ]; then echo "$3" >>"$DISCORD_INBOX_CALENDAR_STATE"; fi
     printf '%s\n' "$summary"
     ;;
   *) exit 1 ;;
