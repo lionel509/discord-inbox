@@ -47,9 +47,10 @@ fn bare_count_of_a_piece_food_is_pieces() {
 }
 
 #[test]
-fn bare_number_on_a_gram_food_is_grams_times_items() {
-    let salmon = one("salmon 2");
-    assert!((salmon.grams - 300.0).abs() < 0.01, "got {}", salmon.grams);
+fn bare_number_on_a_gram_food_is_refused_no_unit() {
+    // R1 rule (a): "salmon 2" could be 2 g or 2 pieces, so it is refused rather than read as 300 g.
+    let e = nutrition::parse_line("salmon 2").err().expect("refused");
+    assert!(e.hint.contains("no unit"), "{}", e.hint);
 }
 
 #[test]

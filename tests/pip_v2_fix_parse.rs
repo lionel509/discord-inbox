@@ -41,10 +41,10 @@ fn twenty_shrimp_is_an_error_asking_pieces_or_grams() {
 }
 
 #[test]
-fn shrimp_with_number_after_is_grams() {
-    let it = ok("shrimp 20");
-    assert_eq!(it.food.name, "shrimp");
-    assert!((it.grams - 20.0).abs() < 0.01, "got {}", it.grams);
+fn shrimp_with_number_after_is_refused_no_unit() {
+    // R1 rule (a): a trailing unitless number is neither grams nor pieces; it is refused, not read as 20 g.
+    let e = nutrition::parse_line("shrimp 20").err().expect("refused");
+    assert!(e.hint.contains("no unit"), "{}", e.hint);
 }
 
 #[test]
