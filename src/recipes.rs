@@ -77,176 +77,205 @@ pub fn parse_note(stem: &str, text: &str) -> Option<Recipe> {
 
 /// Exact name first; the fuzzy pass runs only when no exact name is in the text.
 pub fn resolve<'a>(text: &str, recipes: &'a [Recipe]) -> Option<Hit<'a>> {
+    resolve_or_refuse(text, recipes).ok().flatten()
+}
+
+/// `resolve`, with the refusal kept: the hint for the refused amount, and the text after its piece.
+pub fn resolve_or_refuse<'a>(text: &str, recipes: &'a [Recipe]) -> Result<Option<Hit<'a>>, Refused> {
     match exact(text, recipes) {
-        Exact::Hit(hit) => Some(hit),
-        Exact::Zero | Exact::Refuse => None,
-        Exact::Miss => fuzzy(text, recipes),
+        Exact::Hit(hit) => Ok(Some(hit)),
+        Exact::Refuse(r) => Err(r),
+        Exact::Miss => fuzzy(text, recipes).transpose(),
     }
 }
 
 /// A serving count above this is not a serving count (`salmon 150` is a weight with no unit).
 const MAX_SERVINGS: f64 = 12.0;
 
+const NAME_STOP: [&str; 10] = ["the", "and", "with", "made", "of", "a", "an", "my", "some", "recipe"];
+
+/// A recipe line the typed text could not use. `rest` is the text after the refused piece.
+#[derive(Clone, Debug)]
+pub struct Refused {
+    pub unknown: nutrition::Unknown,
+    pub rest: String,
+}
+
 enum Exact<'a> {
     Hit(Hit<'a>),
-    /// A count of zero next to the name: no hit, and no fuzzy retry either.
-    Zero,
-    /// A count over `MAX_SERVINGS`, or a typed range in the name's piece: no hit, no fuzzy retry.
-    Refuse,
+    Refuse(Refused),
     Miss,
 }
 
+/// What a recipe hit scales by: nothing typed, a count of servings, or a typed weight.
+#[derive(Debug, PartialEq)]
+enum Qty {
+    One,
+    Count(f64),
+    Weight(f64),
+}
+
+/// The one rule for the amounts typed next to a recipe name (R1–R7). `amounts` are the amounts outside the name,
+/// `name_words` every name word of the recipe, `ref_food` the food a weight is read against.
+fn decide(amounts: &[nutrition::Amount], name_words: &[String], ref_food: &str) -> Result<Qty, String> {
+    use crate::nutrition::Kind;
+    // R1: a negative, unreadable or range amount is refused.
+    for a in amounts {
+        match a.kind {
+            Kind::Negative => return Err("negative amount; say how much you had".to_string()),
+            Kind::Unreadable => return Err("amount not readable; write it as 100, 1/2 or ½".to_string()),
+            Kind::Range => return Err("a range; send one number".to_string()),
+            _ => {}
+        }
+    }
+    // R2: a volume is not a serving count.
+    if let Some(a) = amounts.iter().find(|a| matches!(a.kind, Kind::Volume(_))) {
+        return Err(format!("'{}' isn't a serving; give the {ref_food} weight in g, or a count", a.unit));
+    }
+    let masses: Vec<&nutrition::Amount> = amounts.iter().filter(|a| a.kind == Kind::Mass).collect();
+    let counts: Vec<&nutrition::Amount> = amounts.iter().filter(|a| matches!(a.kind, Kind::Serving | Kind::Multiplier | Kind::Piece { .. } | Kind::Bare)).collect();
+    // R3: one weight and one count at most.
+    if masses.len() > 1 || counts.len() > 1 {
+        return Err("two amounts in one line; send one".to_string());
+    }
+    let weight = |w: f64| -> Result<Qty, String> {
+        if !w.is_finite() || w <= 0.0 {
+            Err("zero amount; nothing logged".to_string())
+        } else if w > 10_000.0 {
+            Err("over 10 kg; check the amount".to_string())
+        } else {
+            Ok(Qty::Weight(w))
+        }
+    };
+    match (masses.first(), counts.first()) {
+        // R7: nothing typed.
+        (None, None) => Ok(Qty::One),
+        // R5: a weight alone.
+        (Some(m), None) => weight(m.value),
+        // R4: a weight and a count. A multiplier scales the weight; a bracketed weight is the weight.
+        (Some(m), Some(c)) => {
+            let w = if c.kind == Kind::Multiplier {
+                m.value * c.value
+            } else if m.bracketed {
+                m.value
+            } else {
+                return Err("two amounts in one line; send one".to_string());
+            };
+            weight(w)
+        }
+        // R6: a count alone.
+        (None, Some(c)) => {
+            if c.kind == Kind::Bare && !c.after.is_empty() && !NAME_STOP.contains(&c.after.as_str()) && !name_words.iter().any(|n| word_match(&c.after, n)) {
+                return Err(format!("unknown unit '{}'; give g or a count", c.after));
+            }
+            if c.value == 0.0 {
+                return Err("zero servings; nothing logged".to_string());
+            }
+            if c.value > MAX_SERVINGS {
+                let v = fmt(c.value);
+                return Err(format!("{v} servings? for a weight add g ({v} g)"));
+            }
+            Ok(Qty::Count(c.value))
+        }
+    }
+}
+
+/// The hit fields a `Qty` gives: servings, explicit, weight_g.
+fn qty_fields(q: &Qty) -> (f64, bool, Option<f64>) {
+    match *q {
+        Qty::One => (1.0, false, None),
+        Qty::Count(v) => (v, true, None),
+        Qty::Weight(w) => (1.0, false, Some(w)),
+    }
+}
+
+/// Every name word of every name of the recipe.
+fn all_name_words(r: &Recipe) -> Vec<String> {
+    r.names.iter().flat_map(|n| name_words(n)).collect()
+}
+
+/// The food a recipe's weights are read against, for the replies.
+fn ref_food_name(r: &Recipe) -> String {
+    reference(r).map_or_else(|| "main ingredient".to_string(), |i| i.food.name.to_string())
+}
+
+/// The exact name path. Each piece is read on its own: the longest name wins; ties keep the first recipe, then the first piece.
 fn exact<'a>(text: &str, recipes: &'a [Recipe]) -> Exact<'a> {
-    let toks = tokenize(text);
-    // Longest matching phrase wins; ties keep the first recipe.
-    let mut best: Option<(usize, usize, &'a Recipe)> = None;
+    let pieces = nutrition::split_pieces(text);
+    let scans: Vec<(nutrition::Scan, Vec<(usize, usize, String)>)> = pieces
+        .iter()
+        .map(|p| {
+            let sc = nutrition::scan(p);
+            let toks = tokenize(&sc.text);
+            (sc, toks)
+        })
+        .collect();
+    // (name words, piece, recipe, first token)
+    let mut best: Option<(usize, usize, &'a Recipe, usize)> = None;
     for r in recipes {
         for name in &r.names {
             let words: Vec<String> = tokenize(name).into_iter().map(|t| t.2).collect();
             let k = words.len();
-            if k == 0 || k > toks.len() {
+            if k == 0 {
                 continue;
             }
-            for i in 0..=toks.len() - k {
-                if (0..k).all(|j| toks[i + j].2 == words[j]) && best.is_none_or(|(_, bk, _)| k > bk) {
-                    best = Some((i, k, r));
+            for (pi, (_, toks)) in scans.iter().enumerate() {
+                if k > toks.len() {
+                    continue;
+                }
+                for i in 0..=toks.len() - k {
+                    if (0..k).all(|j| toks[i + j].2 == words[j]) && best.is_none_or(|(bk, _, _, _)| k > bk) {
+                        best = Some((k, pi, r, i));
+                    }
                 }
             }
         }
     }
-    let Some((i, k, recipe)) = best else { return Exact::Miss };
-    let w = |j: usize| toks[j].2.as_str();
-    let span = |j: usize| (toks[j].0, toks[j].1);
-    let after = i + k;
-    let counts_word = |j: usize| matches!(w(j), "x" | "×" | "serving" | "servings" | "portion" | "portions");
-    // A count of zero is not a serving count: no hit at all.
-    let zero = (i >= 1 && is_zero(w(i - 1)))
-        || (i >= 2 && counts_word(i - 1) && is_zero(w(i - 2)))
-        || (i >= 3 && w(i - 1) == "of" && counts_word(i - 2) && is_zero(w(i - 3)))
-        || (after < toks.len() && is_zero(w(after)))
-        || (after + 1 < toks.len() && matches!(w(after), "x" | "×") && is_zero(w(after + 1)))
-        || (i >= 2 && matches!(w(i - 1), "x" | "×") && is_zero(w(i - 2)));
-    if zero {
-        return Exact::Zero;
-    }
-    let matched = text[toks[i].0..toks[i + k - 1].1].to_string();
-    if nutrition::split_pieces(text).iter().any(|p| p.contains(matched.as_str()) && has_range(p)) {
-        return Exact::Refuse;
-    }
-    let mut removed = vec![(toks[i].0, toks[i + k - 1].1)];
-    let mut servings = None;
-    if i >= 1 && w(i - 1) == "half" {
-        servings = Some(0.5);
-        removed.push(span(i - 1));
-    }
-    if servings.is_none() && i >= 3 && w(i - 1) == "of" && matches!(w(i - 2), "serving" | "servings" | "portion" | "portions") {
-        // "2 servings of <name>"
-        if let Some(n) = count(w(i - 3)) {
-            servings = Some(n);
-            removed.extend([span(i - 3), span(i - 2), span(i - 1)]);
-        }
-    }
-    if servings.is_none() && i >= 2 && matches!(w(i - 1), "serving" | "servings" | "portion" | "portions") {
-        if let Some(n) = count(w(i - 2)) {
-            if i >= 3 && is_whole(w(i - 3)) && is_fraction(w(i - 2)) {
-                // "1 1/2 servings": the whole number and the fraction add up.
-                servings = Some(w(i - 3).parse::<f64>().unwrap_or(0.0) + n);
-                removed.extend([span(i - 3), span(i - 2), span(i - 1)]);
-            } else {
-                servings = Some(n);
-                removed.extend([span(i - 2), span(i - 1)]);
+    let Some((k, pi, recipe, i)) = best else {
+        return Exact::Miss;
+    };
+    let (sc, toks) = &scans[pi];
+    let span = (toks[i].0, toks[i + k - 1].1);
+    let matched = sc.text[span.0..span.1].to_string();
+    let amounts: Vec<nutrition::Amount> = sc.amounts.iter().filter(|a| !(a.start < span.1 && span.0 < a.end)).cloned().collect();
+    let other_pieces: Vec<String> = pieces.iter().enumerate().filter(|(j, _)| *j != pi).map(|(_, p)| p.clone()).collect();
+    let nw = all_name_words(recipe);
+    let ref_food = ref_food_name(recipe);
+    match decide(&amounts, &nw, &ref_food) {
+        Err(hint) => Exact::Refuse(Refused {
+            unknown: nutrition::Unknown { text: pieces[pi].trim().to_string(), hint },
+            rest: other_pieces.join("\n"),
+        }),
+        Ok(q) => {
+            // The matched piece keeps what the name and its amounts did not use.
+            let mut spans = vec![span];
+            spans.extend(sc.amounts.iter().map(|a| (a.start, a.end)));
+            let leftover = nutrition::strip_spans(&sc.text, &spans);
+            let mut parts: Vec<String> = Vec::new();
+            for (j, p) in pieces.iter().enumerate() {
+                if j != pi {
+                    parts.push(p.clone());
+                } else if !leftover.is_empty() {
+                    parts.push(leftover.clone());
+                }
             }
+            let (servings, explicit, weight_g) = qty_fields(&q);
+            Exact::Hit(Hit { recipe, servings, rest: parts.join("\n"), explicit, weight_g, fuzzy: false, matched })
         }
     }
-    if servings.is_none() && i >= 2 && matches!(w(i - 1), "x" | "×") {
-        if let Some(n) = count(w(i - 2)) {
-            servings = Some(n);
-            removed.extend([span(i - 2), span(i - 1)]);
-        }
-    }
-    if servings.is_none() && i >= 1 {
-        if let Some(n) = count(w(i - 1)) {
-            servings = Some(n);
-            removed.push(span(i - 1));
-        }
-    }
-    // "salmon 150 g", "salmon 1/2 lb" and "salmon 1 1/2 lb" are weights, not counts.
-    let weight_at = |j: usize| toks.get(j).is_some_and(|t| unit_factor(&t.2).is_some());
-    let weighed = weight_at(after + 1)
-        || (after + 2 < toks.len() && is_whole(w(after)) && is_fraction(w(after + 1)) && weight_at(after + 2));
-    if servings.is_none() && after < toks.len() && !weighed {
-        // The index of the first token after the count, if a count was read after the name.
-        let mut next = None;
-        if is_whole(w(after)) && after + 1 < toks.len() && is_fraction(w(after + 1)) {
-            // "1 1/2 servings": the mixed number reads as 1.5.
-            if let Some((v, _)) = nutrition::quantity(&text[toks[after].0..]) {
-                servings = Some(v);
-                removed.extend([span(after), span(after + 1)]);
-                next = Some(after + 2);
-            }
-        } else if let Some(n) = count(w(after)) {
-            servings = Some(n);
-            removed.push(span(after));
-            next = Some(after + 1);
-        } else if matches!(w(after), "x" | "×") && after + 1 < toks.len() {
-            if let Some(n) = count(w(after + 1)) {
-                servings = Some(n);
-                removed.extend([span(after), span(after + 1)]);
-                next = Some(after + 2);
-            }
-        }
-        // The serving word that follows the count goes with it.
-        if let Some(j) = next.filter(|&j| j < toks.len()) {
-            if matches!(w(j), "serving" | "servings" | "portion" | "portions") {
-                removed.push(span(j));
-            }
-        }
-    }
-    // A typed weight in the piece that holds the name scales the recipe, as on the fuzzy path,
-    // and comes out of the rest so it is never read as an unknown.
-    let mut weight_g = None;
-    if let Some(piece) = nutrition::split_pieces(text).iter().find(|p| p.contains(matched.as_str())) {
-        if let Some(ps) = text.find(piece.as_str()) {
-            let ptoks = tokenize(piece);
-            if let Some((g, a, b)) = weight_span(&ptoks) {
-                weight_g = Some(g);
-                removed.push((ps + ptoks[a].0, ps + ptoks[b].1));
-            }
-        }
-    }
-    if servings.is_some_and(|n| n > MAX_SERVINGS) {
-        return Exact::Refuse;
-    }
-    let mut rest = String::new();
-    for (idx, ch) in text.char_indices() {
-        if !removed.iter().any(|&(s, e)| idx >= s && idx < e) {
-            rest.push(ch);
-        }
-    }
-    Exact::Hit(Hit {
-        recipe,
-        servings: servings.unwrap_or(1.0),
-        rest: rest.trim().to_string(),
-        explicit: servings.is_some(),
-        weight_g,
-        fuzzy: false,
-        matched,
-    })
 }
-
-const NAME_STOP: [&str; 10] = ["the", "and", "with", "made", "of", "a", "an", "my", "some", "recipe"];
 
 /// Fuzzy pass: per piece and per recipe name, count distinct name words that match a piece word
 /// (equal, a trailing `s` apart, or Levenshtein 1 for words of 4+ letters). Accept at least two
 /// words and at least half of the name's words. The highest (hits, ingredient hits) wins.
-fn fuzzy<'a>(text: &str, recipes: &'a [Recipe]) -> Option<Hit<'a>> {
+fn fuzzy<'a>(text: &str, recipes: &'a [Recipe]) -> Option<Result<Hit<'a>, Refused>> {
     let pieces = nutrition::split_pieces(text);
     let mut best: Option<(usize, usize, usize, &'a Recipe)> = None;
     for r in recipes {
         let ing = ingredient_words(r);
         let anchors = anchor_words(r);
         for (pi, piece) in pieces.iter().enumerate() {
-            let pw = words(piece);
+            let pw = words(&nutrition::scan(piece).text);
             // The main ingredient must be named: a different protein with the same side words is no hit.
             if !pw.iter().any(|w| anchors.iter().any(|a| word_match(w, a))) {
                 continue;
@@ -286,60 +315,26 @@ fn fuzzy<'a>(text: &str, recipes: &'a [Recipe]) -> Option<Hit<'a>> {
         }
     }
     let (_, _, pi, recipe) = best?;
-    let piece = pieces[pi].clone();
-    let toks = tokenize(&piece);
-    if toks.iter().any(|t| is_zero(&t.2)) || has_range(&piece) {
-        return None;
-    }
-    let n = toks.len();
-    let w = |j: usize| toks[j].2.as_str();
-    let mut found: Option<f64> = None;
-    for j in 0..n {
-        // "150 g" is a weight, not a count.
-        if toks.get(j + 1).is_some_and(|t| unit_factor(&t.2).is_some()) && w(j).parse::<f64>().is_ok() {
-            continue;
+    let piece = &pieces[pi];
+    let sc = nutrition::scan(piece);
+    let nw = all_name_words(recipe);
+    // A number word that is a word of the name ("One Pot Pasta") is part of the name, not an amount.
+    let amounts: Vec<nutrition::Amount> = sc.amounts.iter().filter(|a| !(a.word && nw.contains(&sc.text[a.start..a.end].to_lowercase()))).cloned().collect();
+    let rest = pieces.iter().enumerate().filter(|(j, _)| *j != pi).map(|(_, p)| p.clone()).collect::<Vec<_>>().join("\n");
+    let ref_food = ref_food_name(recipe);
+    Some(match decide(&amounts, &nw, &ref_food) {
+        Err(hint) => Err(Refused { unknown: nutrition::Unknown { text: piece.trim().to_string(), hint }, rest }),
+        Ok(q) => {
+            let (servings, explicit, weight_g) = qty_fields(&q);
+            Ok(Hit { recipe, servings, rest, explicit, weight_g, fuzzy: true, matched: piece.clone() })
         }
-        if w(j) == "half" {
-            found = Some(0.5);
-            break;
-        }
-        if j + 1 < n && is_whole(w(j)) && is_fraction(w(j + 1)) {
-            found = Some(w(j).parse::<f64>().unwrap_or(0.0) + count(w(j + 1)).unwrap_or(0.0));
-            break;
-        }
-        if let Some(v) = count(w(j)) {
-            found = Some(v);
-            break;
-        }
-    }
-    let rest = match text.find(&piece) {
-        Some(s) => {
-            let mut r = text.to_string();
-            r.replace_range(s..s + piece.len(), "");
-            r
-        }
-        None => text.to_string(),
-    };
-    let rest = rest.trim_matches(|c: char| c.is_whitespace() || matches!(c, ',' | ';' | '+')).to_string();
-    if found.is_some_and(|n| n > MAX_SERVINGS) {
-        return None;
-    }
-    Some(Hit {
-        recipe,
-        servings: found.unwrap_or(1.0),
-        rest,
-        explicit: found.is_some(),
-        weight_g: weight_of(&toks),
-        fuzzy: true,
-        matched: piece,
     })
 }
 
-/// Scale the recipe to what was typed. Explicit count wins; then a typed weight of the heaviest
-/// ingredient (`honey garlic salmon 150g`); then a typed row for that food; else one serving.
+/// Scale the recipe to what was typed. Explicit count wins; then a typed weight of the reference ingredient
+/// (`honey garlic salmon 150g`); then a typed row for that food; else one serving.
 pub fn scale(hit: &Hit, typed: &nutrition::Parsed) -> (f64, Scaled) {
-    let base = nutrition::parse_meal(&hit.recipe.lines.join("\n"));
-    let Some(heaviest) = base.items.iter().max_by(|a, b| a.grams.total_cmp(&b.grams)) else {
+    let Some(heaviest) = reference(hit.recipe) else {
         return (1.0, Scaled::Assumed);
     };
     let food: &'static str = heaviest.food.name;
@@ -584,34 +579,25 @@ fn ingredient_words(r: &Recipe) -> Vec<String> {
     out
 }
 
-/// The name words that name the recipe's main ingredient: the heaviest item of its lines (picked
-/// as `scale` picks it) matched against that food's name or aliases. Empty when none match.
+/// The name words that name the recipe's main ingredient: the words of its reference food's name or aliases
+/// that a name word matches. Empty when the title names no ingredient (then the recipe gets no fuzzy hit).
 fn anchor_words(r: &Recipe) -> Vec<String> {
-    let base = nutrition::parse_meal(&r.lines.join("\n"));
-    let Some(heaviest) = base.items.iter().max_by(|a, b| a.grams.total_cmp(&b.grams)) else {
+    let Some(item) = reference(r) else {
         return Vec::new();
     };
-    let food_words: Vec<String> = std::iter::once(heaviest.food.name)
-        .chain(heaviest.food.aliases.iter().copied())
-        .flat_map(words)
-        .collect();
+    let food = food_words(item.food);
     let mut out: Vec<String> = Vec::new();
-    for w in r.names.iter().flat_map(|n| name_words(n)) {
-        if food_words.iter().any(|f| word_match(&w, f)) && !out.contains(&w) {
+    for w in all_name_words(r) {
+        if food.iter().any(|f| word_match(&w, f)) && !out.contains(&w) {
             out.push(w);
         }
     }
     out
 }
 
-/// A typed digit range (`1-2`, `1–2`, `1 - 2`): a range is not one count.
-fn has_range(text: &str) -> bool {
-    let cs: Vec<char> = text.chars().collect();
-    (0..cs.len()).any(|i| {
-        matches!(cs[i], '-' | '–')
-            && cs[..i].iter().rev().find(|c| !c.is_whitespace()).is_some_and(|c| c.is_ascii_digit())
-            && cs[i + 1..].iter().find(|c| !c.is_whitespace()).is_some_and(|c| c.is_ascii_digit())
-    })
+/// The food's name and aliases as lowercase words.
+fn food_words(f: &nutrition::Food) -> Vec<String> {
+    std::iter::once(f.name).chain(f.aliases.iter().copied()).flat_map(words).collect()
 }
 
 fn word_match(a: &str, b: &str) -> bool {
@@ -636,82 +622,19 @@ fn levenshtein(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
-/// A typed weight in the piece: `150g`, `1.5kg`, `6 oz`, or a number then a unit word. Grams, and the
-/// first and last token it covers.
-fn weight_span(toks: &[(usize, usize, String)]) -> Option<(f64, usize, usize)> {
-    for (j, (_, _, w)) in toks.iter().enumerate() {
-        let split = w.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(w.len());
-        let Ok(n) = w[..split].parse::<f64>() else { continue };
-        let (unit, last) = if split == w.len() {
-            (toks.get(j + 1).map_or("", |t| t.2.as_str()), j + 1)
-        } else {
-            (&w[split..], j)
-        };
-        if let Some(f) = unit_factor(unit) {
-            let g = n * f;
-            if g.is_finite() && g > 0.0 {
-                return Some((g, j, last));
-            }
-        }
-    }
-    None
-}
-
-fn weight_of(toks: &[(usize, usize, String)]) -> Option<f64> {
-    weight_span(toks).map(|(g, _, _)| g)
-}
-
-fn unit_factor(u: &str) -> Option<f64> {
-    match u {
-        "g" | "gram" | "grams" => Some(1.0),
-        "kg" | "kgs" | "kilo" | "kilos" | "kilogram" | "kilograms" => Some(1000.0),
-        "oz" | "ounce" | "ounces" => Some(28.35),
-        "lb" | "lbs" | "pound" | "pounds" => Some(453.592),
-        _ => None,
-    }
-}
-
-fn is_whole(s: &str) -> bool {
-    s.parse::<u32>().is_ok()
-}
-
-fn is_fraction(s: &str) -> bool {
-    (s.contains('/') || matches!(s, "½" | "¼" | "¾")) && count(s).is_some()
-}
-
-fn is_zero(s: &str) -> bool {
-    s.trim_start_matches(['x', '×']).trim_end_matches(['x', '×']).parse::<f64>() == Ok(0.0)
-}
-
-/// A serving count: "2", "0.5", "1/2", "x2", "2x", "×2".
-fn count(s: &str) -> Option<f64> {
-    let s = s.trim_start_matches(['x', '×']).trim_end_matches(['x', '×']);
-    let v = match s {
-        "½" => 0.5,
-        "¼" => 0.25,
-        "¾" => 0.75,
-        _ => match s.split_once('/') {
-            Some((a, b)) => a.parse::<f64>().ok()? / b.parse::<f64>().ok()?,
-            None => s.parse::<f64>().ok()?,
-        },
-    };
-    (v.is_finite() && v > 0.0).then_some(v)
-}
-
-/// A recipe line the typed text could not use. `rest` is the text after the refused piece (U0 stub: no pieces yet).
-#[derive(Clone, Debug)]
-pub struct Refused {
-    pub unknown: nutrition::Unknown,
-    pub rest: String,
-}
-
-/// `resolve`, with the refusal kept. U0 stub: never refuses (U1 implements the refusals).
-pub fn resolve_or_refuse<'a>(text: &str, recipes: &'a [Recipe]) -> Result<Option<Hit<'a>>, Refused> {
-    Ok(resolve(text, recipes))
-}
-
-/// The ingredient a recipe scales by. U0 stub: the heaviest item (today's pick). U1 picks the title-named protein.
+/// The ingredient a recipe scales by: among the items whose food a title word names (a food word word_matches a
+/// name word), the one with the most protein, ties to more grams. If the title names none, the heaviest item.
 pub fn reference(r: &Recipe) -> Option<nutrition::Item> {
-    let base = nutrition::parse_meal(&r.lines.join("\n"));
-    base.items.into_iter().max_by(|a, b| a.grams.total_cmp(&b.grams))
+    let items = nutrition::parse_meal(&r.lines.join("\n")).items;
+    let names = all_name_words(r);
+    let named: Vec<nutrition::Item> = items
+        .iter()
+        .filter(|it| food_words(it.food).iter().any(|f| names.iter().any(|n| word_match(n, f))))
+        .cloned()
+        .collect();
+    if named.is_empty() {
+        return items.into_iter().max_by(|a, b| a.grams.total_cmp(&b.grams));
+    }
+    let protein = |it: &nutrition::Item| it.grams * it.food.protein / 100.0;
+    named.into_iter().max_by(|a, b| protein(a).total_cmp(&protein(b)).then(a.grams.total_cmp(&b.grams)))
 }
