@@ -1,10 +1,13 @@
 //! Evening check-in rule (U3). At most one check-in per local day, and none on a day that already has a meal.
-//! The per-day marker is written before the send, so a crash mid-send gives that day no check-in
-//! (never-twice wins over always-once).
+//! Every allowlisted id gets each day's check-in at least once (I3). Each id's marker is written after its send, so a
+//! failed send is retried on the next tick, and only a crash between a successful send and its marker write repeats
+//! that one DM, once.
 use crate::daylog;
+use crate::rich::Rich;
 use crate::summary;
 use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike};
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 
 pub const HOUR: u32 = 21;
@@ -57,54 +60,74 @@ pub fn text(day: &str) -> String {
     )
 }
 
-/// Writes the marker first, then sends. A failed send removes the marker so the day can retry.
+/// Sends the check-in to one recipient, then writes the day marker on success. A failed send leaves no marker, so the
+/// day can retry.
 pub async fn send<F, Fut>(dir: &Path, day: &str, f: F) -> Result<(), String>
 where
     F: FnOnce(String) -> Fut,
-    Fut: std::future::Future<Output = Result<(), String>>,
+    Fut: Future<Output = Result<(), String>>,
 {
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let marker = marker_path(dir, day);
-    fs::write(&marker, "sent\n").map_err(|e| e.to_string())?;
-    match f(text(day)).await {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = fs::remove_file(&marker);
-            Err(e)
-        }
-    }
+    f(text(day)).await?;
+    fs::write(marker_path(dir, day), "sent\n").map_err(|e| e.to_string())
 }
 
-/// Sends the check-in to each id once per day, through `send`. The day marker is claimed first, as in `send`. Each
-/// recipient is marked as it is sent (`summary::send_each`), so a failed id is retried on the next tick without
-/// resending the check-in to the ids that already got it. A failed send is returned to the caller.
+/// Sends the check-in to each id, at least once (I3), through `summary::send_each`: each id's marker is written after
+/// its send, so a failed id is retried on the next tick and the ids that already got it are skipped. The day marker is
+/// written only when every id has been sent. A failed send is returned to the caller.
 pub async fn send_all<F, Fut>(dir: &Path, day: &str, ids: &[u64], mut send_one: F) -> Result<(), String>
 where
     F: FnMut(u64, String) -> Fut,
-    Fut: std::future::Future<Output = Result<(), String>>,
+    Fut: Future<Output = Result<(), String>>,
 {
+    fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let body = text(day);
     let marker = marker_path(dir, day);
     let name = marker.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let base = marker.with_file_name(format!("{name}.dm"));
-    self::send(dir, day, move |text: String| async move {
-        summary::send_each(&base, ids, |uid| send_one(uid, text.clone())).await
-    })
-    .await
+    summary::send_each(&base, ids, |uid| send_one(uid, body.clone())).await?;
+    fs::write(&marker, "sent\n").map_err(|e| e.to_string())
 }
 
-/// One pass of the check-in loop: the check-in, the daily card and the weekly card, each per recipient.
-/// Returns the log lines. U0 stub: does nothing yet (U3 moves the loop body here).
+/// One pass of the check-in loop: the check-in, the daily card and the weekly card, each per recipient (I3: every id
+/// gets each once, a failed id is retried on the next pass). Returns the log lines; the bin prints them.
 pub async fn tick<F, Fut>(
-    _dir: &Path,
-    _now: NaiveDateTime,
-    _ids: &[u64],
-    _low_kcal: u32,
-    _kcal_target: u32,
-    _send: F,
+    dir: &Path,
+    now: NaiveDateTime,
+    ids: &[u64],
+    low_kcal: u32,
+    kcal_target: u32,
+    mut send: F,
 ) -> Vec<String>
 where
-    F: FnMut(u64, crate::rich::Rich) -> Fut,
-    Fut: std::future::Future<Output = Result<(), String>>,
+    F: FnMut(u64, Rich) -> Fut,
+    Fut: Future<Output = Result<(), String>>,
 {
-    Vec::new()
+    let mut log = Vec::new();
+    if let Some(day) = due(dir, now) {
+        let r = send_all(dir, &day, ids, |uid, body| send(uid, Rich { text: body, ..Default::default() })).await;
+        log.push(match r {
+            Ok(()) => format!("check-in sent for {day}"),
+            Err(e) => format!("check-in for {day} failed: {e}"),
+        });
+    }
+    if let Some(day) = summary::daily_due(dir, now) {
+        let card = summary::day_card(dir, &day, low_kcal, kcal_target);
+        let marker = summary::marker_path(dir, &day);
+        let r = summary::send_each(&marker, ids, |uid| send(uid, card.clone())).await;
+        log.push(match r {
+            Ok(()) => format!("summary sent for {day}"),
+            Err(e) => format!("summary for {day} failed: {e}"),
+        });
+    }
+    if let Some(day) = summary::weekly_due(dir, now) {
+        let card = summary::week_card(dir, &day, low_kcal, kcal_target);
+        let marker = summary::weekly_marker(dir, &day);
+        let r = summary::send_each(&marker, ids, |uid| send(uid, card.clone())).await;
+        log.push(match r {
+            Ok(()) => format!("weekly sent for {day}"),
+            Err(e) => format!("weekly for {day} failed: {e}"),
+        });
+    }
+    log
 }

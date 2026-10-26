@@ -283,9 +283,10 @@ pub fn recipient_marker(marker: &Path, uid: u64) -> PathBuf {
     marker.with_file_name(format!("{name}-{uid}"))
 }
 
-/// Sends to each recipient in order, each at most once per day. A recipient whose marker exists is skipped. A
-/// failed send releases only that recipient's marker and is collected. The day marker is claimed only when every
-/// recipient has been sent, so a retry reaches just the ones that failed.
+/// Sends to each recipient in order, at least once per day (I3). A recipient whose marker exists is skipped. The
+/// recipient's marker is written after its send succeeds, so a failed send leaves no marker and is collected. The
+/// only way to send twice is a crash between a successful send and its marker write, and then only once more. The
+/// day marker is claimed only when every recipient has been sent, so a retry reaches just the ones that failed.
 pub async fn send_each<F, Fut>(marker: &Path, ids: &[u64], mut send: F) -> Result<(), String>
 where
     F: FnMut(u64) -> Fut,
@@ -297,13 +298,13 @@ where
         if mine.exists() {
             continue;
         }
-        if let Err(e) = claim(&mine) {
-            errors.push(e);
-            continue;
-        }
-        if let Err(e) = send(uid).await {
-            release(&mine);
-            errors.push(e);
+        match send(uid).await {
+            Ok(()) => {
+                if let Err(e) = claim(&mine) {
+                    errors.push(e);
+                }
+            }
+            Err(e) => errors.push(e),
         }
     }
     if !errors.is_empty() {
