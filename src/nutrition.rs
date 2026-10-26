@@ -80,12 +80,22 @@ pub const AMBIGUOUS: &[(&str, &str)] = &[
     ("rice", "say dry rice or cooked rice"),
     ("pasta", "say dry pasta or cooked pasta"),
     ("noodles", "say instant noodles, dry pasta or cooked pasta"),
+    ("chicken", "say chicken breast or chicken thigh"),
 ];
+
+/// Words that make a piece a different dish from the table food it names (`almond milk` is not milk).
+const NOT_THE_SAME_FOOD: &[&str] = &[
+    "almond", "oat", "soy", "coconut", "cashew", "chips", "crisps", "fries", "bread", "cake", "muffin", "cookie", "pie", "vinegar", "juice", "sauce", "powder", "flour", "oil", "butter", "jam", "syrup", "soup", "chocolate", "candy",
+];
+
+/// Unit-like words that are really a size, not a unit (`1 large egg`).
+const SIZE_WORDS: &[&str] = &["large", "medium", "small", "big", "whole", "jumbo", "of"];
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Unit {
     G,
     Oz,
+    Lb,
     Cup,
     Tbsp,
     Tsp,
@@ -138,8 +148,9 @@ fn unit_word(raw: &str) -> Option<(Unit, f64)> {
         "g" | "gram" | "grams" => Some((Unit::G, 1.0)),
         "kg" => Some((Unit::G, 1000.0)),
         "oz" | "ounce" | "ounces" => Some((Unit::Oz, 28.35)),
+        "lb" | "lbs" | "pound" | "pounds" => Some((Unit::Lb, 453.592)),
         "cup" | "cups" | "c" => Some((Unit::Cup, 1.0)),
-        "tbsp" | "tablespoon" | "tablespoons" => Some((Unit::Tbsp, 1.0)),
+        "tbsp" | "tbs" | "tbsps" | "tablespoon" | "tablespoons" => Some((Unit::Tbsp, 1.0)),
         "tsp" | "teaspoon" | "teaspoons" | "t" => Some((Unit::Tsp, 1.0)),
         w if PIECE_WORDS.contains(&w) => Some((Unit::Piece, 1.0)),
         _ => None,
@@ -150,6 +161,7 @@ fn unit_name(u: Unit) -> &'static str {
     match u {
         Unit::G => "g",
         Unit::Oz => "oz",
+        Unit::Lb => "lb",
         Unit::Cup => "cup",
         Unit::Tbsp => "tbsp",
         Unit::Tsp => "tsp",
@@ -241,28 +253,33 @@ pub fn quantity(s: &str) -> Option<(f64, &str)> {
     Some((value, rest))
 }
 
-/// `1,000` is one thousand; `1,5` stays two pieces (a decimal comma is not a separator).
+/// `1,000` is one thousand; `1,5` is a decimal (`1.5`), so it is not split into two pieces.
 fn join_thousands(s: &str) -> String {
     let cs: Vec<char> = s.chars().collect();
     let digit = |i: usize| cs.get(i).is_some_and(|c| c.is_ascii_digit());
     let mut out = String::with_capacity(s.len());
     for i in 0..cs.len() {
         let thousands = cs[i] == ',' && i > 0 && digit(i - 1) && digit(i + 1) && digit(i + 2) && digit(i + 3) && !digit(i + 4);
-        if !thousands {
+        if thousands {
+            continue;
+        }
+        if cs[i] == ',' && i > 0 && digit(i - 1) && digit(i + 1) {
+            out.push('.');
+        } else {
             out.push(cs[i]);
         }
     }
     out
 }
 
-/// Splits on ` and ` in any letter case (` AND ` too), so no item is silently dropped.
-fn split_and(p: &str) -> Vec<&str> {
+/// Splits on `sep` in any letter case (` AND ` too), so no item is silently dropped.
+fn split_on<'a>(p: &'a str, sep: &str) -> Vec<&'a str> {
     let lower = p.to_ascii_lowercase();
     let mut out = Vec::new();
     let mut last = 0;
-    for (i, _) in lower.match_indices(" and ") {
+    for (i, _) in lower.match_indices(sep) {
         out.push(&p[last..i]);
-        last = i + " and ".len();
+        last = i + sep.len();
     }
     out.push(&p[last..]);
     out
@@ -272,7 +289,7 @@ fn split_and(p: &str) -> Vec<&str> {
 pub fn split_pieces(text: &str) -> Vec<String> {
     join_thousands(text)
         .split(|c| matches!(c, ',' | '+' | ';' | '\n'))
-        .flat_map(split_and)
+        .flat_map(|p| split_on(p, " and "))
         .map(|p| {
             let p = p.trim();
             let p = p.strip_prefix("- ").or_else(|| p.strip_prefix("* ")).unwrap_or(p);
@@ -308,19 +325,61 @@ fn best_match(c: &str) -> Option<Result<&'static Food, Unknown>> {
     hits.into_iter().max_by_key(|(len, _)| *len).map(|(_, r)| r)
 }
 
-/// Whether a message reads as food: it has an amount, or a word the table knows. Chat with neither is not a meal.
+/// Whether a message reads as food: an amount followed by a unit (or a piece word), or a word the table knows.
+/// Clock times and bare numbers (`room 101`, `slept 8 hours`) are not food. Chat with neither is not a meal.
 pub fn looks_like_food(text: &str) -> bool {
-    text.chars().any(|c| c.is_ascii_digit() || vulgar(c).is_some()) || best_match(&norm(text)).is_some()
+    let cleaned = text.split_whitespace().filter(|t| !is_clock(t)).collect::<Vec<_>>().join(" ").replace(':', " ");
+    let amount_unit = cleaned.char_indices().any(|(i, c)| amount_at(&cleaned, i, c) && quantity(&cleaned[i..]).is_some_and(|(_, rest)| take_unit(rest).0.is_some()));
+    amount_unit || best_match(&norm(text)).is_some()
 }
 
 pub fn lookup(name: &str) -> Result<&'static Food, Unknown> {
     let n = norm(name);
     let n = n.strip_prefix("of ").unwrap_or(&n).to_string();
-    let found = best_match(&n).or_else(|| n.strip_suffix('s').and_then(best_match));
+    let found = best_match(&n).map(|r| (r, n.clone())).or_else(|| {
+        let s = n.strip_suffix('s')?.to_string();
+        best_match(&s).map(|r| (r, s))
+    });
     match found {
-        Some(r) => r,
+        Some((Ok(food), used)) => {
+            check_single_food(food, &used)?;
+            Ok(food)
+        }
+        Some((Err(u), _)) => Err(u),
         None => Err(Unknown { text: n, hint: "not in the table; say grams or a name from the table".to_string() }),
     }
+}
+
+/// The table food is the whole piece: no other dish word (`banana bread`), and no second food (`eggs toast`).
+fn check_single_food(food: &Food, used: &str) -> Result<(), Unknown> {
+    let words: Vec<&str> = used.split_whitespace().collect();
+    let alias = std::iter::once(food.name)
+        .chain(food.aliases.iter().copied())
+        .filter(|a| a.split_whitespace().all(|w| words.contains(&w)))
+        .max_by_key(|a| a.len())
+        .unwrap_or(food.name);
+    let alias_words: Vec<&str> = alias.split_whitespace().collect();
+    if words.iter().any(|w| !alias_words.contains(w) && NOT_THE_SAME_FOOD.contains(w)) {
+        return Err(Unknown { text: used.to_string(), hint: format!("'{used}' isn't in the table; it isn't plain {}", food.name) });
+    }
+    let rest: Vec<&str> = words.iter().copied().filter(|w| !alias_words.contains(w)).collect();
+    if !rest.is_empty() && best_match(&rest.join(" ")).is_some() {
+        return Err(Unknown { text: used.to_string(), hint: "two foods in one line; put each on its own line".to_string() });
+    }
+    Ok(())
+}
+
+/// Whether `w` (a word after the amount) is a word of the food: its name or an alias, singular or plural.
+fn is_food_word(w: &str, food: &Food) -> bool {
+    std::iter::once(food.name).chain(food.aliases.iter().copied()).flat_map(str::split_whitespace).any(|c| c == w || w.strip_suffix('s') == Some(c) || c.strip_suffix('s') == Some(w))
+}
+
+/// The word right after an amount, as the parser sees it: a glued alphabetic run (`100ml`), else the first token.
+fn word_after_amount(rest: &str) -> String {
+    if rest.starts_with(char::is_alphabetic) {
+        return rest.chars().take_while(|c| c.is_alphabetic()).collect::<String>().to_lowercase();
+    }
+    rest.split_whitespace().next().unwrap_or("").trim_end_matches(['.', ',', '!', '?', ')']).to_lowercase()
 }
 
 /// `12:30` is a clock time, not an amount; the colon in `rice:1/2 cup` is a separator.
@@ -331,14 +390,21 @@ fn is_clock(t: &str) -> bool {
     }
 }
 
-/// Byte index of the first amount in `s`: a digit, a `.5`, or a vulgar fraction, at the start or after a space.
+/// Whether an amount (a digit, a `.5`, or a vulgar fraction) starts at byte `i` of `s`: at the start, after a space,
+/// after an opening bracket, or after a dash that follows a word (`salmon-150g`).
+fn amount_at(s: &str, i: usize, c: char) -> bool {
+    let starts = c.is_ascii_digit() || vulgar(c).is_some() || (c == '.' && s[i + 1..].starts_with(|d: char| d.is_ascii_digit()));
+    let before = &s[..i];
+    let ok_before = before.is_empty()
+        || before.ends_with(char::is_whitespace)
+        || before.ends_with(['(', '['])
+        || (before.ends_with('-') && before[..before.len() - 1].ends_with(char::is_alphabetic));
+    starts && ok_before
+}
+
+/// Byte index of the first amount in `s`.
 fn find_qty(s: &str) -> Option<usize> {
-    s.char_indices()
-        .find(|&(i, c)| {
-            let starts = c.is_ascii_digit() || vulgar(c).is_some() || (c == '.' && s[i + 1..].starts_with(|d: char| d.is_ascii_digit()));
-            starts && (i == 0 || s[..i].ends_with(char::is_whitespace))
-        })
-        .map(|(i, _)| i)
+    s.char_indices().find(|&(i, c)| amount_at(s, i, c)).map(|(i, _)| i)
 }
 
 /// A unit word right after the amount, attached (`180g`) or spaced (`180 g`). Returns the raw word, the unit and the rest.
@@ -367,16 +433,29 @@ pub fn parse_line(piece: &str) -> Result<Item, Unknown> {
     let mut qty = None;
     let mut unit: Option<(Unit, f64)> = None;
     let mut food_text = text.trim().to_string();
+    // The number comes before the food ("20 shrimp"), the word after the number when no unit was read, and "head".
+    let mut leading = false;
+    let mut after_amount = String::new();
+    let mut head = false;
     if let Some(i) = find_qty(&text) {
         let Some((q, rest)) = quantity(&text[i..]) else {
             return Err(Unknown { hint: "amount not readable; write it as 100, 1/2 or ½".to_string(), ..whole });
         };
+        let consumed = &text[i..text.len() - rest.len()];
+        if consumed.contains(['-', '–']) {
+            return Err(Unknown { hint: "a range; send one number".to_string(), ..whole });
+        }
         let before = text[..i].trim();
+        leading = before.is_empty();
         let (taken, after) = take_unit(rest);
+        if taken.is_none() {
+            after_amount = word_after_amount(rest);
+        }
         food_text = format!("{before} {}", after.trim()).trim().to_string();
         qty = Some(q);
         if let Some((raw, u, f)) = taken {
             unit = Some((u, f));
+            head = raw.eq_ignore_ascii_case("head") || raw.eq_ignore_ascii_case("heads");
             // "2 eggs": the piece word is the food itself.
             if food_text.is_empty() && u == Unit::Piece {
                 food_text = raw.to_string();
@@ -398,24 +477,43 @@ pub fn parse_line(piece: &str) -> Result<Item, Unknown> {
         u.text = food_text.clone();
         u
     })?;
+    // A word after the amount that is not a unit, a piece word, a size or a word of the food: "2 tbs oil" is no longer
+    // a unit-less 2 g, and "Paid 12 dollars for salmon" is not a meal.
+    let allowed = PIECE_WORDS.contains(&after_amount.as_str()) || SIZE_WORDS.contains(&after_amount.as_str()) || is_food_word(&after_amount, food);
+    if qty.is_some() && unit.is_none() && !after_amount.is_empty() && !allowed {
+        return Err(Unknown { text: food_text.clone(), hint: format!("unknown unit '{after_amount}'; give grams") });
+    }
+    if head && food.piece_g.is_none_or(|p| p < 200.0) {
+        return Err(Unknown { text: food_text.clone(), hint: format!("a head of {} isn't in the table; give grams", food.name) });
+    }
     let (grams, qty_out, unit_out, assumed) = match qty {
         None => (food.portion_g, 1.0, Unit::G, true),
         Some(q) => {
             // A bare count of a food with a piece weight is pieces (up to 12); any other bare number is grams.
+            if unit.is_none() && leading && q > 12.0 && food.piece_g.is_some() {
+                let n = fmt_num(q);
+                return Err(Unknown { text: food_text, hint: format!("{n} pieces or {n} g? add g or pcs") });
+            }
             let (u, f) = match unit {
                 Some(x) => x,
                 None if q <= 12.0 && food.piece_g.is_some() => (Unit::Piece, 1.0),
                 None => (Unit::G, 1.0),
             };
             let per = match u {
-                Unit::G | Unit::Oz => Some(f),
+                Unit::G | Unit::Oz | Unit::Lb => Some(f),
                 Unit::Cup => food.cup_g,
                 Unit::Tbsp => food.cup_g.map(|c| c / 16.0),
                 Unit::Tsp => food.cup_g.map(|c| c / 48.0),
                 Unit::Piece => food.piece_g,
             };
             match per {
-                Some(p) => (q * p, q, u, false),
+                Some(p) => {
+                    let g = q * p;
+                    if !g.is_finite() || g > 10_000.0 {
+                        return Err(Unknown { text: food_text, hint: "over 10 kg; check the amount".to_string() });
+                    }
+                    (g, q, u, false)
+                }
                 None => {
                     let hint = format!("no {} weight for {}; give grams", unit_name(u), food.name);
                     return Err(Unknown { text: food_text, hint });
@@ -428,8 +526,10 @@ pub fn parse_line(piece: &str) -> Result<Item, Unknown> {
 
 pub fn parse_meal(text: &str) -> Parsed {
     let mut p = Parsed::default();
-    for piece in split_pieces(text) {
-        match parse_line(&piece) {
+    let pieces = split_pieces(text);
+    // Typed meals also split on ` with ` ("salmon 150g with rice"); recipe lines go through here too, so this is the only place.
+    for piece in pieces.iter().flat_map(|p| split_on(p, " with ")) {
+        match parse_line(piece) {
             Ok(item) => p.items.push(item),
             Err(u) => p.unknown.push(u),
         }
