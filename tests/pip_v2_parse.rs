@@ -119,9 +119,14 @@ fn property_pieces_round_trip_without_invention_or_loss() {
         let sep = if rng.next() % 2 == 0 { "\n" } else { ", " };
         let text = pieces.join(sep);
         let parsed = nutrition::parse_meal(&text);
-        assert!(parsed.unknown.is_empty(), "case {case}: {text:?} unknown {:?}", parsed.unknown);
-        assert_eq!(parsed.items.len(), expect.len(), "case {case}: {text:?}");
-        for (it, (name, grams)) in parsed.items.iter().zip(&expect) {
+        // Over 10 kg is refused with "over 10 kg" (PR #114 F1 i); every other piece must come through as before.
+        let (over, under): (Vec<_>, Vec<_>) = expect.iter().partition(|(_, grams)| *grams > 10_000.0);
+        assert_eq!(parsed.unknown.len(), over.len(), "case {case}: {text:?} unknown {:?}", parsed.unknown);
+        for u in &parsed.unknown {
+            assert!(u.hint.contains("over 10 kg"), "case {case}: {text:?} unknown {:?}", u);
+        }
+        assert_eq!(parsed.items.len(), under.len(), "case {case}: {text:?}");
+        for (it, (name, grams)) in parsed.items.iter().zip(&under) {
             assert_eq!(it.food.name, *name, "case {case}: {text:?}");
             assert!((it.grams - grams).abs() <= 0.01, "case {case}: {text:?} got {} want {grams}", it.grams);
         }

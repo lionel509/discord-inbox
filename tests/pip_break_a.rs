@@ -84,11 +84,11 @@ fn thousands_separator_is_one_quantity() {
     assert!((p.items[0].grams - 1000.0).abs() < 0.5, "1,000 g dry rice: expected 1000 g, got {} g", p.items[0].grams);
 }
 
-// 7. A range "1-2 cups" is read as 1 unit of the thing.
+// 7. A typed range "1-2 cups" is refused and asks for one number (PR #114 F1 k).
 #[test]
-fn range_quantity_is_not_the_low_end_alone() {
-    let it = nutrition::parse_line("1-2 cups dry rice").expect("rice parses");
-    assert!(it.grams >= 185.0, "1-2 cups dry rice: expected at least 185 g, got {} g", it.grams);
+fn typed_range_asks_for_one_number() {
+    let err = nutrition::parse_line("1-2 cups dry rice").expect_err("a typed range is refused");
+    assert!(err.hint.contains("range"), "1-2 cups dry rice: hint {:?}", err.hint);
 }
 
 // 7b. Same range in a recipe table cell: the recipe line becomes "1 g".
