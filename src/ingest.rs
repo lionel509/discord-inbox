@@ -615,11 +615,35 @@ pub async fn catch_up<H: History>(allow: &Allowlist, inbox: &Path, h: &H) {
     catch_up_with(allow, inbox, h, &Filer::off()).await
 }
 
+/// Stormy's catch-up: `catch_up_each` with `ingest_with` as the per-message handler.
 pub async fn catch_up_with<H: History>(allow: &Allowlist, inbox: &Path, h: &H, filer: &Filer) {
-    for (channel, id) in dump::retry_entries(inbox) {
+    catch_up_each(allow, inbox, h, &Stormy { allow, inbox, filer }).await
+}
+
+/// Stormy's per-message handler: the full `ingest_with` path.
+struct Stormy<'a> {
+    allow: &'a Allowlist,
+    inbox: &'a Path,
+    filer: &'a Filer,
+}
+
+impl<M: Inbound> Handle<M> for Stormy<'_> {
+    fn handle(&self, m: &M) -> impl std::future::Future<Output = Outcome> + Send {
+        ingest_with(self.allow, self.inbox, m, self.filer)
+    }
+}
+
+/// Per-message handler the generic catch-up drives (U4). Stormy's is `ingest_with`; Pip's is `pip::PipHandler`.
+pub trait Handle<M: Inbound>: Sync {
+    fn handle(&self, m: &M) -> impl std::future::Future<Output = Outcome> + Send;
+}
+
+/// Generic catch-up with a per-message handler (U4): the retry list, then each allowlisted DM channel from its cursor.
+pub async fn catch_up_each<H: History, D: Handle<H::Msg>>(allow: &Allowlist, state: &Path, h: &H, d: &D) {
+    for (channel, id) in dump::retry_entries(state) {
         match h.fetch(channel, id).await {
             Ok(m) => {
-                let _ = ingest_with(allow, inbox, &m, filer).await;
+                let _ = d.handle(&m).await;
             }
             Err(e) => eprintln!("discord-inbox: retry {id} not fetchable: {e}"),
         }
@@ -633,7 +657,7 @@ pub async fn catch_up_with<H: History>(allow: &Allowlist, inbox: &Path, h: &H, f
                 continue;
             }
         };
-        let start = dump::read_cursor(inbox, channel);
+        let start = dump::read_cursor(state, channel);
         let mut after = start;
         // The cursor only moves over a contiguous run that is on disk or in .retry.
         let mut safe = start;
@@ -648,7 +672,7 @@ pub async fn catch_up_with<H: History>(allow: &Allowlist, inbox: &Path, h: &H, f
             };
             page.sort_by_key(|m| m.msg_id());
             for m in &page {
-                match ingest_with(allow, inbox, m, filer).await {
+                match d.handle(m).await {
                     Outcome::Failed => blocked = true,
                     Outcome::Ignored => {}
                     Outcome::Skipped | Outcome::Saved | Outcome::Pending => {
@@ -668,7 +692,7 @@ pub async fn catch_up_with<H: History>(allow: &Allowlist, inbox: &Path, h: &H, f
         }
         if safe != start {
             if let Some(id) = safe {
-                if let Err(e) = dump::write_cursor(inbox, channel, id) {
+                if let Err(e) = dump::write_cursor(state, channel, id) {
                     eprintln!("discord-inbox: cursor for channel {channel} failed: {e}");
                 }
             }

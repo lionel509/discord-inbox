@@ -82,3 +82,16 @@ Until a DM channel has a cursor (`Inbox/.cursor-<channel>`), each start fetches 
 Builds on macOS only (Keychain via `security-framework`).
 
 OCR needs Xcode's `swiftc` at build time; without it the build warns and OCR is off.
+
+## Pip (nutrition DMs)
+
+Pip is a second bot in this crate (`pip-bot`), separate from discord-inbox. It reads your DMs for food, logs each meal to a day note, and replies with the kcal and macros it counted. It makes no model or network calls for nutrition: the numbers come from a local table (USDA-style per-100 g values). Unknown foods are reported back, never guessed. It has no weigh-in and no weight trend.
+
+- Token: `security add-generic-password -s pip -a pip -w`. The allowlist is the same file as discord-inbox.
+- Env: `PIP_NUTRITION_DIR` (required, absolute): day notes `YYYY-MM-DD.md`, photos and the lock live here. Point it at a dedicated folder. `PIP_RECIPES_DIR` (optional, absolute): recipe markdown, read only. `PIP_LOW_KCAL` (optional, default 1800): days under it are flagged.
+- Day notes: Pip owns only the lines between `<!-- pip:totals -->` and `<!-- /pip:totals -->` (it rewrites them) and the blocks between `<!-- pip:meal N -->` and `<!-- /pip:meal N -->` (it writes each once); everything else in a day note is yours. If those totals lines or their markers are edited, Pip leaves them alone and adds a warning line to each new meal; put the two marker lines back around Pip's two lines, or delete both marker lines, to resume.
+- Launchd: `launchd/com.lionel509.pip.plist` is a template. Replace `__HOME__`, `__NUTRITION_DIR__` and `__RECIPES_DIR__`, copy it to `~/Library/LaunchAgents/`, then `launchctl load` it. Nothing in the repo holds real paths.
+- Messages: `100g salmon, 1/2 cup dry rice, cabbage + 1 tbsp oil`. Units g, oz, cup, tbsp, tsp, piece; a number with no unit is grams, a food with no number uses its default portion and says so. `1 serving salmon bowl, 150g salmon` uses the recipe, and the typed weights override it for that meal. Naming `rice` alone is unknown: say dry or cooked.
+- Missed DMs: a catch-up on start and on wake replays every allowlisted DM since each channel's cursor, photos included, and replies to each one then.
+- Check-in: at 21:00 local, if nothing is logged that day, Pip sends one message with a fixed suggestion. Never twice for a day.
+- Demo: `sh examples/pip_demo.sh` runs the parser and the replay on scratch folders.

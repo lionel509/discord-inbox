@@ -42,14 +42,18 @@ fn main_rs_is_glue_over_the_lib() {
     ] {
         assert!(!src.contains(banned), "main.rs must not contain {banned}");
     }
+    // The serenity adapter lives in src/live.rs (planned verbatim move); main.rs must hold none of it.
+    let live = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/live.rs")).unwrap();
+    assert_eq!(src.matches(".react(").count(), 0, "main.rs must not call .react(");
+    assert_eq!(src.matches(".download(").count(), 0, "main.rs must not call .download(");
     assert_eq!(
-        src.matches(".react(").count(),
+        src.matches(".react(").count() + live.matches(".react(").count(),
         1,
-        "one react path, in the adapter"
+        "one react path across main.rs + live.rs, in the adapter"
     );
     assert_eq!(
-        src.matches(".download(").count(),
+        src.matches(".download(").count() + live.matches(".download(").count(),
         1,
-        "one download path, in the adapter"
+        "one download path across main.rs + live.rs, in the adapter"
     );
 }
