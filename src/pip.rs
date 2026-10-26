@@ -12,7 +12,7 @@ use crate::summary;
 use std::path::PathBuf;
 
 /// Pip's public presence: persona only, nothing about food or health.
-pub const PRESENCE: &str = "curled up on a warm laptop 💤";
+pub const PRESENCE: &str = "curled up on a warm laptop 🐈";
 /// Used when `PIP_KCAL_TARGET` is unset or unparsable. A placeholder until he sets his own.
 pub const DEFAULT_KCAL_TARGET: u32 = 2400;
 
@@ -179,15 +179,11 @@ pub async fn handle<M: Inbound>(allow: &Allowlist, cfg: &Config, m: &M) -> Outco
 
     let recipe_list = cfg.recipes_dir.as_deref().map(recipes::load).unwrap_or_default();
     let subject = fix_rest.clone().unwrap_or_else(|| text.clone());
-    if fix_rest.is_some() {
-        if let Err(e) = daylog::record_command(&cfg.nutrition_dir, msg_id) {
-            eprintln!("pip: command ledger on {msg_id} failed: {e}");
-            let _ = m.react(FAILED_MARK).await;
-            return Outcome::Failed;
-        }
-    }
     let an = analyze(&subject, &recipe_list);
     if fix_rest.is_some() && (subject.is_empty() || !an.is_meal) {
+        if let Some(out) = claim(cfg, m, msg_id).await {
+            return out;
+        }
         let _ = m.reply(FIX_USAGE).await;
         let _ = m.react(SAVED_MARK).await;
         return Outcome::Saved;
@@ -233,6 +229,10 @@ pub async fn handle<M: Inbound>(allow: &Allowlist, cfg: &Config, m: &M) -> Outco
     }
 
     if fix_rest.is_some() {
+        // Claimed after the photos are saved, so a failed download leaves the fix retryable.
+        if let Some(out) = claim(cfg, m, msg_id).await {
+            return out;
+        }
         match daylog::undo_last(&cfg.nutrition_dir, &day, cfg.low_kcal, msg_id) {
             Ok(Some(_)) => {}
             Ok(None) => {
@@ -288,13 +288,25 @@ pub async fn handle<M: Inbound>(allow: &Allowlist, cfg: &Config, m: &M) -> Outco
     Outcome::Saved
 }
 
-/// Answers a command (never `fix`, which `handle` runs itself). The ledger is written before the action.
+/// Claims a command id in the ledger before its action runs. `Some(outcome)` means stop: the id was already
+/// claimed by another delivery (`Skipped`), or the ledger write failed (`Failed`, marked).
+async fn claim<M: Inbound>(cfg: &Config, m: &M, msg_id: u64) -> Option<Outcome> {
+    match daylog::claim_command(&cfg.nutrition_dir, msg_id) {
+        Ok(true) => None,
+        Ok(false) => Some(Outcome::Skipped),
+        Err(e) => {
+            eprintln!("pip: command ledger on {msg_id} failed: {e}");
+            let _ = m.react(FAILED_MARK).await;
+            Some(Outcome::Failed)
+        }
+    }
+}
+
+/// Answers a command (never `fix`, which `handle` runs itself). The ledger is claimed before the action.
 async fn run_command<M: Inbound>(cfg: &Config, m: &M, day: &str, msg_id: u64, cmd: &Command) -> Outcome {
     let dir = cfg.nutrition_dir.as_path();
-    if let Err(e) = daylog::record_command(dir, msg_id) {
-        eprintln!("pip: command ledger on {msg_id} failed: {e}");
-        let _ = m.react(FAILED_MARK).await;
-        return Outcome::Failed;
+    if let Some(out) = claim(cfg, m, msg_id).await {
+        return out;
     }
     let reply = match cmd {
         Command::Help => m.reply(HELP).await,
