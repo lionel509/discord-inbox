@@ -113,6 +113,44 @@ fn show_dir(label: &str, dir: &Path) {
     }
 }
 
+/// One DM through the real handler; a non-saved outcome is printed.
+async fn send(allow: &allowlist::Allowlist, cfg: &Config, id: u64, received: &'static str, text: &'static str) {
+    let m = Msg { spec: Spec { id, received, text, photo: false }, live: true };
+    match pip::handle(allow, cfg, &m).await {
+        Outcome::Saved => {}
+        other => println!("  outcome for {id}: {other:?}"),
+    }
+}
+
+/// Inserts `add` on the line after the first line `at` accepts.
+fn insert_after(text: &str, at: impl Fn(&str) -> bool, add: &str) -> String {
+    let mut out = String::new();
+    let mut done = false;
+    for line in text.split_inclusive('\n') {
+        out.push_str(line);
+        if !done && at(line.trim_end()) {
+            out.push_str(add);
+            done = true;
+        }
+    }
+    assert!(done, "anchor line not found");
+    out
+}
+
+/// How many of `his` appear exactly once as whole lines of `note`.
+fn kept(note: &str, his: &[&str]) -> usize {
+    his.iter().filter(|h| note.lines().filter(|l| l.trim_end() == **h).count() == 1).count()
+}
+
+/// The lines he typed by hand. The `---` fence is left out: it appears twice by design.
+const HIS: [&str; 5] = [
+    "mood: tired",
+    "how full: very",
+    "Felt bloated after lunch.",
+    "ate late, ignore the flag",
+    "skipped the cabbage",
+];
+
 #[tokio::main]
 async fn main() {
     let cfg = Config::from_env().expect("pip_demo.sh sets the scratch folders");
@@ -154,4 +192,34 @@ async fn main() {
             println!("\n--- {day} ---\n{text}");
         }
     }
+
+    println!("\n== (c) his hand edits survive ==");
+    let day = "2026-10-27";
+    let day_file = nutrition.join(format!("{day}.md"));
+    send(&allow, &cfg, 9201, "2026-10-27T12:15:00-04:00", "100g salmon, 1/2 cup dry rice, cabbage").await;
+    let written = fs::read_to_string(&day_file).expect("the first DM wrote the day note");
+    let mut edited = format!("---\nmood: tired\nhow full: very\n---\n{written}");
+    edited = insert_after(&edited, |l| l == "# 2026-10-27", "Felt bloated after lunch.\n");
+    edited = insert_after(&edited, |l| l.starts_with("**Flags:**"), "ate late, ignore the flag\n");
+    edited = insert_after(&edited, |l| l == "<!-- /pip:meal 9201 -->", "skipped the cabbage\n");
+    fs::write(&day_file, &edited).expect("hand edit");
+    println!("--- before Pip writes ---\n{edited}");
+
+    send(&allow, &cfg, 9202, "2026-10-27T18:05:00-04:00", "1 serving salmon bowl, 150g salmon").await;
+    let after = fs::read_to_string(&day_file).expect("day note");
+    println!("--- after Pip writes ---\n{after}");
+    let (k, n) = (kept(&after, &HIS), HIS.len());
+    println!("his lines kept: {k}/{n}");
+
+    println!("\n== (c) damaged: the totals close marker deleted by hand ==");
+    let cut: String = after.split_inclusive('\n').filter(|l| l.trim_end() != "<!-- /pip:totals -->").collect();
+    fs::write(&day_file, &cut).expect("damage the note");
+    let warn_before = cut.matches("totals not updated").count();
+    send(&allow, &cfg, 9203, "2026-10-27T20:40:00-04:00", "100g glaze").await;
+    let damaged = fs::read_to_string(&day_file).expect("day note");
+    println!("--- after Pip writes (damaged) ---\n{damaged}");
+    let (k, n) = (kept(&damaged, &HIS), HIS.len());
+    println!("his lines kept: {k}/{n}");
+    let warned = damaged.matches("totals not updated").count() > warn_before;
+    println!("warning appended: {}", if warned { "yes" } else { "no" });
 }
