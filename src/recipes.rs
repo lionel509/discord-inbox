@@ -10,6 +10,8 @@ pub struct Recipe {
     pub names: Vec<String>,
     pub lines: Vec<String>,
     pub skipped: Vec<String>,
+    /// Lines read from a range (`1–2 cups` as its midpoint), for the reply to mark as assumed.
+    pub assumed: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -66,11 +68,11 @@ pub fn parse_note(stem: &str, text: &str) -> Option<Recipe> {
             names.push(n);
         }
     }
-    let (lines, skipped) = ingredient_lines(body);
+    let (lines, skipped, assumed) = ingredient_lines(body);
     if lines.is_empty() {
         return None;
     }
-    Some(Recipe { name: stem.to_string(), names, lines, skipped })
+    Some(Recipe { name: stem.to_string(), names, lines, skipped, assumed })
 }
 
 /// Exact name first; the fuzzy pass runs only when no exact name is in the text.
@@ -169,6 +171,18 @@ fn exact<'a>(text: &str, recipes: &'a [Recipe]) -> Exact<'a> {
             }
         }
     }
+    // A typed weight in the piece that holds the name scales the recipe, as on the fuzzy path,
+    // and comes out of the rest so it is never read as an unknown.
+    let mut weight_g = None;
+    if let Some(piece) = nutrition::split_pieces(text).iter().find(|p| p.contains(matched.as_str())) {
+        if let Some(ps) = text.find(piece.as_str()) {
+            let ptoks = tokenize(piece);
+            if let Some((g, a, b)) = weight_span(&ptoks) {
+                weight_g = Some(g);
+                removed.push((ps + ptoks[a].0, ps + ptoks[b].1));
+            }
+        }
+    }
     let mut rest = String::new();
     for (idx, ch) in text.char_indices() {
         if !removed.iter().any(|&(s, e)| idx >= s && idx < e) {
@@ -180,7 +194,7 @@ fn exact<'a>(text: &str, recipes: &'a [Recipe]) -> Exact<'a> {
         servings: servings.unwrap_or(1.0),
         rest: rest.trim().to_string(),
         explicit: servings.is_some(),
-        weight_g: None,
+        weight_g,
         fuzzy: false,
         matched,
     })
@@ -360,26 +374,31 @@ fn qty_header(cell: &str) -> bool {
 
 const QTY_HEADERS: [&str; 6] = ["amount", "qty", "quantity", "g", "grams", "weight"];
 
-/// The text to read an amount from. A range keeps the unit after it: `1–2 cups` gives `1 cups`,
-/// `3-6` gives `3`.
-fn amount_text(cell: &str) -> String {
+/// An amount from a table cell: `100`, `1 1/2`, `3-6` (first number, grams), or a range with a unit,
+/// `1–2 cups` (the midpoint, in that unit). The bool marks a range read as its midpoint.
+fn amount(cell: &str) -> Option<(f64, String, bool)> {
     let cell = cell.trim();
-    let Some(pos) = cell.find(['-', '–']) else { return cell.to_string() };
-    let head = cell[..pos].trim();
-    if head.is_empty() {
-        return cell.to_string();
+    if let Some(pos) = cell.find(['-', '–']).filter(|&p| p > 0) {
+        let sep = cell[pos..].chars().next().map_or(1, char::len_utf8);
+        if let (Some((a, _)), Some((b, tail))) =
+            (nutrition::quantity(cell[..pos].trim()), nutrition::quantity(cell[pos + sep..].trim_start()))
+        {
+            return Some(match tail.split_whitespace().next() {
+                Some(unit) => ((a + b) / 2.0, unit.to_string(), true),
+                None => (a, "g".to_string(), false),
+            });
+        }
     }
-    let rest = &cell[pos..];
-    let tail = &rest[rest.chars().next().map_or(1, char::len_utf8)..];
-    let unit = tail.trim_start().trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '/').trim();
-    format!("{head} {unit}")
+    let (v, rest) = nutrition::quantity(cell)?;
+    Some((v, rest.split_whitespace().next().unwrap_or("g").to_string(), false))
 }
 
 /// Ingredient lines in note order: table rows (recipe column, else column 1) and
-/// bullets under an "ingredient" heading. Returns (lines, skipped).
-fn ingredient_lines(body: &str) -> (Vec<String>, Vec<String>) {
+/// bullets under an "ingredient" heading. Returns (lines, skipped, assumed).
+fn ingredient_lines(body: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut lines = Vec::new();
     let mut skipped = Vec::new();
+    let mut assumed = Vec::new();
     let mut in_ingredients = false;
     let mut in_table = false;
     let mut table_ok = false;
@@ -409,9 +428,11 @@ fn ingredient_lines(body: &str) -> (Vec<String>, Vec<String>) {
                 continue;
             }
             let cell = cells.get(qty_col).map(|c| c.replace('*', "")).unwrap_or_default();
-            match nutrition::quantity(&amount_text(&cell)) {
-                Some((v, rest)) => {
-                    let unit = rest.split_whitespace().next().unwrap_or("g");
+            match amount(&cell) {
+                Some((v, unit, ranged)) => {
+                    if ranged {
+                        assumed.push(format!("{name}: {} read as midpoint {} {unit}", cell.trim(), fmt(v)));
+                    }
                     lines.push(format!("{} {} {}", fmt(v), unit, name));
                 }
                 None => skipped.push(format!("{name}: no amount")),
@@ -428,7 +449,7 @@ fn ingredient_lines(body: &str) -> (Vec<String>, Vec<String>) {
             }
         }
     }
-    (lines, skipped)
+    (lines, skipped, assumed)
 }
 
 fn cells_of(line: &str) -> Vec<String> {
@@ -525,20 +546,29 @@ fn levenshtein(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
-/// A typed weight in the piece: `150g`, `1.5kg`, `6 oz`. Grams.
-fn weight_of(toks: &[(usize, usize, String)]) -> Option<f64> {
+/// A typed weight in the piece: `150g`, `1.5kg`, `6 oz`, or a number then a unit word. Grams, and the
+/// first and last token it covers.
+fn weight_span(toks: &[(usize, usize, String)]) -> Option<(f64, usize, usize)> {
     for (j, (_, _, w)) in toks.iter().enumerate() {
         let split = w.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(w.len());
         let Ok(n) = w[..split].parse::<f64>() else { continue };
-        let unit = if split == w.len() { toks.get(j + 1).map_or("", |t| t.2.as_str()) } else { &w[split..] };
+        let (unit, last) = if split == w.len() {
+            (toks.get(j + 1).map_or("", |t| t.2.as_str()), j + 1)
+        } else {
+            (&w[split..], j)
+        };
         if let Some(f) = unit_factor(unit) {
             let g = n * f;
             if g.is_finite() && g > 0.0 {
-                return Some(g);
+                return Some((g, j, last));
             }
         }
     }
     None
+}
+
+fn weight_of(toks: &[(usize, usize, String)]) -> Option<f64> {
+    weight_span(toks).map(|(g, _, _)| g)
 }
 
 fn unit_factor(u: &str) -> Option<f64> {
