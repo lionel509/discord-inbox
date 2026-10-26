@@ -157,19 +157,37 @@ fn unit_name(u: Unit) -> &'static str {
     }
 }
 
-/// Leading number: `100`, `0.5`, `.5`, `1/2`, `1 1/2`, or a unicode vulgar fraction. Returns the value and the rest.
+/// One vulgar-fraction character and its value.
+fn vulgar(c: char) -> Option<f64> {
+    Some(match c {
+        '½' => 0.5,
+        '¼' => 0.25,
+        '¾' => 0.75,
+        '⅕' => 0.2,
+        '⅖' => 0.4,
+        '⅗' => 0.6,
+        '⅘' => 0.8,
+        '⅙' => 1.0 / 6.0,
+        '⅚' => 5.0 / 6.0,
+        '⅐' => 1.0 / 7.0,
+        '⅛' => 0.125,
+        '⅜' => 0.375,
+        '⅝' => 0.625,
+        '⅞' => 0.875,
+        '⅑' => 1.0 / 9.0,
+        '⅒' => 0.1,
+        '⅓' => 1.0 / 3.0,
+        '⅔' => 2.0 / 3.0,
+        _ => return None,
+    })
+}
+
+/// Leading number: `100`, `0.5`, `.5`, `1/2`, `1 1/2`, `1½`, `1 ½`, `½`, or a range `1-2` read as its midpoint.
+/// Returns the value and the rest. `None` when there is no number or it is not finite.
 pub fn quantity(s: &str) -> Option<(f64, &str)> {
     let s = s.trim_start();
     if let Some(c) = s.chars().next() {
-        let v = match c {
-            '½' => Some(0.5),
-            '¼' => Some(0.25),
-            '¾' => Some(0.75),
-            '⅓' => Some(1.0 / 3.0),
-            '⅔' => Some(2.0 / 3.0),
-            _ => None,
-        };
-        if let Some(v) = v {
+        if let Some(v) = vulgar(c) {
             return Some((v, &s[c.len_utf8()..]));
         }
     }
@@ -180,17 +198,26 @@ pub fn quantity(s: &str) -> Option<(f64, &str)> {
     let num_end = s.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(s.len());
     let mut value: f64 = s[..num_end].parse().ok()?;
     let mut rest = &s[num_end..];
-    // Mixed number: "1 1/2".
     let after_space = rest.trim_start_matches(' ');
-    if rest.len() != after_space.len() && after_space.starts_with(|c: char| c.is_ascii_digit()) {
-        let w_end = after_space.find(|c: char| !(c.is_ascii_digit() || c == '/')).unwrap_or(after_space.len());
-        if let Some((n, d)) = after_space[..w_end].split_once('/') {
-            let (n, d): (f64, f64) = (n.parse().ok()?, d.parse().ok()?);
-            if d != 0.0 {
-                value += n / d;
-                rest = &after_space[w_end..];
+    let spaced = rest.len() != after_space.len();
+    match after_space.chars().next().and_then(|c| vulgar(c).map(|v| (v, c.len_utf8()))) {
+        // "1½" and "1 ½".
+        Some((v, n)) => {
+            value += v;
+            rest = &after_space[n..];
+        }
+        // Mixed number: "1 1/2".
+        None if spaced && after_space.starts_with(|c: char| c.is_ascii_digit()) => {
+            let w_end = after_space.find(|c: char| !(c.is_ascii_digit() || c == '/')).unwrap_or(after_space.len());
+            if let Some((n, d)) = after_space[..w_end].split_once('/') {
+                let (n, d): (f64, f64) = (n.parse().ok()?, d.parse().ok()?);
+                if d != 0.0 {
+                    value += n / d;
+                    rest = &after_space[w_end..];
+                }
             }
         }
+        None => {}
     }
     if let Some(r) = rest.strip_prefix('/') {
         let den_end = r.find(|c: char| !c.is_ascii_digit()).unwrap_or(r.len());
@@ -201,7 +228,31 @@ pub fn quantity(s: &str) -> Option<(f64, &str)> {
         value /= den;
         rest = &r[den_end..];
     }
+    // Range "1-2" or "1–2": the midpoint, so "1-2 cups" is 1.5 cups.
+    if let Some(r) = rest.strip_prefix(['-', '–']) {
+        if let Some((hi, r2)) = quantity(r) {
+            value = (value + hi) / 2.0;
+            rest = r2;
+        }
+    }
+    if !value.is_finite() {
+        return None;
+    }
     Some((value, rest))
+}
+
+/// `1,000` is one thousand; `1,5` stays two pieces (a decimal comma is not a separator).
+fn join_thousands(s: &str) -> String {
+    let cs: Vec<char> = s.chars().collect();
+    let digit = |i: usize| cs.get(i).is_some_and(|c| c.is_ascii_digit());
+    let mut out = String::with_capacity(s.len());
+    for i in 0..cs.len() {
+        let thousands = cs[i] == ',' && i > 0 && digit(i - 1) && digit(i + 1) && digit(i + 2) && digit(i + 3) && !digit(i + 4);
+        if !thousands {
+            out.push(cs[i]);
+        }
+    }
+    out
 }
 
 /// Splits on ` and ` in any letter case (` AND ` too), so no item is silently dropped.
@@ -217,11 +268,16 @@ fn split_and(p: &str) -> Vec<&str> {
     out
 }
 
-/// Split a message into line items on `,`, `+`, `;`, newline and the word ` and `.
+/// Split a message into line items on `,`, `+`, `;`, newline and the word ` and `. Bullets (`- `, `* `) are dropped.
 pub fn split_pieces(text: &str) -> Vec<String> {
-    text.split(|c| matches!(c, ',' | '+' | ';' | '\n'))
+    join_thousands(text)
+        .split(|c| matches!(c, ',' | '+' | ';' | '\n'))
         .flat_map(split_and)
-        .map(|p| p.trim().trim_start_matches(['-', '*']).trim())
+        .map(|p| {
+            let p = p.trim();
+            let p = p.strip_prefix("- ").or_else(|| p.strip_prefix("* ")).unwrap_or(p);
+            p.trim()
+        })
         .filter(|p| !p.is_empty())
         .map(String::from)
         .collect()
@@ -232,23 +288,29 @@ fn norm(s: &str) -> String {
     cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Every alias (and food name, and ambiguous word) that occurs as whole words in `c`; the longest wins.
+/// Every alias (and food name, and ambiguous word) whose words all occur in `c`, in any order; the longest wins.
 fn best_match(c: &str) -> Option<Result<&'static Food, Unknown>> {
-    let padded = format!(" {c} ");
+    let words: Vec<&str> = c.split_whitespace().collect();
+    let has = |a: &str| a.split_whitespace().all(|w| words.contains(&w));
     let mut hits: Vec<(usize, Result<&'static Food, Unknown>)> = Vec::new();
     for f in FOODS {
         for a in std::iter::once(f.name).chain(f.aliases.iter().copied()) {
-            if padded.contains(&format!(" {a} ")) {
+            if has(a) {
                 hits.push((a.len(), Ok(f)));
             }
         }
     }
     for (a, hint) in AMBIGUOUS {
-        if padded.contains(&format!(" {a} ")) {
+        if has(a) {
             hits.push((a.len(), Err(Unknown { text: c.to_string(), hint: hint.to_string() })));
         }
     }
     hits.into_iter().max_by_key(|(len, _)| *len).map(|(_, r)| r)
+}
+
+/// Whether a message reads as food: it has an amount, or a word the table knows. Chat with neither is not a meal.
+pub fn looks_like_food(text: &str) -> bool {
+    text.chars().any(|c| c.is_ascii_digit() || vulgar(c).is_some()) || best_match(&norm(text)).is_some()
 }
 
 pub fn lookup(name: &str) -> Result<&'static Food, Unknown> {
@@ -261,37 +323,74 @@ pub fn lookup(name: &str) -> Result<&'static Food, Unknown> {
     }
 }
 
+/// `12:30` is a clock time, not an amount; the colon in `rice:1/2 cup` is a separator.
+fn is_clock(t: &str) -> bool {
+    match t.split_once(':') {
+        Some((h, m)) => (1..=2).contains(&h.len()) && m.len() == 2 && h.bytes().all(|b| b.is_ascii_digit()) && m.bytes().all(|b| b.is_ascii_digit()),
+        None => false,
+    }
+}
+
+/// Byte index of the first amount in `s`: a digit, a `.5`, or a vulgar fraction, at the start or after a space.
+fn find_qty(s: &str) -> Option<usize> {
+    s.char_indices()
+        .find(|&(i, c)| {
+            let starts = c.is_ascii_digit() || vulgar(c).is_some() || (c == '.' && s[i + 1..].starts_with(|d: char| d.is_ascii_digit()));
+            starts && (i == 0 || s[..i].ends_with(char::is_whitespace))
+        })
+        .map(|(i, _)| i)
+}
+
+/// A unit word right after the amount, attached (`180g`) or spaced (`180 g`). Returns the raw word, the unit and the rest.
+fn take_unit(rest: &str) -> (Option<(&str, Unit, f64)>, &str) {
+    let alpha = rest.find(|c: char| !c.is_alphabetic()).unwrap_or(rest.len());
+    if alpha > 0 {
+        if let Some((u, f)) = unit_word(&rest[..alpha]) {
+            return (Some((&rest[..alpha], u, f)), &rest[alpha..]);
+        }
+    }
+    let r = rest.trim_start();
+    let end = r.find(char::is_whitespace).unwrap_or(r.len());
+    let word = &r[..end];
+    match unit_word(word.trim_end_matches('.')) {
+        Some((u, f)) => (Some((word, u, f)), &r[end..]),
+        None => (None, rest),
+    }
+}
+
 pub fn parse_line(piece: &str) -> Result<Item, Unknown> {
-    let piece = piece.trim();
-    let (qty, rest) = match quantity(piece) {
-        Some((q, r)) => (Some(q), r.trim()),
-        None => (None, piece),
-    };
-    let (first, after) = match rest.find(char::is_whitespace) {
-        Some(i) => (&rest[..i], rest[i..].trim()),
-        None => (rest, ""),
-    };
-    let mut unit = Unit::G;
-    let mut factor = 1.0;
-    let mut food_text = rest.to_string();
-    if qty.is_some() {
-        let mut explicit = false;
-        if let Some((u, f)) = unit_word(first) {
-            if !after.is_empty() {
-                (unit, factor, food_text, explicit) = (u, f, after.to_string(), true);
-            } else if u == Unit::Piece {
-                // "2 eggs": the piece word is the food itself.
-                (unit, factor, food_text, explicit) = (u, f, first.to_string(), true);
+    let text = join_thousands(piece).split_whitespace().filter(|t| !is_clock(t)).collect::<Vec<_>>().join(" ").replace(':', " ");
+    let whole = Unknown { text: piece.trim().to_string(), hint: String::new() };
+    if text.split_whitespace().any(|t| t.len() > 1 && t.starts_with('-') && t[1..].starts_with(|c: char| c.is_ascii_digit())) {
+        return Err(Unknown { hint: "negative amount; say how much you had".to_string(), ..whole });
+    }
+    let mut qty = None;
+    let mut unit: Option<(Unit, f64)> = None;
+    let mut food_text = text.trim().to_string();
+    if let Some(i) = find_qty(&text) {
+        let Some((q, rest)) = quantity(&text[i..]) else {
+            return Err(Unknown { hint: "amount not readable; write it as 100, 1/2 or ½".to_string(), ..whole });
+        };
+        let before = text[..i].trim();
+        let (taken, after) = take_unit(rest);
+        food_text = format!("{before} {}", after.trim()).trim().to_string();
+        qty = Some(q);
+        if let Some((raw, u, f)) = taken {
+            unit = Some((u, f));
+            // "2 eggs": the piece word is the food itself.
+            if food_text.is_empty() && u == Unit::Piece {
+                food_text = raw.to_string();
             }
         }
-        if !explicit {
-            // "1 cod fillet": a piece word after the food name.
-            let words: Vec<&str> = food_text.split_whitespace().collect();
-            if words.len() > 1 {
-                if let Some(i) = words.iter().position(|w| PIECE_WORDS.contains(w)) {
-                    let kept: Vec<&str> = words.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, w)| *w).collect();
-                    (unit, food_text) = (Unit::Piece, kept.join(" "));
-                }
+    }
+    if qty.is_some() && unit.is_none() {
+        // "1 cod fillet" and "2 large egg": a piece word in the food name makes it a piece count.
+        let words: Vec<&str> = food_text.split_whitespace().collect();
+        if let Some(i) = words.iter().position(|w| PIECE_WORDS.contains(&w.to_lowercase().as_str())) {
+            unit = Some((Unit::Piece, 1.0));
+            let kept = words.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, w)| *w).collect::<Vec<_>>().join(" ");
+            if !kept.is_empty() && lookup(&kept).is_ok() {
+                food_text = kept;
             }
         }
     }
@@ -299,26 +398,32 @@ pub fn parse_line(piece: &str) -> Result<Item, Unknown> {
         u.text = food_text.clone();
         u
     })?;
-    let (grams, qty_out, assumed) = match qty {
-        None => (food.portion_g, 1.0, true),
+    let (grams, qty_out, unit_out, assumed) = match qty {
+        None => (food.portion_g, 1.0, Unit::G, true),
         Some(q) => {
-            let per = match unit {
-                Unit::G | Unit::Oz => Some(factor),
+            // A bare count of a food with a piece weight is pieces (up to 12); any other bare number is grams.
+            let (u, f) = match unit {
+                Some(x) => x,
+                None if q <= 12.0 && food.piece_g.is_some() => (Unit::Piece, 1.0),
+                None => (Unit::G, 1.0),
+            };
+            let per = match u {
+                Unit::G | Unit::Oz => Some(f),
                 Unit::Cup => food.cup_g,
                 Unit::Tbsp => food.cup_g.map(|c| c / 16.0),
                 Unit::Tsp => food.cup_g.map(|c| c / 48.0),
                 Unit::Piece => food.piece_g,
             };
             match per {
-                Some(p) => (q * p, q, false),
+                Some(p) => (q * p, q, u, false),
                 None => {
-                    let word = unit_name(unit);
-                    return Err(Unknown { text: food_text, hint: format!("no {word} weight for {}; give grams", food.name) });
+                    let hint = format!("no {} weight for {}; give grams", unit_name(u), food.name);
+                    return Err(Unknown { text: food_text, hint });
                 }
             }
         }
     };
-    Ok(Item { food, grams, unit, qty: qty_out, assumed })
+    Ok(Item { food, grams, unit: unit_out, qty: qty_out, assumed })
 }
 
 pub fn parse_meal(text: &str) -> Parsed {
