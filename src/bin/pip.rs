@@ -2,9 +2,11 @@
 use discord_inbox::allowlist::{self, Allowlist};
 use discord_inbox::checkin;
 use discord_inbox::ingest::catch_up_each;
-use discord_inbox::live::{Live, LiveMsg};
+use discord_inbox::live::{send_rich, Live, LiveMsg};
 use discord_inbox::pip::{self, Config, PipHandler, PRESENCE};
-use serenity::all::{ActivityData, Client, Context, EventHandler, GatewayIntents, Message, OnlineStatus, Ready, UserId};
+use discord_inbox::rich::Rich;
+use discord_inbox::summary;
+use serenity::all::{ActivityData, Client, Context, EventHandler, GatewayIntents, Http, Message, OnlineStatus, Ready, UserId};
 use serenity::async_trait;
 use std::fs;
 use std::process::ExitCode;
@@ -33,6 +35,15 @@ struct Handler {
     cfg: Arc<Config>,
 }
 
+/// Sends one card to every allowlisted user, as a DM, in allowlist order.
+async fn dm_all(http: &Arc<Http>, allow: &Allowlist, card: &Rich) -> Result<(), String> {
+    for user in allow.ids() {
+        let dm = UserId::new(user).create_dm_channel(http).await.map_err(|e| e.to_string())?;
+        send_rich(http, dm.id, card).await?;
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, _: Ready) {
@@ -57,6 +68,7 @@ impl EventHandler for Handler {
         let http = ctx.http.clone();
         let allow = self.allow.clone();
         let dir = self.cfg.nutrition_dir.clone();
+        let cfg = self.cfg.clone();
         install_checkin_loop(tokio::spawn(async move {
             let mut tick = interval(CHECKIN_TICK);
             tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -86,6 +98,43 @@ impl EventHandler for Handler {
                     match result {
                         Ok(()) => eprintln!("pip: check-in sent for {day}"),
                         Err(e) => eprintln!("pip: check-in for {day} failed: {e}"),
+                    }
+                }
+                // Daily (22:00, a meal logged) and weekly (Sunday 22:00): the marker is claimed before the DMs go out.
+                if let Some(day) = summary::daily_due(&dir, now) {
+                    let card = summary::day_card(&dir, &day, cfg.low_kcal, cfg.kcal_target);
+                    let marker = summary::marker_path(&dir, &day);
+                    let result = match summary::claim(&marker) {
+                        Ok(()) => {
+                            let sent = dm_all(&http, &allow, &card).await;
+                            if sent.is_err() {
+                                summary::release(&marker);
+                            }
+                            sent
+                        }
+                        Err(e) => Err(e),
+                    };
+                    match result {
+                        Ok(()) => eprintln!("pip: summary sent for {day}"),
+                        Err(e) => eprintln!("pip: summary for {day} failed: {e}"),
+                    }
+                }
+                if let Some(day) = summary::weekly_due(&dir, now) {
+                    let card = summary::week_card(&dir, &day, cfg.low_kcal, cfg.kcal_target);
+                    let marker = summary::weekly_marker(&dir, &day);
+                    let result = match summary::claim(&marker) {
+                        Ok(()) => {
+                            let sent = dm_all(&http, &allow, &card).await;
+                            if sent.is_err() {
+                                summary::release(&marker);
+                            }
+                            sent
+                        }
+                        Err(e) => Err(e),
+                    };
+                    match result {
+                        Ok(()) => eprintln!("pip: weekly sent for {day}"),
+                        Err(e) => eprintln!("pip: weekly for {day} failed: {e}"),
                     }
                 }
             }

@@ -1,1 +1,251 @@
-//! U6: `today`/`week` cards, streak, and the daily and weekly summary rules. Filled in by unit U6.
+//! Summaries (U6): the `today` and `week` cards, the streak, and the 22:00 daily and Sunday weekly DMs.
+//! Everything is computed from the day notes on disk; the charts carry no text, so the numbers go in the card.
+use crate::charts::{self, Bar};
+use crate::daylog::{self, MealRow};
+use crate::nutrition::Macros;
+use crate::rich::Rich;
+use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Timelike, Weekday};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+/// Local hour from which the daily and weekly summaries are due.
+pub const SUMMARY_HOUR: u32 = 22;
+const GREEN: u32 = 0x9ED9A0;
+const PINK: u32 = 0xF7B6A3;
+const FOOTER: &str = "today · week · undo · fix <meal> · help";
+
+/// Daily targets from the kcal target: protein 20 % of kcal at 4 kcal/g, carbs 50 % at 4, fat 30 % at 9.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Targets {
+    pub kcal: f64,
+    pub protein: f64,
+    pub carbs: f64,
+    pub fat: f64,
+}
+
+impl Targets {
+    pub fn from_kcal(k: u32) -> Targets {
+        let k = k as f64;
+        Targets { kcal: k, protein: k * 20.0 / 100.0 / 4.0, carbs: k * 50.0 / 100.0 / 4.0, fat: k * 30.0 / 100.0 / 9.0 }
+    }
+}
+
+/// One day's totals. A day with no live meal has `meals == 0`.
+#[derive(Clone, Debug)]
+pub struct DayStat {
+    pub day: String,
+    pub macros: Macros,
+    pub meals: usize,
+    pub veg: bool,
+    pub flags: Vec<&'static str>,
+}
+
+pub fn day_stat(dir: &Path, day: &str, low: u32) -> DayStat {
+    match daylog::totals(dir, day, low) {
+        Some(t) => DayStat { day: day.into(), macros: t.macros, meals: t.meals, veg: t.veg, flags: t.flags },
+        None => DayStat { day: day.into(), macros: Macros::default(), meals: 0, veg: false, flags: Vec::new() },
+    }
+}
+
+/// Seven days ending on `end_day`, oldest first. An unreadable date gives no days.
+pub fn week_days(end_day: &str) -> Vec<String> {
+    let Ok(end) = NaiveDate::parse_from_str(end_day, "%Y-%m-%d") else { return Vec::new() };
+    (0..7).rev().map(|k| (end - Duration::days(k)).format("%Y-%m-%d").to_string()).collect()
+}
+
+/// Consecutive days with at least one meal, ending today, or ending yesterday when today has none. Capped at 366.
+pub fn streak(dir: &Path, today: &str) -> usize {
+    let Ok(mut d) = NaiveDate::parse_from_str(today, "%Y-%m-%d") else { return 0 };
+    if !daylog::has_meal(dir, today) {
+        d -= Duration::days(1);
+    }
+    let mut n = 0;
+    while n < 366 && daylog::has_meal(dir, &d.format("%Y-%m-%d").to_string()) {
+        n += 1;
+        d -= Duration::days(1);
+    }
+    n
+}
+
+/// `1800`-style whole numbers without a decimal, otherwise one decimal place.
+fn num(x: f64) -> String {
+    if (x - x.round()).abs() < 0.05 {
+        format!("{:.0}", x.round())
+    } else {
+        format!("{x:.1}")
+    }
+}
+
+/// One meal as `time · kcal · items`: each item cut at its ` · ` and its ` (`, at most four shown.
+fn meal_line(r: &MealRow) -> String {
+    let items: Vec<String> = r
+        .lines
+        .iter()
+        .map(|l| {
+            let head = l.split(" · ").next().unwrap_or(l);
+            head.split(" (").next().unwrap_or(head).trim().to_string()
+        })
+        .collect();
+    let shown = if items.len() > 4 { format!("{}, …", items[..4].join(", ")) } else { items.join(", ") };
+    format!("{} · {} kcal · {shown}", r.time, r.kcal.round() as i64)
+}
+
+/// Field rows as `Name: value` lines, with the title first: the plain-text fallback of a card.
+fn plain(title: &str, fields: &[(String, String, bool)]) -> String {
+    std::iter::once(title.to_string())
+        .chain(fields.iter().map(|(n, v, _)| format!("{n}: {v}")))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The `today` card: kcal against target, the three macros against their targets, veg, each meal, flags, streak, and the day chart.
+pub fn day_card(dir: &Path, day: &str, low: u32, kcal_target: u32) -> Rich {
+    let t = Targets::from_kcal(kcal_target);
+    let s = day_stat(dir, day, low);
+    let kcal = s.macros.kcal.round() as i64;
+    let meals: Vec<String> = daylog::meals(dir, day).iter().map(meal_line).collect();
+    let flags = if s.flags.is_empty() {
+        "none".to_string()
+    } else {
+        s.flags.iter().map(|f| f.replace('-', " ")).collect::<Vec<_>>().join(", ")
+    };
+    let veg = if s.veg { "yes" } else { "no" };
+    let fields = vec![
+        ("Protein".to_string(), format!("{} / {} g", num(s.macros.protein), num(t.protein)), true),
+        ("Carbs".to_string(), format!("{} / {} g", num(s.macros.carbs), num(t.carbs)), true),
+        ("Fat".to_string(), format!("{} / {} g", num(s.macros.fat), num(t.fat)), true),
+        ("Veg".to_string(), veg.to_string(), true),
+        ("Meals".to_string(), if meals.is_empty() { "none logged".to_string() } else { meals.join("\n") }, false),
+        ("Flags".to_string(), flags, true),
+        ("Streak".to_string(), format!("{} day(s)", streak(dir, day)), true),
+    ];
+    let title = format!("{day} · {kcal} / {kcal_target} kcal");
+    let image = charts::day_png(
+        [s.macros.kcal, s.macros.protein, s.macros.carbs, s.macros.fat],
+        [t.kcal, t.protein, t.carbs, t.fat],
+    );
+    Rich {
+        text: plain(&title, &fields),
+        title,
+        description: String::new(),
+        fields,
+        color: if s.veg { GREEN } else { PINK },
+        footer: FOOTER.into(),
+        image: Some(("day.png".into(), image)),
+    }
+}
+
+/// `Mon 10-26`, or the date as given when it does not parse.
+fn day_label(day: &str) -> String {
+    match NaiveDate::parse_from_str(day, "%Y-%m-%d") {
+        Ok(d) => format!("{} {}", d.format("%a"), &day[5..]),
+        Err(_) => day.to_string(),
+    }
+}
+
+/// The `week` card: the seven days as numbers, the averages and counts, and the week chart (no text in the chart).
+pub fn week_card(dir: &Path, end_day: &str, low: u32, kcal_target: u32) -> Rich {
+    let t = Targets::from_kcal(kcal_target);
+    let days = week_days(end_day);
+    let stats: Vec<DayStat> = days.iter().map(|d| day_stat(dir, d, low)).collect();
+    let logged: Vec<&DayStat> = stats.iter().filter(|s| s.meals > 0).collect();
+    let avg = if logged.is_empty() { 0.0 } else { logged.iter().map(|s| s.macros.kcal).sum::<f64>() / logged.len() as f64 };
+    let at_target = logged.iter().filter(|s| s.macros.kcal >= t.kcal).count();
+    let veg_days = logged.iter().filter(|s| s.veg).count();
+    let first = days.first().cloned().unwrap_or_else(|| end_day.to_string());
+    let title = format!("Week {first} → {end_day}");
+    let description = format!(
+        "Average {} kcal over {} logged day(s) against a {} kcal target · at target {at_target}/7 · veg {veg_days}/7 · streak {} day(s)\nBars: oldest → newest (left to right)",
+        avg.round() as i64,
+        logged.len(),
+        kcal_target,
+        streak(dir, end_day)
+    );
+    let lines: Vec<String> = stats
+        .iter()
+        .map(|s| {
+            let label = day_label(&s.day);
+            if s.meals == 0 {
+                format!("{label} · not logged")
+            } else {
+                format!("{label} · {} kcal · veg {}", s.macros.kcal.round() as i64, if s.veg { "✓" } else { "✗" })
+            }
+        })
+        .collect();
+    let fields = vec![("Days".to_string(), lines.join("\n"), false)];
+    let bars: Vec<Bar> = stats.iter().map(|s| Bar { kcal: s.macros.kcal, logged: s.meals > 0, veg: s.veg }).collect();
+    let split = stats.iter().fold([0.0f64; 3], |mut a, s| {
+        a[0] += s.macros.protein * 4.0;
+        a[1] += s.macros.carbs * 4.0;
+        a[2] += s.macros.fat * 9.0;
+        a
+    });
+    let image = charts::week_png(&bars, t.kcal, low as f64, split);
+    let text = format!("{}\n{description}\n{}", title, fields[0].1);
+    Rich {
+        text,
+        title,
+        description,
+        fields,
+        color: GREEN,
+        footer: FOOTER.into(),
+        image: Some(("week.png".into(), image)),
+    }
+}
+
+/// The daily summary's marker (`.summary-DAY`) in the nutrition folder.
+pub fn marker_path(dir: &Path, day: &str) -> PathBuf {
+    dir.join(format!(".summary-{day}"))
+}
+
+/// The weekly summary's marker (`.weekly-DAY`, keyed by its Sunday).
+pub fn weekly_marker(dir: &Path, day: &str) -> PathBuf {
+    dir.join(format!(".weekly-{day}"))
+}
+
+/// The day whose daily summary is due: from 22:00, once, and only when that day has a meal.
+pub fn daily_due(dir: &Path, now: NaiveDateTime) -> Option<String> {
+    if now.hour() < SUMMARY_HOUR {
+        return None;
+    }
+    let day = now.date().format("%Y-%m-%d").to_string();
+    if marker_path(dir, &day).exists() || !daylog::has_meal(dir, &day) {
+        return None;
+    }
+    Some(day)
+}
+
+/// The Sunday whose weekly summary is due: from 22:00 on a Sunday, once. Sent even when the week has no
+/// meals (the card then reads "not logged" for each day).
+pub fn weekly_due(dir: &Path, now: NaiveDateTime) -> Option<String> {
+    if now.weekday() != Weekday::Sun || now.hour() < SUMMARY_HOUR {
+        return None;
+    }
+    let day = now.date().format("%Y-%m-%d").to_string();
+    if weekly_marker(dir, &day).exists() {
+        return None;
+    }
+    Some(day)
+}
+
+/// Writes the marker before a send, so a slow send is not sent twice.
+pub fn claim(marker: &Path) -> Result<(), String> {
+    if let Some(parent) = marker.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::write(marker, "sent\n").map_err(|e| e.to_string())
+}
+
+/// Removes a marker after a failed send, so the day can retry.
+pub fn release(marker: &Path) {
+    let _ = fs::remove_file(marker);
+}
+
+/// Claims the marker, runs the send, and releases the marker when the send fails.
+pub fn send_marked<F>(marker: &Path, f: F) -> Result<(), String>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    claim(marker)?;
+    f().inspect_err(|_| release(marker))
+}
