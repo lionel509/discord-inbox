@@ -79,15 +79,14 @@ impl EventHandler for Handler {
                 if woke {
                     continue;
                 }
+                // Each allowlisted id is marked as it is sent, so a failed id retries alone and no id gets the check-in twice.
+                let ids: Vec<u64> = allow.ids().collect();
                 if let Some(day) = checkin::due(&dir, now) {
-                    let result = checkin::send(&dir, &day, |text: String| {
+                    let result = checkin::send_all(&dir, &day, &ids, |uid: u64, text: String| {
                         let http = http.clone();
-                        let allow = allow.clone();
                         async move {
-                            for user in allow.ids() {
-                                let dm = UserId::new(user).create_dm_channel(&http).await.map_err(|e| e.to_string())?;
-                                dm.id.say(&http, &text).await.map_err(|e| e.to_string())?;
-                            }
+                            let dm = UserId::new(uid).create_dm_channel(&http).await.map_err(|e| e.to_string())?;
+                            dm.id.say(&http, &text).await.map_err(|e| e.to_string())?;
                             Ok(())
                         }
                     })
@@ -98,7 +97,6 @@ impl EventHandler for Handler {
                     }
                 }
                 // Daily (22:00, a meal logged) and weekly (Sunday 22:00): each recipient is marked as it is sent.
-                let ids: Vec<u64> = allow.ids().collect();
                 if let Some(day) = summary::daily_due(&dir, now) {
                     let card = summary::day_card(&dir, &day, cfg.low_kcal, cfg.kcal_target);
                     let marker = summary::marker_path(&dir, &day);

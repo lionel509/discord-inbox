@@ -2,6 +2,7 @@
 //! The per-day marker is written before the send, so a crash mid-send gives that day no check-in
 //! (never-twice wins over always-once).
 use crate::daylog;
+use crate::summary;
 use chrono::{Datelike, NaiveDate, NaiveDateTime, Timelike};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -72,4 +73,21 @@ where
             Err(e)
         }
     }
+}
+
+/// Sends the check-in to each id once per day, through `send`. The day marker is claimed first, as in `send`. Each
+/// recipient is marked as it is sent (`summary::send_each`), so a failed id is retried on the next tick without
+/// resending the check-in to the ids that already got it. A failed send is returned to the caller.
+pub async fn send_all<F, Fut>(dir: &Path, day: &str, ids: &[u64], mut send_one: F) -> Result<(), String>
+where
+    F: FnMut(u64, String) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    let marker = marker_path(dir, day);
+    let name = marker.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let base = marker.with_file_name(format!("{name}.dm"));
+    self::send(dir, day, move |text: String| async move {
+        summary::send_each(&base, ids, |uid| send_one(uid, text.clone())).await
+    })
+    .await
 }
