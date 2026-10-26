@@ -15,3 +15,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
+
+[[bin]]
+name = "pip-bot"
+path = "src/bin/pip.rs"

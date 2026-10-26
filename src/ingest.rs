@@ -675,3 +675,13 @@ pub async fn catch_up_with<H: History>(allow: &Allowlist, inbox: &Path, h: &H, f
         }
     }
 }
+
+/// Per-message handler the generic catch-up drives (U4). Stormy's is `ingest_with`; Pip's is `pip::PipHandler`.
+pub trait Handle<M: Inbound>: Sync {
+    fn handle(&self, m: &M) -> impl std::future::Future<Output = Outcome> + Send;
+}
+
+/// Generic catch-up with a per-message handler (U4). Stub until U4.
+pub async fn catch_up_each<H: History, D: Handle<H::Msg>>(_allow: &Allowlist, _state: &Path, _h: &H, _d: &D) {
+    todo!()
+}
