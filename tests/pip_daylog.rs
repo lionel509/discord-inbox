@@ -120,3 +120,112 @@ fn a_note_only_meal_counts_as_logged_with_zero_kcal() {
     assert_eq!(t.meals, 1);
     assert_eq!(t.macros.kcal, 0.0);
 }
+
+const NOTE_DAY: &str = "2026-10-26";
+
+fn raw_note(dir: &std::path::Path, day: &str, text: &str) {
+    fs::create_dir_all(dir).unwrap();
+    fs::write(daylog::note_path(dir, day), text).unwrap();
+}
+
+fn read_day(dir: &std::path::Path, day: &str) -> String {
+    fs::read_to_string(daylog::note_path(dir, day)).unwrap()
+}
+
+#[test]
+fn user_front_matter_stays_in_one_block() {
+    let dir = scratch("user-fm");
+    raw_note(
+        &dir,
+        NOTE_DAY,
+        "---\ndate: 2026-10-26\ntags: [food]\naliases: [lunch-log]\n---\n# 2026-10-26\n**Total:** 200 kcal\n**Flags:** none\n\n## Meals\n\n### 12:00 · msg 1\n- rice\n- macros: 200 kcal · P 4 g · C 44 g · F 1 g · veg yes\n\n",
+    );
+    daylog::write_meal(&dir, NOTE_DAY, &meal(2, 150.0, true), 1800).unwrap();
+    daylog::write_meal(&dir, NOTE_DAY, &meal(3, 120.0, true), 1800).unwrap();
+    let out = read_day(&dir, NOTE_DAY);
+    let lines: Vec<&str> = out.lines().collect();
+    let fences: Vec<usize> = lines.iter().enumerate().filter(|(_, l)| **l == "---").map(|(i, _)| i).collect();
+    let tags: Vec<usize> = lines.iter().enumerate().filter(|(_, l)| **l == "tags: [food]").map(|(i, _)| i).collect();
+    assert_eq!(fences.len(), 2, "{out}");
+    assert_eq!(tags.len(), 1, "{out}");
+    assert!(fences[0] < tags[0] && tags[0] < fences[1], "{out}");
+}
+
+#[test]
+fn user_title_is_kept() {
+    let dir = scratch("user-title");
+    raw_note(&dir, NOTE_DAY, "# Rough day\n\nslept badly\n");
+    daylog::write_meal(&dir, NOTE_DAY, &meal(1, 300.0, true), 1800).unwrap();
+    let out = read_day(&dir, NOTE_DAY);
+    assert_eq!(out.matches("# Rough day").count(), 1, "{out}");
+    assert_eq!(out.matches("slept badly").count(), 1, "{out}");
+    assert_eq!(out.lines().filter(|l| *l == "# 2026-10-26").count(), 1, "{out}");
+}
+
+#[test]
+fn leading_rule_block_survives_two_writes() {
+    let dir = scratch("leading-rule");
+    raw_note(&dir, NOTE_DAY, "---\nFelt bloated after lunch, skipped the cabbage.\n---\n\n");
+    daylog::write_meal(&dir, NOTE_DAY, &meal(1, 300.0, true), 1800).unwrap();
+    daylog::write_meal(&dir, NOTE_DAY, &meal(2, 200.0, true), 1800).unwrap();
+    let out = read_day(&dir, NOTE_DAY);
+    assert_eq!(out.matches("Felt bloated after lunch, skipped the cabbage.").count(), 1, "{out}");
+}
+
+#[test]
+fn typed_heading_is_not_a_meal() {
+    let dir = scratch("typed-heading");
+    raw_note(&dir, NOTE_DAY, "### how I feel\nrough day\n");
+    assert!(!daylog::has_meal(&dir, NOTE_DAY));
+    daylog::write_meal(&dir, NOTE_DAY, &meal(1, 300.0, true), 1800).unwrap();
+    assert!(daylog::has_meal(&dir, NOTE_DAY));
+}
+
+#[test]
+fn pip_note_is_byte_exact() {
+    let dir = scratch("golden");
+    let a = Meal {
+        msg_id: 1,
+        time: "12:31".into(),
+        lines: vec!["200 g salmon".into()],
+        macros: Macros { kcal: 400.0, protein: 40.0, carbs: 0.0, fat: 20.0 },
+        veg: true,
+        ..Default::default()
+    };
+    let b = Meal {
+        msg_id: 2,
+        time: "19:05".into(),
+        lines: vec!["1 cup cabbage".into()],
+        macros: Macros { kcal: 291.0, protein: 10.0, carbs: 30.0, fat: 5.0 },
+        veg: false,
+        ..Default::default()
+    };
+    daylog::write_meal(&dir, NOTE_DAY, &a, 1800).unwrap();
+    daylog::write_meal(&dir, NOTE_DAY, &b, 1800).unwrap();
+    let expected = r#"---
+date: 2026-10-26
+kcal: 691
+protein_g: 50
+carbs_g: 30
+fat_g: 25
+meals: 2
+veg: yes
+flags: low-kcal
+---
+# 2026-10-26
+**Total:** 691 kcal · P 50 g · C 30 g · F 25 g · 2 meals · veg yes
+**Flags:** ⚠️ low kcal (691 < 1800)
+
+## Meals
+
+### 12:31 · msg 1
+- 200 g salmon
+- macros: 400 kcal · P 40 g · C 0 g · F 20 g · veg yes
+
+### 19:05 · msg 2
+- 1 cup cabbage
+- macros: 291 kcal · P 10 g · C 30 g · F 5 g · veg no
+
+"#;
+    assert_eq!(read_day(&dir, NOTE_DAY), expected);
+}
