@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.lionel509.pip</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__HOME__/.local/bin/pip-bot</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>__HOME__</string>
+        <key>PIP_NUTRITION_DIR</key>
+        <string>__NUTRITION_DIR__</string>
+        <key>PIP_RECIPES_DIR</key>
+        <string>__RECIPES_DIR__</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/pip.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/pip.log</string>
+</dict>
+</plist>
