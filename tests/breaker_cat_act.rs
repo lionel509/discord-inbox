@@ -36,21 +36,19 @@ fn breaker_out_of_reply_has_no_paw() {
 }
 
 /// Source scan (not behavioural): the "foggy" and "couldn't get to your notes" replies are literals inside
-/// ingest.rs handlers, so no public function returns them. Fails on any cat-face or cat emoji literal in reply code.
+/// ingest.rs handlers, so no public function returns them. Fails on any cat-face or cat emoji, or a cat word, in reply code.
 #[test]
 fn breaker_reply_source_has_no_cat_face_emoji() {
-    let cats = [
-        '\u{1F63A}', '\u{1F638}', '\u{1F639}', '\u{1F63B}', '\u{1F63C}', '\u{1F63D}', '\u{1F63E}', '\u{1F63F}', '\u{1F640}',
-        '\u{1F431}', '\u{1F408}',
-    ];
     let mut hits = Vec::new();
-    for file in ["src/ingest.rs", "src/pantry.rs", "src/commands.rs"] {
+    for file in ["src/ingest.rs", "src/pantry.rs", "src/commands.rs", "src/agent.rs"] {
         let src = fs::read_to_string(format!("{}/{file}", env!("CARGO_MANIFEST_DIR"))).unwrap();
         for (n, line) in src.lines().enumerate() {
-            if line.contains(&cats[..]) {
+            let cat_emoji = line.chars().any(|c| matches!(c, '\u{1F638}'..='\u{1F640}' | '\u{1F408}' | '\u{1F431}'));
+            let lower = line.to_lowercase();
+            if cat_emoji || lower.contains("purr") || lower.contains("meow") {
                 hits.push(format!("{file}:{}: {}", n + 1, line.trim()));
             }
         }
     }
-    assert!(hits.is_empty(), "cat-face emoji still in reply code:\n{}", hits.join("\n"));
+    assert!(hits.is_empty(), "cat emoji or cat word still in reply code:\n{}", hits.join("\n"));
 }

@@ -33,7 +33,8 @@ fn persona_drops_the_cat_act() {
     assert!(answer.contains(NO_CAT_ACT), "{answer}");
     // The instruction itself names "purr" to forbid it, so check the rest of the persona without that sentence.
     let rest = s.replace(NO_CAT_ACT, "").to_lowercase();
-    for word in ["purr", "meow", "🐾", "😺", "😸", "😿", "🐈", "🐱"] {
+    for word in ["purr", "meow"] {
         assert!(!rest.contains(word), "{word} in {rest}");
     }
+    assert!(!rest.chars().any(|c| matches!(c, '\u{1F638}'..='\u{1F640}' | '\u{1F408}' | '\u{1F431}' | '\u{1F43E}')), "cat emoji in {rest}");
 }
