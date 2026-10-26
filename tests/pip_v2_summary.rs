@@ -69,8 +69,18 @@ fn daily_summary_fires_at_ten_pm_once_a_meal_is_logged() {
 #[test]
 fn weekly_summary_is_sunday_at_ten_pm() {
     let dir = scratch("weekly");
+    meal_on(&dir, "2026-10-25", 6, 1900.0);
     assert!(summary::weekly_due(&dir, at(2026, 10, 25, 22, 0)).is_some(), "2026-10-25 is a Sunday");
     assert!(summary::weekly_due(&dir, at(2026, 10, 26, 22, 0)).is_none(), "Monday");
+}
+
+#[test]
+fn weekly_summary_is_sent_once_per_sunday() {
+    let dir = scratch("weeklyonce");
+    meal_on(&dir, "2026-10-25", 7, 1900.0);
+    assert!(summary::weekly_due(&dir, at(2026, 10, 25, 22, 0)).is_some());
+    fs::write(summary::weekly_marker(&dir, "2026-10-25"), "sent\n").unwrap();
+    assert!(summary::weekly_due(&dir, at(2026, 10, 25, 22, 30)).is_none(), "already sent this Sunday");
 }
 
 #[test]
