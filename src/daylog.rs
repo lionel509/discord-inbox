@@ -1,7 +1,7 @@
-//! Day notes (U3): one markdown note per local day, one `### ` block per meal, and a header whose
-//! totals are recomputed from the `- macros:` lines. Writes run under `dump::LOCK`; reads create nothing.
+//! Day notes (U3). Pip owns only the lines between `<!-- pip:totals -->` and `<!-- /pip:totals -->`, which it rewrites, and the meal blocks between `<!-- pip:meal N -->` and `<!-- /pip:meal N -->`, which it writes once. Every other byte is the user's: a write splices the totals interior and appends at the end, and never parses front matter or titles.
 use crate::dump;
 use crate::nutrition::Macros;
+use std::collections::HashSet;
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
@@ -37,6 +37,8 @@ pub struct Totals {
 
 const MEALS_HEADING: &str = "## Meals";
 const DEFAULT_LOW_KCAL: u32 = 1800;
+const TOTALS_OPEN: &str = "<!-- pip:totals -->";
+const TOTALS_CLOSE: &str = "<!-- /pip:totals -->";
 
 /// Local date of a message: the first ten characters of its RFC 3339 timestamp.
 pub fn day_key(received: &str) -> &str {
@@ -55,18 +57,29 @@ fn read_note(dir: &Path, day: &str) -> io::Result<Option<String>> {
     }
 }
 
-/// True when a meal heading in `text` carries this message id.
-fn has_msg(text: &str, msg_id: u64) -> bool {
-    let tail = format!("· msg {msg_id}");
-    text.lines().any(|l| l.starts_with("### ") && l.trim_end().ends_with(&tail))
+fn meal_open(id: u64) -> String {
+    format!("<!-- pip:meal {id} -->")
+}
+
+fn meal_close(id: u64) -> String {
+    format!("<!-- /pip:meal {id} -->")
+}
+
+/// The id on a meal open marker line: `<!-- pip:meal N -->` with N in ASCII digits.
+fn meal_open_id(line: &str) -> Option<u64> {
+    let s = line.trim().strip_prefix("<!-- pip:meal ")?.strip_suffix(" -->")?;
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.parse().ok()
 }
 
 pub fn logged(dir: &Path, day: &str, msg_id: u64) -> bool {
-    matches!(read_note(dir, day), Ok(Some(t)) if has_msg(&t, msg_id))
+    matches!(read_note(dir, day), Ok(Some(t)) if t.lines().any(|l| meal_open_id(l) == Some(msg_id)))
 }
 
 pub fn has_meal(dir: &Path, day: &str) -> bool {
-    matches!(read_note(dir, day), Ok(Some(t)) if t.lines().any(|l| l.starts_with("### ") && l.contains(" · msg ")))
+    matches!(read_note(dir, day), Ok(Some(t)) if t.lines().any(|l| meal_open_id(l).is_some()))
 }
 
 /// Collapses whitespace and newlines so free text can never break the markdown layout.
@@ -94,7 +107,8 @@ fn macros_line(m: &Macros, veg: bool) -> String {
 }
 
 fn meal_block(meal: &Meal) -> String {
-    let mut s = format!("### {} · msg {}\n", one_line(&meal.time), meal.msg_id);
+    let mut s = format!("{}\n", meal_open(meal.msg_id));
+    s.push_str(&format!("### {} · msg {}\n", one_line(&meal.time), meal.msg_id));
     for l in &meal.lines {
         let l = l.trim_end();
         let l = if l.starts_with("- ") { l.to_string() } else { format!("- {l}") };
@@ -116,87 +130,9 @@ fn meal_block(meal: &Meal) -> String {
     for p in &meal.photos {
         s.push_str(&format!("- photo: ![[{p}]]\n"));
     }
+    s.push_str(&meal_close(meal.msg_id));
     s.push('\n');
     s
-}
-
-/// The keys Pip writes in the front matter. Pip rewrites these lines; every other line is the user's.
-const PIP_KEYS: [&str; 8] = ["date", "kcal", "protein_g", "carbs_g", "fat_g", "meals", "veg", "flags"];
-
-/// `key` of a front matter key line: a non-empty ASCII key, then `:` followed by a space or the end.
-fn key_of(line: &str) -> Option<&str> {
-    let (key, after) = line.split_once(':')?;
-    let ok = !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-    (ok && (after.is_empty() || after.starts_with(' '))).then_some(key)
-}
-
-fn is_continuation(line: &str) -> bool {
-    line.starts_with(' ') || line.starts_with('\t') || line.starts_with("- ")
-}
-
-/// The user's front matter lines (Pip's keys removed) and the index where the body starts. `None` when
-/// the note has no front matter block, so the whole note is body text.
-fn front_matter(lines: &[&str]) -> Option<(Vec<String>, usize)> {
-    if lines.first() != Some(&"---") {
-        return None;
-    }
-    let end = (1..lines.len()).find(|&i| lines[i] == "---")?;
-    let inside = &lines[1..end];
-    let shaped = inside
-        .iter()
-        .all(|l| l.trim().is_empty() || is_continuation(l) || key_of(l).is_some());
-    if !shaped {
-        return None;
-    }
-    let mut keep = Vec::new();
-    let mut dropping = false;
-    for line in inside {
-        if let Some(key) = key_of(line) {
-            dropping = PIP_KEYS.contains(&key);
-        } else if line.trim().is_empty() {
-            dropping = false;
-        } else if !is_continuation(line) {
-            continue;
-        }
-        if !dropping {
-            keep.push(line.to_string());
-        }
-    }
-    Some((keep, end + 1))
-}
-
-/// An existing note without Pip's own header. Returns the user's front matter lines and the rest of the
-/// note: the `# <day>` title Pip wrote (only that line, and only as the first line after the front matter),
-/// and the `**Total:**` / `**Flags:**` lines before the first section. Everything else is kept, including
-/// text the user typed above `## Meals`, and leading blank lines are dropped.
-fn note_rest(text: &str, day: &str) -> (Vec<String>, String) {
-    let lines: Vec<&str> = text.lines().collect();
-    let (user_fm, start) = front_matter(&lines).unwrap_or((Vec::new(), 0));
-    let mut begin = start;
-    if let Some(j) = (start..lines.len()).find(|&j| !lines[j].trim().is_empty()) {
-        if lines[j] == format!("# {day}") {
-            begin = j + 1;
-        }
-    }
-    let mut kept: Vec<&str> = Vec::new();
-    let mut in_header = true;
-    for line in &lines[begin..] {
-        if in_header {
-            if line.starts_with("**Total:**") || line.starts_with("**Flags:**") {
-                continue;
-            }
-            if line.starts_with("## ") || line.starts_with("### ") {
-                in_header = false;
-            }
-        }
-        kept.push(line);
-    }
-    let mut out = String::new();
-    for line in kept.iter().skip_while(|l| l.trim().is_empty()) {
-        out.push_str(line);
-        out.push('\n');
-    }
-    (user_fm, out)
 }
 
 /// Parses the text after `- macros: ` into macros and the veg flag.
@@ -212,19 +148,38 @@ fn parse_macros(rest: &str) -> Option<(Macros, bool)> {
     Some((m, veg))
 }
 
-/// Sums every `- macros:` line of a note (whole numbers) and derives the flags.
+/// Sums the first `- macros:` line of each distinct meal region and derives the flags. Only the marker
+/// lines are structure, so a typed heading or macros line outside a meal region is never counted.
 fn summarize(text: &str, low_kcal: u32) -> Totals {
     let mut sum = Macros::default();
     let (mut meals, mut veg) = (0usize, false);
+    let mut seen = HashSet::new();
+    let (mut current, mut counted) = (false, false);
     for line in text.lines() {
-        let Some(rest) = line.strip_prefix("- macros: ") else { continue };
+        let t = line.trim();
+        if let Some(id) = meal_open_id(t) {
+            current = seen.insert(id);
+            counted = false;
+            if current {
+                meals += 1;
+            }
+            continue;
+        }
+        if t.starts_with("<!-- pip:") || t.starts_with("<!-- /pip:") {
+            current = false;
+            continue;
+        }
+        if !(current && !counted) {
+            continue;
+        }
+        let Some(rest) = t.strip_prefix("- macros: ") else { continue };
         let Some((m, v)) = parse_macros(rest) else { continue };
         sum.kcal += m.kcal;
         sum.protein += m.protein;
         sum.carbs += m.carbs;
         sum.fat += m.fat;
-        meals += 1;
         veg |= v;
+        counted = true;
     }
     let mut flags = Vec::new();
     if meals >= 1 && !veg {
@@ -236,7 +191,8 @@ fn summarize(text: &str, low_kcal: u32) -> Totals {
     Totals { macros: sum, meals, veg, flags }
 }
 
-fn header(day: &str, t: &Totals, low_kcal: u32, user_fm: &[String]) -> String {
+/// The two lines Pip rewrites inside the totals markers.
+fn totals_body(t: &Totals, low_kcal: u32) -> String {
     let k = t.macros.kcal as i64;
     let p = t.macros.protein as i64;
     let c = t.macros.carbs as i64;
@@ -244,7 +200,6 @@ fn header(day: &str, t: &Totals, low_kcal: u32, user_fm: &[String]) -> String {
     let n = t.meals;
     let s = if n == 1 { "" } else { "s" };
     let v = yes_no(t.veg);
-    let flags_yaml = if t.flags.is_empty() { "none".to_string() } else { t.flags.join(", ") };
     let flags_md = if t.flags.is_empty() {
         "none".to_string()
     } else {
@@ -258,14 +213,38 @@ fn header(day: &str, t: &Totals, low_kcal: u32, user_fm: &[String]) -> String {
             .collect();
         parts.join(" · ")
     };
-    let mut extra = String::new();
-    for line in user_fm {
-        extra.push_str(line);
-        extra.push('\n');
+    format!("**Total:** {k} kcal · P {p} g · C {c} g · F {f} g · {n} meal{s} · veg {v}\n**Flags:** {flags_md}\n")
+}
+
+/// Byte range of the first totals interior: from after the open marker's line to the start of the close
+/// marker's line. A close pairs with the latest open before it.
+fn find_totals(text: &str) -> Option<(usize, usize)> {
+    let mut pos = 0;
+    let mut open = None;
+    for line in text.split_inclusive('\n') {
+        if line.trim() == TOTALS_OPEN {
+            open = Some(pos + line.len());
+        } else if line.trim() == TOTALS_CLOSE {
+            if let Some(a) = open {
+                return Some((a, pos));
+            }
+        }
+        pos += line.len();
     }
-    format!(
-        "---\ndate: {day}\nkcal: {k}\nprotein_g: {p}\ncarbs_g: {c}\nfat_g: {f}\nmeals: {n}\nveg: {v}\nflags: {flags_yaml}\n{extra}---\n# {day}\n**Total:** {k} kcal · P {p} g · C {c} g · F {f} g · {n} meal{s} · veg {v}\n**Flags:** {flags_md}\n\n"
-    )
+    None
+}
+
+/// Ends `text` with a blank line, so an appended block starts after one.
+fn separate(text: &mut String) {
+    if text.is_empty() {
+        return;
+    }
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    if !text.ends_with("\n\n") {
+        text.push('\n');
+    }
 }
 
 /// Appends one meal to the day's note. A message id already in the note writes nothing.
@@ -273,16 +252,21 @@ pub fn write_meal(dir: &Path, day: &str, meal: &Meal, low_kcal: u32) -> io::Resu
     let _guard = dump::LOCK.lock().unwrap_or_else(|p| p.into_inner());
     fs::create_dir_all(dir)?;
     let existing = read_note(dir, day)?.unwrap_or_default();
-    if has_msg(&existing, meal.msg_id) {
+    if existing.lines().any(|l| meal_open_id(l) == Some(meal.msg_id)) {
         return Ok(Written::Already);
     }
-    let (user_fm, mut rest) = note_rest(&existing, day);
-    if !rest.lines().any(|l| l.trim_end() == MEALS_HEADING) {
-        rest.push_str(MEALS_HEADING);
-        rest.push_str("\n\n");
+    let mut text = existing;
+    if text.is_empty() {
+        text = format!("# {day}\n\n{TOTALS_OPEN}\n{TOTALS_CLOSE}\n\n{MEALS_HEADING}\n\n");
+    } else if find_totals(&text).is_none() {
+        separate(&mut text);
+        text.push_str(&format!("{TOTALS_OPEN}\n{TOTALS_CLOSE}\n"));
     }
-    rest.push_str(&meal_block(meal));
-    let text = header(day, &summarize(&rest, low_kcal), low_kcal, &user_fm) + &rest;
+    separate(&mut text);
+    text.push_str(&meal_block(meal));
+    let (a, b) = find_totals(&text).expect("totals region");
+    let body = totals_body(&summarize(&text, low_kcal), low_kcal);
+    text.replace_range(a..b, &body);
     let tmp = dir.join(format!("{day}.md.tmp"));
     fs::write(&tmp, text)?;
     fs::rename(&tmp, note_path(dir, day))?;

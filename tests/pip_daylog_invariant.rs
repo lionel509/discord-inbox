@@ -150,7 +150,7 @@ fn hand_edit(rnd: &mut u64, t: &str) -> String {
     } else {
         let ok: Vec<usize> = boundaries(t)
             .into_iter()
-            .filter(|p| !matches!(interior(t), Some((a, b)) if a < *p && *p < b))
+            .filter(|p| !matches!(interior(t), Some((a, b)) if a <= *p && *p <= b))
             .collect();
         let p = ok[rng(rnd) as usize % ok.len()];
         let frag = FRAGS[rng(rnd) as usize % FRAGS.len()];
