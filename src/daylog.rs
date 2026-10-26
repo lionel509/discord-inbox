@@ -3,7 +3,7 @@ use crate::dump;
 use crate::nutrition::Macros;
 use std::collections::HashSet;
 use std::fs;
-use std::io::{self, ErrorKind};
+use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -35,7 +35,26 @@ pub struct Totals {
     pub flags: Vec<&'static str>,
 }
 
+/// A message that is not a meal (a chat line, a photo): logged so replays skip it, never counted.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct NoteMsg {
+    pub msg_id: u64,
+    pub time: String,
+    pub text: String,
+    pub photos: Vec<String>,
+}
+
+/// One live meal as read back from the note.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MealRow {
+    pub msg_id: u64,
+    pub time: String,
+    pub kcal: f64,
+    pub lines: Vec<String>,
+}
+
 const MEALS_HEADING: &str = "## Meals";
+const LEDGER: &str = ".pip-commands";
 const DEFAULT_LOW_KCAL: u32 = 1800;
 const TOTALS_OPEN: &str = "<!-- pip:totals -->";
 const TOTALS_CLOSE: &str = "<!-- /pip:totals -->";
@@ -90,8 +109,17 @@ fn meal_id(line: &str) -> Option<u64> {
     meal_open_id(line).or_else(|| meal_close_id(line))
 }
 
+/// The id on any Pip marker that records a message: a meal, a note, or an undone meal.
+fn any_id(line: &str) -> Option<u64> {
+    meal_id(line)
+        .or_else(|| marker_id(line, "<!-- pip:note "))
+        .or_else(|| marker_id(line, "<!-- /pip:note "))
+        .or_else(|| marker_id(line, "<!-- pip:undone "))
+        .or_else(|| marker_id(line, "<!-- /pip:undone "))
+}
+
 pub fn logged(dir: &Path, day: &str, msg_id: u64) -> bool {
-    matches!(read_note(dir, day), Ok(Some(t)) if t.lines().any(|l| meal_id(l) == Some(msg_id)))
+    matches!(read_note(dir, day), Ok(Some(t)) if t.lines().any(|l| any_id(l) == Some(msg_id)))
 }
 
 pub fn has_meal(dir: &Path, day: &str) -> bool {
@@ -316,7 +344,7 @@ pub fn write_meal(dir: &Path, day: &str, meal: &Meal, low_kcal: u32) -> io::Resu
     let _guard = dump::LOCK.lock().unwrap_or_else(|p| p.into_inner());
     fs::create_dir_all(dir)?;
     let existing = read_note(dir, day)?.unwrap_or_default();
-    if existing.lines().any(|l| meal_id(l) == Some(meal.msg_id)) {
+    if existing.lines().any(|l| any_id(l) == Some(meal.msg_id)) {
         return Ok(Written::Already);
     }
     let mut text = existing;
@@ -398,4 +426,150 @@ pub fn low_kcal_threshold() -> u32 {
         .ok()
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(DEFAULT_LOW_KCAL)
+}
+
+/// The body of a note block: its heading, the optional one-line text, one line per photo.
+fn note_block(n: &NoteMsg) -> String {
+    let id = n.msg_id;
+    let mut s = format!("<!-- pip:note {id} -->\n### {} · msg {id} · not a meal\n", one_line(&n.time));
+    let text = one_line(&n.text);
+    if !text.is_empty() {
+        s.push_str(&format!("- note: {text}\n"));
+    }
+    for p in &n.photos {
+        s.push_str(&format!("- photo: ![[{p}]]\n"));
+    }
+    s.push_str(&format!("<!-- /pip:note {id} -->\n"));
+    s
+}
+
+/// Appends a non-meal message to the day's note. It never touches the totals. A message id already in
+/// the note writes nothing.
+pub fn write_note(dir: &Path, day: &str, n: &NoteMsg, _low_kcal: u32) -> io::Result<Written> {
+    let _guard = dump::LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    fs::create_dir_all(dir)?;
+    let existing = read_note(dir, day)?.unwrap_or_default();
+    if existing.lines().any(|l| any_id(l) == Some(n.msg_id)) {
+        return Ok(Written::Already);
+    }
+    let mut text = if existing.is_empty() {
+        format!("# {day}\n\n{TOTALS_OPEN}\n{TOTALS_CLOSE}\n\n{MEALS_HEADING}\n\n")
+    } else {
+        existing
+    };
+    separate(&mut text);
+    text.push_str(&note_block(n));
+    let tmp = dir.join(format!("{day}.md.tmp"));
+    fs::write(&tmp, text)?;
+    fs::rename(&tmp, note_path(dir, day))?;
+    Ok(Written::Logged)
+}
+
+/// Each meal region as (id, its lines between the markers), in file order. A region ends at its own
+/// close marker; a region left open by hand is dropped.
+fn meal_regions(text: &str) -> Vec<(u64, Vec<&str>)> {
+    let mut out = Vec::new();
+    let mut open: Option<(u64, Vec<&str>)> = None;
+    for line in text.lines() {
+        let t = line.trim();
+        if let Some(id) = meal_open_id(t) {
+            if open.is_none() {
+                open = Some((id, Vec::new()));
+            }
+            continue;
+        }
+        let closes = matches!(&open, Some((id, _)) if meal_close_id(t) == Some(*id));
+        if closes {
+            if let Some(region) = open.take() {
+                out.push(region);
+            }
+        } else if let Some((_, body)) = open.as_mut() {
+            body.push(t);
+        }
+    }
+    out
+}
+
+/// One meal row from a region's lines: the `### ` heading's time, the `- ` items before the macros line,
+/// and the kcal of that macros line (0 when it is missing or unreadable).
+fn meal_row(id: u64, body: &[&str]) -> MealRow {
+    let time = body
+        .iter()
+        .find_map(|l| l.strip_prefix("### "))
+        .map(|h| h.split(" · msg ").next().unwrap_or(h).to_string())
+        .unwrap_or_default();
+    let mut lines = Vec::new();
+    let mut kcal = 0.0;
+    for l in body {
+        if let Some(rest) = l.strip_prefix("- macros: ") {
+            kcal = parse_macros(rest).map(|(m, _)| m.kcal).unwrap_or(0.0);
+            break;
+        }
+        if let Some(item) = l.strip_prefix("- ") {
+            lines.push(item.to_string());
+        }
+    }
+    MealRow { msg_id: id, time, kcal, lines }
+}
+
+/// The day's live meals in file order, first occurrence per id. Undone and note blocks are not listed.
+pub fn meals(dir: &Path, day: &str) -> Vec<MealRow> {
+    let Ok(Some(text)) = read_note(dir, day) else { return Vec::new() };
+    let mut seen = HashSet::new();
+    meal_regions(&text)
+        .into_iter()
+        .filter(|(id, _)| seen.insert(*id))
+        .map(|(id, body)| meal_row(id, &body))
+        .collect()
+}
+
+/// Marks the last meal that has a closed region as undone: its two marker lines become undone markers
+/// and a `- undone:` line is inserted under the open one. No other byte changes except the totals
+/// interior, which is re-rendered when it is Pip's own. `None` when the day has no meal.
+pub fn undo_last(dir: &Path, day: &str, low_kcal: u32, by_msg: u64) -> io::Result<Option<MealRow>> {
+    let _guard = dump::LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(text) = read_note(dir, day)? else { return Ok(None) };
+    let segs: Vec<&str> = text.split_inclusive('\n').collect();
+    let mut target: Option<(usize, usize, u64)> = None;
+    for (i, seg) in segs.iter().enumerate() {
+        let Some(id) = meal_open_id(seg) else { continue };
+        if let Some(j) = (i + 1..segs.len()).find(|&j| meal_close_id(segs[j]) == Some(id)) {
+            target = Some((i, j, id));
+        }
+    }
+    let Some((i, j, id)) = target else { return Ok(None) };
+    let body: Vec<&str> = segs[i + 1..j].iter().map(|s| s.trim()).collect();
+    let row = meal_row(id, &body);
+    let mut out = String::with_capacity(text.len() + 64);
+    for (k, seg) in segs.iter().enumerate() {
+        if k == i {
+            out.push_str(&format!("<!-- pip:undone {id} -->\n- undone: by msg {by_msg}\n"));
+        } else if k == j {
+            out.push_str(&format!("<!-- /pip:undone {id} -->\n"));
+        } else {
+            out.push_str(seg);
+        }
+    }
+    if let Span::Ok(a, b) = totals_span(&out, low_kcal) {
+        let body = totals_body(&summarize(&out, low_kcal), low_kcal);
+        out.replace_range(a..b, &body);
+    }
+    let tmp = dir.join(format!("{day}.md.tmp"));
+    fs::write(&tmp, out)?;
+    fs::rename(&tmp, note_path(dir, day))?;
+    Ok(Some(row))
+}
+
+/// Whether a command message was already acted on. The ledger is `.pip-commands` beside the notes.
+pub fn command_seen(dir: &Path, msg_id: u64) -> bool {
+    let want = msg_id.to_string();
+    fs::read_to_string(dir.join(LEDGER)).map(|t| t.lines().any(|l| l.trim() == want)).unwrap_or(false)
+}
+
+/// Records a command message id before its action runs, appended under the same lock as the notes.
+pub fn record_command(dir: &Path, msg_id: u64) -> io::Result<()> {
+    let _guard = dump::LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    fs::create_dir_all(dir)?;
+    let mut f = fs::OpenOptions::new().create(true).append(true).open(dir.join(LEDGER))?;
+    writeln!(f, "{msg_id}")
 }
