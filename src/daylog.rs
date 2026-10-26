@@ -66,7 +66,7 @@ pub fn logged(dir: &Path, day: &str, msg_id: u64) -> bool {
 }
 
 pub fn has_meal(dir: &Path, day: &str) -> bool {
-    matches!(read_note(dir, day), Ok(Some(t)) if t.lines().any(|l| l.starts_with("### ")))
+    matches!(read_note(dir, day), Ok(Some(t)) if t.lines().any(|l| l.starts_with("### ") && l.contains(" · msg ")))
 }
 
 /// Collapses whitespace and newlines so free text can never break the markdown layout.
@@ -120,24 +120,68 @@ fn meal_block(meal: &Meal) -> String {
     s
 }
 
-/// An existing note without its old header: the front matter, the `# ` title (its first line after the
-/// front matter), and the `**Total:**` / `**Flags:**` lines before the first section. Everything else is
-/// kept, including text the user typed above `## Meals`, and leading blank lines are dropped.
-fn note_rest(text: &str) -> String {
+/// The keys Pip writes in the front matter. Pip rewrites these lines; every other line is the user's.
+const PIP_KEYS: [&str; 8] = ["date", "kcal", "protein_g", "carbs_g", "fat_g", "meals", "veg", "flags"];
+
+/// `key` of a front matter key line: a non-empty ASCII key, then `:` followed by a space or the end.
+fn key_of(line: &str) -> Option<&str> {
+    let (key, after) = line.split_once(':')?;
+    let ok = !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    (ok && (after.is_empty() || after.starts_with(' '))).then_some(key)
+}
+
+fn is_continuation(line: &str) -> bool {
+    line.starts_with(' ') || line.starts_with('\t') || line.starts_with("- ")
+}
+
+/// The user's front matter lines (Pip's keys removed) and the index where the body starts. `None` when
+/// the note has no front matter block, so the whole note is body text.
+fn front_matter(lines: &[&str]) -> Option<(Vec<String>, usize)> {
+    if lines.first() != Some(&"---") {
+        return None;
+    }
+    let end = (1..lines.len()).find(|&i| lines[i] == "---")?;
+    let inside = &lines[1..end];
+    let shaped = inside
+        .iter()
+        .all(|l| l.trim().is_empty() || is_continuation(l) || key_of(l).is_some());
+    if !shaped {
+        return None;
+    }
+    let mut keep = Vec::new();
+    let mut dropping = false;
+    for line in inside {
+        if let Some(key) = key_of(line) {
+            dropping = PIP_KEYS.contains(&key);
+        } else if line.trim().is_empty() {
+            dropping = false;
+        } else if !is_continuation(line) {
+            continue;
+        }
+        if !dropping {
+            keep.push(line.to_string());
+        }
+    }
+    Some((keep, end + 1))
+}
+
+/// An existing note without Pip's own header. Returns the user's front matter lines and the rest of the
+/// note: the `# <day>` title Pip wrote (only that line, and only as the first line after the front matter),
+/// and the `**Total:**` / `**Flags:**` lines before the first section. Everything else is kept, including
+/// text the user typed above `## Meals`, and leading blank lines are dropped.
+fn note_rest(text: &str, day: &str) -> (Vec<String>, String) {
     let lines: Vec<&str> = text.lines().collect();
-    let mut start = 0;
-    if lines.first() == Some(&"---") {
-        if let Some(end) = lines[1..].iter().position(|l| *l == "---") {
-            start = end + 2;
+    let (user_fm, start) = front_matter(&lines).unwrap_or((Vec::new(), 0));
+    let mut begin = start;
+    if let Some(j) = (start..lines.len()).find(|&j| !lines[j].trim().is_empty()) {
+        if lines[j] == format!("# {day}") {
+            begin = j + 1;
         }
     }
     let mut kept: Vec<&str> = Vec::new();
     let mut in_header = true;
-    for (i, line) in lines.iter().enumerate().skip(start) {
+    for line in &lines[begin..] {
         if in_header {
-            if i == start && line.starts_with("# ") {
-                continue;
-            }
             if line.starts_with("**Total:**") || line.starts_with("**Flags:**") {
                 continue;
             }
@@ -152,7 +196,7 @@ fn note_rest(text: &str) -> String {
         out.push_str(line);
         out.push('\n');
     }
-    out
+    (user_fm, out)
 }
 
 /// Parses the text after `- macros: ` into macros and the veg flag.
@@ -192,7 +236,7 @@ fn summarize(text: &str, low_kcal: u32) -> Totals {
     Totals { macros: sum, meals, veg, flags }
 }
 
-fn header(day: &str, t: &Totals, low_kcal: u32) -> String {
+fn header(day: &str, t: &Totals, low_kcal: u32, user_fm: &[String]) -> String {
     let k = t.macros.kcal as i64;
     let p = t.macros.protein as i64;
     let c = t.macros.carbs as i64;
@@ -214,8 +258,13 @@ fn header(day: &str, t: &Totals, low_kcal: u32) -> String {
             .collect();
         parts.join(" · ")
     };
+    let mut extra = String::new();
+    for line in user_fm {
+        extra.push_str(line);
+        extra.push('\n');
+    }
     format!(
-        "---\ndate: {day}\nkcal: {k}\nprotein_g: {p}\ncarbs_g: {c}\nfat_g: {f}\nmeals: {n}\nveg: {v}\nflags: {flags_yaml}\n---\n# {day}\n**Total:** {k} kcal · P {p} g · C {c} g · F {f} g · {n} meal{s} · veg {v}\n**Flags:** {flags_md}\n\n"
+        "---\ndate: {day}\nkcal: {k}\nprotein_g: {p}\ncarbs_g: {c}\nfat_g: {f}\nmeals: {n}\nveg: {v}\nflags: {flags_yaml}\n{extra}---\n# {day}\n**Total:** {k} kcal · P {p} g · C {c} g · F {f} g · {n} meal{s} · veg {v}\n**Flags:** {flags_md}\n\n"
     )
 }
 
@@ -227,13 +276,13 @@ pub fn write_meal(dir: &Path, day: &str, meal: &Meal, low_kcal: u32) -> io::Resu
     if has_msg(&existing, meal.msg_id) {
         return Ok(Written::Already);
     }
-    let mut rest = note_rest(&existing);
+    let (user_fm, mut rest) = note_rest(&existing, day);
     if !rest.lines().any(|l| l.trim_end() == MEALS_HEADING) {
         rest.push_str(MEALS_HEADING);
         rest.push_str("\n\n");
     }
     rest.push_str(&meal_block(meal));
-    let text = header(day, &summarize(&rest, low_kcal), low_kcal) + &rest;
+    let text = header(day, &summarize(&rest, low_kcal), low_kcal, &user_fm) + &rest;
     let tmp = dir.join(format!("{day}.md.tmp"));
     fs::write(&tmp, text)?;
     fs::rename(&tmp, note_path(dir, day))?;
