@@ -118,7 +118,9 @@ fn exact<'a>(text: &str, recipes: &'a [Recipe]) -> Exact<'a> {
     let zero = (i >= 1 && is_zero(w(i - 1)))
         || (i >= 2 && counts_word(i - 1) && is_zero(w(i - 2)))
         || (i >= 3 && w(i - 1) == "of" && counts_word(i - 2) && is_zero(w(i - 3)))
-        || (after < toks.len() && is_zero(w(after)));
+        || (after < toks.len() && is_zero(w(after)))
+        || (after + 1 < toks.len() && matches!(w(after), "x" | "×") && is_zero(w(after + 1)))
+        || (i >= 2 && matches!(w(i - 1), "x" | "×") && is_zero(w(i - 2)));
     if zero {
         return Exact::Zero;
     }
@@ -161,13 +163,30 @@ fn exact<'a>(text: &str, recipes: &'a [Recipe]) -> Exact<'a> {
         }
     }
     if servings.is_none() && after < toks.len() {
-        if let Some(n) = count(w(after)) {
+        // The index of the first token after the count, if a count was read after the name.
+        let mut next = None;
+        if is_whole(w(after)) && after + 1 < toks.len() && is_fraction(w(after + 1)) {
+            // "1 1/2 servings": the mixed number reads as 1.5.
+            if let Some((v, _)) = nutrition::quantity(&text[toks[after].0..]) {
+                servings = Some(v);
+                removed.extend([span(after), span(after + 1)]);
+                next = Some(after + 2);
+            }
+        } else if let Some(n) = count(w(after)) {
             servings = Some(n);
             removed.push(span(after));
+            next = Some(after + 1);
         } else if matches!(w(after), "x" | "×") && after + 1 < toks.len() {
             if let Some(n) = count(w(after + 1)) {
                 servings = Some(n);
                 removed.extend([span(after), span(after + 1)]);
+                next = Some(after + 2);
+            }
+        }
+        // The serving word that follows the count goes with it.
+        if let Some(j) = next.filter(|&j| j < toks.len()) {
+            if matches!(w(j), "serving" | "servings" | "portion" | "portions") {
+                removed.push(span(j));
             }
         }
     }
@@ -221,6 +240,17 @@ fn fuzzy<'a>(text: &str, recipes: &'a [Recipe]) -> Option<Hit<'a>> {
                 }
             }
             if hits == 0 {
+                continue;
+            }
+            // A piece word that is none of the name or ingredient words, and looks like food,
+            // is food the recipe does not have: no fuzzy hit for this recipe.
+            let extra = pw.iter().any(|w| {
+                !NAME_STOP.contains(&w.as_str())
+                    && !r.names.iter().any(|name| name_words(name).iter().any(|n| word_match(w, n)))
+                    && !ing.iter().any(|g| word_match(w, g))
+                    && nutrition::looks_like_food(w)
+            });
+            if extra {
                 continue;
             }
             let mut seen: Vec<&String> = Vec::new();
@@ -374,9 +404,10 @@ fn qty_header(cell: &str) -> bool {
 
 const QTY_HEADERS: [&str; 6] = ["amount", "qty", "quantity", "g", "grams", "weight"];
 
-/// An amount from a table cell: `100`, `1 1/2`, `3-6` (first number, grams), or a range with a unit,
-/// `1–2 cups` (the midpoint, in that unit). The bool marks a range read as its midpoint.
-fn amount(cell: &str) -> Option<(f64, String, bool)> {
+/// An amount from a table cell: `100`, `1 1/2`, or a range with a unit, `1–2 cups` (the midpoint, in
+/// that unit). A unitless range, `3-6`, keeps its first number as grams. The range (low, high, and
+/// whether it had a unit) is returned so the caller can report it as assumed.
+fn amount(cell: &str) -> Option<(f64, String, Option<(f64, f64, bool)>)> {
     let cell = cell.trim();
     if let Some(pos) = cell.find(['-', '–']).filter(|&p| p > 0) {
         let sep = cell[pos..].chars().next().map_or(1, char::len_utf8);
@@ -384,13 +415,13 @@ fn amount(cell: &str) -> Option<(f64, String, bool)> {
             (nutrition::quantity(cell[..pos].trim()), nutrition::quantity(cell[pos + sep..].trim_start()))
         {
             return Some(match tail.split_whitespace().next() {
-                Some(unit) => ((a + b) / 2.0, unit.to_string(), true),
-                None => (a, "g".to_string(), false),
+                Some(unit) => ((a + b) / 2.0, unit.to_string(), Some((a, b, true))),
+                None => (a, "g".to_string(), Some((a, b, false))),
             });
         }
     }
     let (v, rest) = nutrition::quantity(cell)?;
-    Some((v, rest.split_whitespace().next().unwrap_or("g").to_string(), false))
+    Some((v, rest.split_whitespace().next().unwrap_or("g").to_string(), None))
 }
 
 /// Ingredient lines in note order: table rows (recipe column, else column 1) and
@@ -429,9 +460,15 @@ fn ingredient_lines(body: &str) -> (Vec<String>, Vec<String>, Vec<String>) {
             }
             let cell = cells.get(qty_col).map(|c| c.replace('*', "")).unwrap_or_default();
             match amount(&cell) {
-                Some((v, unit, ranged)) => {
-                    if ranged {
-                        assumed.push(format!("{name}: {} read as midpoint {} {unit}", cell.trim(), fmt(v)));
+                Some((v, unit, range)) => {
+                    match range {
+                        Some((_, _, true)) => {
+                            assumed.push(format!("{name}: {} read as midpoint {} {unit}", cell.trim(), fmt(v)));
+                        }
+                        Some((a, b, false)) => {
+                            assumed.push(format!("{name}: {}-{} read as {} g", fmt(a), fmt(b), fmt(a)));
+                        }
+                        None => {}
                     }
                     lines.push(format!("{} {} {}", fmt(v), unit, name));
                 }
