@@ -5,6 +5,7 @@ use crate::nutrition::Macros;
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone, Debug, Default)]
 pub struct Meal {
@@ -119,24 +120,39 @@ fn meal_block(meal: &Meal) -> String {
     s
 }
 
-/// The `## Meals` section of an existing note (from its heading to the end), or an empty one.
-fn meals_section(text: &str) -> String {
+/// An existing note without its old header: the front matter, the `# ` title (its first line after the
+/// front matter), and the `**Total:**` / `**Flags:**` lines before the first section. Everything else is
+/// kept, including text the user typed above `## Meals`, and leading blank lines are dropped.
+fn note_rest(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut start = 0;
+    if lines.first() == Some(&"---") {
+        if let Some(end) = lines[1..].iter().position(|l| *l == "---") {
+            start = end + 2;
+        }
+    }
+    let mut kept: Vec<&str> = Vec::new();
+    let mut in_header = true;
+    for (i, line) in lines.iter().enumerate().skip(start) {
+        if in_header {
+            if i == start && line.starts_with("# ") {
+                continue;
+            }
+            if line.starts_with("**Total:**") || line.starts_with("**Flags:**") {
+                continue;
+            }
+            if line.starts_with("## ") || line.starts_with("### ") {
+                in_header = false;
+            }
+        }
+        kept.push(line);
+    }
     let mut out = String::new();
-    let mut inside = false;
-    for line in text.lines() {
-        if !inside && line.trim_end() == MEALS_HEADING {
-            inside = true;
-        }
-        if inside {
-            out.push_str(line);
-            out.push('\n');
-        }
+    for line in kept.iter().skip_while(|l| l.trim().is_empty()) {
+        out.push_str(line);
+        out.push('\n');
     }
-    if inside {
-        out
-    } else {
-        format!("{MEALS_HEADING}\n\n")
-    }
+    out
 }
 
 /// Parses the text after `- macros: ` into macros and the veg flag.
@@ -211,9 +227,13 @@ pub fn write_meal(dir: &Path, day: &str, meal: &Meal, low_kcal: u32) -> io::Resu
     if has_msg(&existing, meal.msg_id) {
         return Ok(Written::Already);
     }
-    let mut body = meals_section(&existing);
-    body.push_str(&meal_block(meal));
-    let text = header(day, &summarize(&body, low_kcal), low_kcal) + &body;
+    let mut rest = note_rest(&existing);
+    if !rest.lines().any(|l| l.trim_end() == MEALS_HEADING) {
+        rest.push_str(MEALS_HEADING);
+        rest.push_str("\n\n");
+    }
+    rest.push_str(&meal_block(meal));
+    let text = header(day, &summarize(&rest, low_kcal), low_kcal) + &rest;
     let tmp = dir.join(format!("{day}.md.tmp"));
     fs::write(&tmp, text)?;
     fs::rename(&tmp, note_path(dir, day))?;
@@ -245,11 +265,18 @@ pub fn save_photo(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    // Each call gets its own temp name, so two handles of one photo never write the same file.
+    static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
+    tmp.push(format!(".{}.{n}.tmp", std::process::id()));
     let tmp = PathBuf::from(tmp);
     fs::write(&tmp, bytes)?;
-    fs::rename(&tmp, path)
+    if let Err(e) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// `PIP_LOW_KCAL` if it parses as a whole number, else 1800 (a maintenance-oriented floor).
