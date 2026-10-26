@@ -98,7 +98,15 @@ struct Analysis {
 
 /// Recipe first (a name match scales it), then the typed lines, then the merge where typed rows win.
 fn analyze(text: &str, recipes: &[Recipe]) -> Analysis {
-    let hit = recipes::resolve(text, recipes);
+    let hit = match recipes::resolve_or_refuse(text, recipes) {
+        Ok(hit) => hit,
+        Err(r) => {
+            // A recipe line the typed text cannot use: the meal is still logged, with the refusal as its unknown.
+            let mut typed = nutrition::parse_meal(&r.rest);
+            typed.unknown.insert(0, r.unknown);
+            return Analysis { parsed: typed, overridden: Vec::new(), recipe: None, skipped: Vec::new(), assumed: Vec::new(), is_meal: true };
+        }
+    };
     let typed_text = hit.as_ref().map(|h| h.rest.clone()).unwrap_or_else(|| text.to_string());
     let typed = nutrition::parse_meal(&typed_text);
     let Some(h) = hit else {
@@ -120,8 +128,7 @@ fn analyze(text: &str, recipes: &[Recipe]) -> Analysis {
             label.push_str(&format!(" (scaled to your {} g {food})", trim_num(*grams)));
         }
         Scaled::Assumed => {
-            let base = nutrition::parse_meal(&h.recipe.lines.join("\n"));
-            match base.items.iter().max_by(|a, b| a.grams.total_cmp(&b.grams)) {
+            match recipes::reference(h.recipe) {
                 Some(heaviest) => assumed.push(format!(
                     "Assumed 1 serving of {name}; type the {} weight to scale it.",
                     heaviest.food.name
@@ -166,17 +173,49 @@ pub async fn handle<M: Inbound>(allow: &Allowlist, cfg: &Config, m: &M) -> Outco
         eprintln!("pip: nutrition dir {} not creatable: {e}", cfg.nutrition_dir.display());
         return Outcome::Failed;
     }
-    if m.live() {
-        m.typing().await;
-    }
-
-    // Commands come before meal parsing. `fix` is the one command that also takes a meal (and a photo).
+    // Commands other than `fix` are answered from the ledger and never owe a meal. `fix` is the one command
+    // that also takes a meal (and a photo).
     let fix_rest = match command(&text).filter(|c| matches!(c, Command::Fix(_)) || files.is_empty()) {
         Some(Command::Fix(rest)) => Some(rest),
-        Some(other) => return run_command(cfg, m, &day, msg_id, &other).await,
+        Some(other) => {
+            if m.live() {
+                m.typing().await;
+            }
+            return run_command(cfg, m, &day, msg_id, &other).await;
+        }
         None => None,
     };
 
+    // Owed before typing and any download, so a crash or a failed save leaves the meal for the restart catch-up.
+    if let Err(e) = daylog::owe(&cfg.nutrition_dir, msg_id, &day, &time) {
+        eprintln!("pip: owed line for {msg_id} failed: {e}");
+    }
+    if m.live() {
+        m.typing().await;
+    }
+    let out = log_message(cfg, m, &day, msg_id, time, hhmm, text, files, fix_rest).await;
+    if out != Outcome::Failed {
+        if let Err(e) = daylog::paid(&cfg.nutrition_dir, msg_id) {
+            eprintln!("pip: clearing owed line for {msg_id} failed: {e}");
+        }
+    }
+    out
+}
+
+/// The logging half of `handle`: analysis, photo saves, the note or meal write, and the reply. A meal whose
+/// write or photo fails returns `Failed` and so stays owed.
+#[allow(clippy::too_many_arguments)]
+async fn log_message<M: Inbound>(
+    cfg: &Config,
+    m: &M,
+    day: &str,
+    msg_id: u64,
+    time: String,
+    hhmm: String,
+    text: String,
+    files: Vec<String>,
+    fix_rest: Option<String>,
+) -> Outcome {
     let recipe_list = cfg.recipes_dir.as_deref().map(recipes::load).unwrap_or_default();
     let subject = fix_rest.clone().unwrap_or_else(|| text.clone());
     let an = analyze(&subject, &recipe_list);
@@ -187,6 +226,10 @@ pub async fn handle<M: Inbound>(allow: &Allowlist, cfg: &Config, m: &M) -> Outco
         let _ = m.reply(FIX_USAGE).await;
         let _ = m.react(SAVED_MARK).await;
         return Outcome::Saved;
+    }
+    if !an.is_meal {
+        // Not a meal, so nothing stays owed for it: a failed photo download below must not block undo or fix.
+        let _ = daylog::paid(&cfg.nutrition_dir, msg_id);
     }
 
     let mut photos = Vec::new();
@@ -233,7 +276,13 @@ pub async fn handle<M: Inbound>(allow: &Allowlist, cfg: &Config, m: &M) -> Outco
         if let Some(out) = claim(cfg, m, msg_id).await {
             return out;
         }
-        match daylog::undo_before(&cfg.nutrition_dir, &day, cfg.low_kcal, msg_id, msg_id) {
+        // Refused, not deferred: the fix is claimed, so a re-sent copy is skipped and only a new send can act.
+        if let Some((id, t)) = daylog::owed_before(&cfg.nutrition_dir, day, msg_id) {
+            let _ = m.reply(&format!("Your {t} meal (msg {id}) hasn't saved yet, so I didn't fix anything. Send the fix again once it's logged.")).await;
+            let _ = m.react(SAVED_MARK).await;
+            return Outcome::Saved;
+        }
+        match daylog::undo_before(&cfg.nutrition_dir, day, cfg.low_kcal, msg_id, msg_id) {
             Ok(Some(_)) => {}
             Ok(None) => {
                 let _ = m.reply("Nothing logged today to fix; send it as a new meal.").await;
@@ -312,23 +361,30 @@ async fn run_command<M: Inbound>(cfg: &Config, m: &M, day: &str, msg_id: u64, cm
         Command::Help => m.reply(HELP).await,
         Command::Today => m.reply_rich(&summary::day_card(dir, day, cfg.low_kcal, cfg.kcal_target)).await,
         Command::Week => m.reply_rich(&summary::week_card(dir, day, cfg.low_kcal, cfg.kcal_target)).await,
-        Command::Undo => match daylog::undo_before(dir, day, cfg.low_kcal, msg_id, msg_id) {
-            Ok(Some(row)) => {
-                let (k, n) = today_numbers(dir, day, cfg.low_kcal);
-                m.reply(&format!(
-                    "Undid the {} meal ({} kcal). Today: {k} / {} kcal over {n} meal(s).",
-                    row.time,
-                    row.kcal.round() as i64,
-                    cfg.kcal_target
-                ))
-                .await
+        // Refused while an earlier meal from today is owed: that meal could be the one the undo means.
+        Command::Undo => match daylog::owed_before(dir, day, msg_id) {
+            Some((id, t)) => {
+                m.reply(&format!("Your {t} meal (msg {id}) hasn't saved yet, so I didn't undo anything. Send undo again once it's logged."))
+                    .await
             }
-            Ok(None) => m.reply("Nothing logged today to undo.").await,
-            Err(e) => {
-                eprintln!("pip: undo on {msg_id} failed: {e}");
-                let _ = m.react(FAILED_MARK).await;
-                return Outcome::Failed;
-            }
+            None => match daylog::undo_before(dir, day, cfg.low_kcal, msg_id, msg_id) {
+                Ok(Some(row)) => {
+                    let (k, n) = today_numbers(dir, day, cfg.low_kcal);
+                    m.reply(&format!(
+                        "Undid the {} meal ({} kcal). Today: {k} / {} kcal over {n} meal(s).",
+                        row.time,
+                        row.kcal.round() as i64,
+                        cfg.kcal_target
+                    ))
+                    .await
+                }
+                Ok(None) => m.reply("Nothing logged today to undo.").await,
+                Err(e) => {
+                    eprintln!("pip: undo on {msg_id} failed: {e}");
+                    let _ = m.react(FAILED_MARK).await;
+                    return Outcome::Failed;
+                }
+            },
         },
         // `handle` runs `fix` itself, since it takes a meal; this arm is never reached.
         Command::Fix(_) => Ok(()),
