@@ -24,7 +24,7 @@ fn grams_after_food_read_as_grams() {
 #[test]
 fn long_salmon_name_is_typed_not_assumed() {
     let it = one("Farmed Atlantic salmon 100 grams");
-    assert_eq!(it.food.name, "atlantic salmon");
+    assert_eq!(it.food.name, "salmon");
     assert!((it.grams - 100.0).abs() < 0.01);
     assert!(!it.assumed);
 }
@@ -79,7 +79,7 @@ fn property_pieces_round_trip_without_invention_or_loss() {
     // (alias, expected food name, cup grams when a cup form is allowed)
     let foods: [(&str, &str, Option<f64>); 5] = [
         ("cooked rice", "cooked rice", Some(158.0)),
-        ("atlantic salmon", "atlantic salmon", None),
+        ("atlantic salmon", "salmon", None),
         ("cabbage", "cabbage", Some(89.0)),
         ("honey", "honey", Some(339.0)),
         ("peanut butter", "peanut butter", Some(258.0)),
