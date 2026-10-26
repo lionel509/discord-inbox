@@ -204,10 +204,23 @@ pub fn quantity(s: &str) -> Option<(f64, &str)> {
     Some((value, rest))
 }
 
+/// Splits on ` and ` in any letter case (` AND ` too), so no item is silently dropped.
+fn split_and(p: &str) -> Vec<&str> {
+    let lower = p.to_ascii_lowercase();
+    let mut out = Vec::new();
+    let mut last = 0;
+    for (i, _) in lower.match_indices(" and ") {
+        out.push(&p[last..i]);
+        last = i + " and ".len();
+    }
+    out.push(&p[last..]);
+    out
+}
+
 /// Split a message into line items on `,`, `+`, `;`, newline and the word ` and `.
 pub fn split_pieces(text: &str) -> Vec<String> {
     text.split(|c| matches!(c, ',' | '+' | ';' | '\n'))
-        .flat_map(|p| p.split(" and "))
+        .flat_map(split_and)
         .map(|p| p.trim().trim_start_matches(['-', '*']).trim())
         .filter(|p| !p.is_empty())
         .map(String::from)
