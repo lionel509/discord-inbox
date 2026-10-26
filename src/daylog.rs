@@ -566,10 +566,22 @@ pub fn command_seen(dir: &Path, msg_id: u64) -> bool {
     fs::read_to_string(dir.join(LEDGER)).map(|t| t.lines().any(|l| l.trim() == want)).unwrap_or(false)
 }
 
-/// Records a command message id before its action runs, appended under the same lock as the notes.
-pub fn record_command(dir: &Path, msg_id: u64) -> io::Result<()> {
+/// Claims a command message id: appends it to the ledger under the lock, unless it is already there.
+/// `Ok(false)` means another delivery of the same message already claimed it, so the caller must not act.
+pub fn claim_command(dir: &Path, msg_id: u64) -> io::Result<bool> {
     let _guard = dump::LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let want = msg_id.to_string();
+    let seen = fs::read_to_string(dir.join(LEDGER)).unwrap_or_default();
+    if seen.lines().any(|l| l.trim() == want) {
+        return Ok(false);
+    }
     fs::create_dir_all(dir)?;
     let mut f = fs::OpenOptions::new().create(true).append(true).open(dir.join(LEDGER))?;
-    writeln!(f, "{msg_id}")
+    writeln!(f, "{msg_id}")?;
+    Ok(true)
+}
+
+/// Records a command message id before its action runs (see `claim_command`).
+pub fn record_command(dir: &Path, msg_id: u64) -> io::Result<()> {
+    claim_command(dir, msg_id).map(|_| ())
 }
