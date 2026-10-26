@@ -39,6 +39,7 @@ const MEALS_HEADING: &str = "## Meals";
 const DEFAULT_LOW_KCAL: u32 = 1800;
 const TOTALS_OPEN: &str = "<!-- pip:totals -->";
 const TOTALS_CLOSE: &str = "<!-- /pip:totals -->";
+const DAMAGED_LINE: &str = "- ⚠️ totals not updated: the totals marker lines were edited by hand\n";
 
 /// Local date of a message: the first ten characters of its RFC 3339 timestamp.
 pub fn day_key(received: &str) -> &str {
@@ -65,21 +66,36 @@ fn meal_close(id: u64) -> String {
     format!("<!-- /pip:meal {id} -->")
 }
 
-/// The id on a meal open marker line: `<!-- pip:meal N -->` with N in ASCII digits.
-fn meal_open_id(line: &str) -> Option<u64> {
-    let s = line.trim().strip_prefix("<!-- pip:meal ")?.strip_suffix(" -->")?;
+/// The id on a marker line `<!-- {prefix}N -->` with N in ASCII digits.
+fn marker_id(line: &str, prefix: &str) -> Option<u64> {
+    let s = line.trim().strip_prefix(prefix)?.strip_suffix(" -->")?;
     if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
     s.parse().ok()
 }
 
+/// The id on a meal open marker line: `<!-- pip:meal N -->`.
+fn meal_open_id(line: &str) -> Option<u64> {
+    marker_id(line, "<!-- pip:meal ")
+}
+
+/// The id on a meal close marker line: `<!-- /pip:meal N -->`.
+fn meal_close_id(line: &str) -> Option<u64> {
+    marker_id(line, "<!-- /pip:meal ")
+}
+
+/// The id on either marker of a meal. A meal whose open marker he deleted is still logged by its close.
+fn meal_id(line: &str) -> Option<u64> {
+    meal_open_id(line).or_else(|| meal_close_id(line))
+}
+
 pub fn logged(dir: &Path, day: &str, msg_id: u64) -> bool {
-    matches!(read_note(dir, day), Ok(Some(t)) if t.lines().any(|l| meal_open_id(l) == Some(msg_id)))
+    matches!(read_note(dir, day), Ok(Some(t)) if t.lines().any(|l| meal_id(l) == Some(msg_id)))
 }
 
 pub fn has_meal(dir: &Path, day: &str) -> bool {
-    matches!(read_note(dir, day), Ok(Some(t)) if t.lines().any(|l| meal_open_id(l).is_some()))
+    matches!(read_note(dir, day), Ok(Some(t)) if t.lines().any(|l| meal_id(l).is_some()))
 }
 
 /// Collapses whitespace and newlines so free text can never break the markdown layout.
@@ -106,7 +122,8 @@ fn macros_line(m: &Macros, veg: bool) -> String {
     )
 }
 
-fn meal_block(meal: &Meal) -> String {
+/// One meal's region. `damaged` adds a warning line when the totals markers could not be spliced.
+fn meal_block(meal: &Meal, damaged: bool) -> String {
     let mut s = format!("{}\n", meal_open(meal.msg_id));
     s.push_str(&format!("### {} · msg {}\n", one_line(&meal.time), meal.msg_id));
     for l in &meal.lines {
@@ -129,6 +146,9 @@ fn meal_block(meal: &Meal) -> String {
     }
     for p in &meal.photos {
         s.push_str(&format!("- photo: ![[{p}]]\n"));
+    }
+    if damaged {
+        s.push_str(DAMAGED_LINE);
     }
     s.push_str(&meal_close(meal.msg_id));
     s.push('\n');
@@ -158,9 +178,10 @@ fn summarize(text: &str, low_kcal: u32) -> Totals {
     for line in text.lines() {
         let t = line.trim();
         if let Some(id) = meal_open_id(t) {
-            current = seen.insert(id);
-            counted = false;
-            if current {
+            // A repeated open of an id already seen changes nothing.
+            if seen.insert(id) {
+                current = true;
+                counted = false;
                 meals += 1;
             }
             continue;
@@ -181,14 +202,46 @@ fn summarize(text: &str, low_kcal: u32) -> Totals {
         veg |= v;
         counted = true;
     }
+    let flags = flags_for(meals, veg, sum.kcal, low_kcal);
+    Totals { macros: sum, meals, veg, flags }
+}
+
+/// The flags for a day: `no-veg` once a meal is logged without veg, `low-kcal` below the floor.
+fn flags_for(meals: usize, veg: bool, kcal: f64, low_kcal: u32) -> Vec<&'static str> {
     let mut flags = Vec::new();
     if meals >= 1 && !veg {
         flags.push("no-veg");
     }
-    if sum.kcal < low_kcal as f64 {
+    if kcal < low_kcal as f64 {
         flags.push("low-kcal");
     }
-    Totals { macros: sum, meals, veg, flags }
+    flags
+}
+
+/// True when `s` is exactly what `totals_body` renders for the totals its own first line states. Only
+/// then may Pip rewrite the interior; any hand edit makes it false.
+fn body_is_pip(s: &str, low_kcal: u32) -> bool {
+    if s.is_empty() {
+        return true;
+    }
+    let Some(first) = s.lines().next() else { return false };
+    let tok: Vec<&str> = first.split_whitespace().collect();
+    if tok.len() != 21 {
+        return false;
+    }
+    let (Ok(k), Ok(p), Ok(c), Ok(f), Ok(n)) = (
+        tok[1].parse::<i64>(),
+        tok[5].parse::<i64>(),
+        tok[9].parse::<i64>(),
+        tok[13].parse::<i64>(),
+        tok[16].parse::<usize>(),
+    ) else {
+        return false;
+    };
+    let veg = tok[20] == "yes";
+    let macros = Macros { kcal: k as f64, protein: p as f64, carbs: c as f64, fat: f as f64 };
+    let t = Totals { macros, meals: n, veg, flags: flags_for(n, veg, k as f64, low_kcal) };
+    s == totals_body(&t, low_kcal)
 }
 
 /// The two lines Pip rewrites inside the totals markers.
@@ -216,22 +269,33 @@ fn totals_body(t: &Totals, low_kcal: u32) -> String {
     format!("**Total:** {k} kcal · P {p} g · C {c} g · F {f} g · {n} meal{s} · veg {v}\n**Flags:** {flags_md}\n")
 }
 
-/// Byte range of the first totals interior: from after the open marker's line to the start of the close
-/// marker's line. A close pairs with the latest open before it.
-fn find_totals(text: &str) -> Option<(usize, usize)> {
-    let mut pos = 0;
-    let mut open = None;
+/// Where the totals interior is, or why there is none. `Ok(a, b)` is the byte range from after the open
+/// marker's line to the start of the close marker's line, and only when the note has exactly one open
+/// and one close in that order and the bytes between them are Pip's own rendering.
+enum Span {
+    /// The note has no totals marker line at all.
+    Fresh,
+    Ok(usize, usize),
+    /// Some marker line is missing, doubled or out of order, or the interior is not Pip's: Pip deletes
+    /// nothing and only appends.
+    Damaged,
+}
+
+fn totals_span(text: &str, low_kcal: u32) -> Span {
+    let (mut pos, mut opens, mut closes) = (0usize, Vec::new(), Vec::new());
     for line in text.split_inclusive('\n') {
         if line.trim() == TOTALS_OPEN {
-            open = Some(pos + line.len());
+            opens.push(pos + line.len());
         } else if line.trim() == TOTALS_CLOSE {
-            if let Some(a) = open {
-                return Some((a, pos));
-            }
+            closes.push(pos);
         }
         pos += line.len();
     }
-    None
+    match (opens.as_slice(), closes.as_slice()) {
+        ([], []) => Span::Fresh,
+        ([a], [b]) if a <= b && body_is_pip(&text[*a..*b], low_kcal) => Span::Ok(*a, *b),
+        _ => Span::Damaged,
+    }
 }
 
 /// Ends `text` with a blank line, so an appended block starts after one.
@@ -252,21 +316,37 @@ pub fn write_meal(dir: &Path, day: &str, meal: &Meal, low_kcal: u32) -> io::Resu
     let _guard = dump::LOCK.lock().unwrap_or_else(|p| p.into_inner());
     fs::create_dir_all(dir)?;
     let existing = read_note(dir, day)?.unwrap_or_default();
-    if existing.lines().any(|l| meal_open_id(l) == Some(meal.msg_id)) {
+    if existing.lines().any(|l| meal_id(l) == Some(meal.msg_id)) {
         return Ok(Written::Already);
     }
     let mut text = existing;
+    // The byte range of the totals interior to rewrite after the meal is appended. Everything after it
+    // is appended, so the offsets stay valid.
+    let mut span = None;
     if text.is_empty() {
-        text = format!("# {day}\n\n{TOTALS_OPEN}\n{TOTALS_CLOSE}\n\n{MEALS_HEADING}\n\n");
-    } else if find_totals(&text).is_none() {
-        separate(&mut text);
-        text.push_str(&format!("{TOTALS_OPEN}\n{TOTALS_CLOSE}\n"));
+        text = format!("# {day}\n\n{TOTALS_OPEN}\n");
+        let a = text.len();
+        text.push_str(&format!("{TOTALS_CLOSE}\n\n{MEALS_HEADING}\n\n"));
+        span = Some((a, a));
+    } else {
+        match totals_span(&text, low_kcal) {
+            Span::Ok(a, b) => span = Some((a, b)),
+            Span::Fresh => {
+                separate(&mut text);
+                text.push_str(&format!("{TOTALS_OPEN}\n"));
+                let a = text.len();
+                text.push_str(&format!("{TOTALS_CLOSE}\n"));
+                span = Some((a, a));
+            }
+            Span::Damaged => {}
+        }
     }
     separate(&mut text);
-    text.push_str(&meal_block(meal));
-    let (a, b) = find_totals(&text).expect("totals region");
-    let body = totals_body(&summarize(&text, low_kcal), low_kcal);
-    text.replace_range(a..b, &body);
+    text.push_str(&meal_block(meal, span.is_none()));
+    if let Some((a, b)) = span {
+        let body = totals_body(&summarize(&text, low_kcal), low_kcal);
+        text.replace_range(a..b, &body);
+    }
     let tmp = dir.join(format!("{day}.md.tmp"));
     fs::write(&tmp, text)?;
     fs::rename(&tmp, note_path(dir, day))?;
