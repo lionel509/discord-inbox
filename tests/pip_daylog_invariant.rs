@@ -102,9 +102,11 @@ fn write_checked(case: usize, dir: &Path, id: u64) {
     assert_eq!(r, Written::Logged, "{ctx}");
     // C1: nothing outside the totals interior moves, and nothing is lost.
     assert!(strip(&o).starts_with(&strip(&e)), "C1 {ctx}");
-    // C2: one totals open marker per complete pair; Pip adds one when there was none.
+    // C2: Pip adds one totals open marker only when the note has no totals marker line at all. A lone
+    // marker (his deletion) is damage that Pip leaves alone, so no pair is added.
     let opens = |t: &str| t.lines().filter(|l| l.trim() == OPEN).count();
-    let expected = opens(&e) + if interior(&e).is_none() { 1 } else { 0 };
+    let any_marker = e.lines().any(|l| l.trim() == OPEN || l.trim() == CLOSE);
+    let expected = opens(&e) + if any_marker { 0 } else { 1 };
     assert_eq!(opens(&o), expected, "C2 {ctx}");
     // C3: a note that existed keeps its title count.
     if !e.is_empty() {
@@ -282,4 +284,38 @@ fn write_checked_plain(dir: &Path, id: u64, kcal: f64) {
     let mut m = meal(id);
     m.macros = Macros { kcal, protein: 20.0, carbs: 0.0, fat: 14.0 };
     assert_eq!(daylog::write_meal(dir, DAY, &m, 1800).unwrap(), Written::Logged);
+}
+
+#[test]
+fn damaged_markers_append_with_a_warning() {
+    let dir = scratch(10_004);
+    write_checked_plain(&dir, 1, 400.0);
+    let t = note_text(&dir);
+    fs::write(daylog::note_path(&dir, DAY), t.replacen("<!-- /pip:totals -->\n", "", 1)).unwrap();
+    let e = note_text(&dir);
+    write_checked_plain(&dir, 2, 291.0);
+    let o = note_text(&dir);
+    assert!(o.starts_with(&e), "{o}");
+    assert_eq!(o.matches("totals not updated").count(), 1, "{o}");
+    assert!(o.contains("**Total:** 400 kcal"), "{o}");
+    let tot = daylog::totals(&dir, DAY, 1800).unwrap();
+    assert_eq!(tot.macros.kcal, 691.0, "{o}");
+    assert_eq!(tot.meals, 2, "{o}");
+}
+
+#[test]
+fn his_edit_to_the_total_line_is_kept() {
+    let dir = scratch(10_005);
+    write_checked_plain(&dir, 1, 400.0);
+    let t = note_text(&dir);
+    let edited: String = t
+        .split_inclusive('\n')
+        .map(|l| if l.starts_with("**Total:**") { format!("{} (estimate)\n", l.trim_end()) } else { l.to_string() })
+        .collect();
+    assert_ne!(edited, t, "the Total line was not found:\n{t}");
+    fs::write(daylog::note_path(&dir, DAY), &edited).unwrap();
+    write_checked_plain(&dir, 2, 291.0);
+    let o = note_text(&dir);
+    assert!(o.contains("(estimate)"), "his edit erased:\n{o}");
+    assert_eq!(o.matches("totals not updated").count(), 1, "{o}");
 }
