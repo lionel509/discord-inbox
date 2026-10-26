@@ -5,7 +5,6 @@ use discord_inbox::ingest::catch_up_each;
 use discord_inbox::live::{send_rich, Live, LiveMsg};
 use discord_inbox::pip::{self, Config, PipHandler, PRESENCE};
 use discord_inbox::rich::Rich;
-use discord_inbox::summary;
 use serenity::all::{ActivityData, Client, Context, EventHandler, GatewayIntents, Http, Message, OnlineStatus, Ready, UserId};
 use serenity::async_trait;
 use std::fs;
@@ -79,41 +78,23 @@ impl EventHandler for Handler {
                 if woke {
                     continue;
                 }
-                // Each allowlisted id is marked as it is sent, so a failed id retries alone and no id gets the check-in twice.
+                // Each allowlisted id gets each check-in or card at least once (I3), marked per recipient as it is sent.
                 let ids: Vec<u64> = allow.ids().collect();
-                if let Some(day) = checkin::due(&dir, now) {
-                    let result = checkin::send_all(&dir, &day, &ids, |uid: u64, text: String| {
-                        let http = http.clone();
-                        async move {
+                let lines = checkin::tick(&dir, now, &ids, cfg.low_kcal, cfg.kcal_target, |uid, r: Rich| {
+                    let http = http.clone();
+                    async move {
+                        if r.title.is_empty() && r.fields.is_empty() && r.image.is_none() {
                             let dm = UserId::new(uid).create_dm_channel(&http).await.map_err(|e| e.to_string())?;
-                            dm.id.say(&http, &text).await.map_err(|e| e.to_string())?;
+                            dm.id.say(&http, &r.text).await.map_err(|e| e.to_string())?;
                             Ok(())
+                        } else {
+                            dm_one(&http, uid, &r).await
                         }
-                    })
-                    .await;
-                    match result {
-                        Ok(()) => eprintln!("pip: check-in sent for {day}"),
-                        Err(e) => eprintln!("pip: check-in for {day} failed: {e}"),
                     }
-                }
-                // Daily (22:00, a meal logged) and weekly (Sunday 22:00): each recipient is marked as it is sent.
-                if let Some(day) = summary::daily_due(&dir, now) {
-                    let card = summary::day_card(&dir, &day, cfg.low_kcal, cfg.kcal_target);
-                    let marker = summary::marker_path(&dir, &day);
-                    let result = summary::send_each(&marker, &ids, |uid| dm_one(&http, uid, &card)).await;
-                    match result {
-                        Ok(()) => eprintln!("pip: summary sent for {day}"),
-                        Err(e) => eprintln!("pip: summary for {day} failed: {e}"),
-                    }
-                }
-                if let Some(day) = summary::weekly_due(&dir, now) {
-                    let card = summary::week_card(&dir, &day, cfg.low_kcal, cfg.kcal_target);
-                    let marker = summary::weekly_marker(&dir, &day);
-                    let result = summary::send_each(&marker, &ids, |uid| dm_one(&http, uid, &card)).await;
-                    match result {
-                        Ok(()) => eprintln!("pip: weekly sent for {day}"),
-                        Err(e) => eprintln!("pip: weekly for {day} failed: {e}"),
-                    }
+                })
+                .await;
+                for line in lines {
+                    eprintln!("pip: {line}");
                 }
             }
         }));
