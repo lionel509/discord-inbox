@@ -42,7 +42,7 @@ fn header_totals_are_the_sum_of_the_meals() {
     assert_eq!(t.meals, 2);
     assert!((t.macros.kcal - 691.0).abs() < 1e-9, "{}", t.macros.kcal);
     let text = fs::read_to_string(daylog::note_path(&dir, DAY)).unwrap();
-    assert!(text.contains("kcal: 691"), "{text}");
+    assert!(text.contains("**Total:** 691 kcal"), "{text}");
 }
 
 #[test]
@@ -60,7 +60,7 @@ fn flags_name_no_veg_and_low_kcal() {
     let t = daylog::totals(&dir, DAY, 500).unwrap();
     assert!(t.flags.is_empty(), "{:?}", t.flags);
     let text = fs::read_to_string(daylog::note_path(&dir, DAY)).unwrap();
-    assert!(text.contains("flags: none"), "{text}");
+    assert!(text.contains("**Flags:** none"), "{text}");
 }
 
 #[test]
@@ -159,7 +159,8 @@ fn user_title_is_kept() {
     let out = read_day(&dir, NOTE_DAY);
     assert_eq!(out.matches("# Rough day").count(), 1, "{out}");
     assert_eq!(out.matches("slept badly").count(), 1, "{out}");
-    assert_eq!(out.lines().filter(|l| *l == "# 2026-10-26").count(), 1, "{out}");
+    // Pip adds a title only to a note it creates.
+    assert_eq!(out.lines().filter(|l| *l == "# 2026-10-26").count(), 0, "{out}");
 }
 
 #[test]
@@ -202,30 +203,26 @@ fn pip_note_is_byte_exact() {
     };
     daylog::write_meal(&dir, NOTE_DAY, &a, 1800).unwrap();
     daylog::write_meal(&dir, NOTE_DAY, &b, 1800).unwrap();
-    let expected = r#"---
-date: 2026-10-26
-kcal: 691
-protein_g: 50
-carbs_g: 30
-fat_g: 25
-meals: 2
-veg: yes
-flags: low-kcal
----
-# 2026-10-26
+    let expected = r#"# 2026-10-26
+
+<!-- pip:totals -->
 **Total:** 691 kcal · P 50 g · C 30 g · F 25 g · 2 meals · veg yes
 **Flags:** ⚠️ low kcal (691 < 1800)
+<!-- /pip:totals -->
 
 ## Meals
 
+<!-- pip:meal 1 -->
 ### 12:31 · msg 1
 - 200 g salmon
 - macros: 400 kcal · P 40 g · C 0 g · F 20 g · veg yes
+<!-- /pip:meal 1 -->
 
+<!-- pip:meal 2 -->
 ### 19:05 · msg 2
 - 1 cup cabbage
 - macros: 291 kcal · P 10 g · C 30 g · F 5 g · veg no
-
+<!-- /pip:meal 2 -->
 "#;
     assert_eq!(read_day(&dir, NOTE_DAY), expected);
 }

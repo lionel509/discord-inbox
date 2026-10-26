@@ -121,8 +121,8 @@ impl History for FakeHistory {
 fn break1_missing_meals_heading_drops_logged_meals() {
     let dir = scratch("heading");
     fs::create_dir_all(&dir).unwrap();
-    // A day note where the `## Meals` heading is gone (hand-edited, or an older layout).
-    let existing = "---\ndate: 2026-10-26\nkcal: 208\nprotein_g: 20\ncarbs_g: 0\nfat_g: 10\nmeals: 1\nveg: no\nflags: no-veg, low-kcal\n---\n# 2026-10-26\n**Total:** 208 kcal\n\n### 12:31 · msg 111\n- 100 g salmon · 208 kcal\n- macros: 208 kcal · P 20 g · C 0 g · F 10 g · veg no\n\n";
+    // `## Meals` and the totals block deleted by hand.
+    let existing = "# 2026-10-26\n\n<!-- pip:meal 111 -->\n### 12:31 · msg 111\n- 100 g salmon · 208 kcal\n- macros: 208 kcal · P 20 g · C 0 g · F 10 g · veg no\n<!-- /pip:meal 111 -->\n\n";
     fs::write(daylog::note_path(&dir, DAY), existing).unwrap();
 
     let meal = daylog::Meal {
@@ -139,6 +139,7 @@ fn break1_missing_meals_heading_drops_logged_meals() {
     assert!(text.contains("· msg 111"), "earlier meal 111 was dropped:\n{text}");
     assert!(text.contains("· msg 222"), "new meal missing:\n{text}");
     assert!(daylog::logged(&dir, DAY, 111), "meal 111 is no longer logged, so a replay would log it again");
+    assert_eq!(daylog::totals(&dir, DAY, 1800).unwrap().meals, 2);
 }
 
 // ---- break 2: text the user wrote above `## Meals` is deleted on the next meal ----
