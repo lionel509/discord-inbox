@@ -21,3 +21,15 @@ fn answer_prompt_carries_the_persona_and_the_name_note() {
     assert!(system.contains(PERSONA_WARM), "{system}");
     assert!(system.contains("misspelled") && system.contains("\"willam\" = William"), "{system}");
 }
+
+const NO_CAT_ACT: &str = "Answer first. Talk like a normal person: no cat mannerisms, no \"purr\", no paw or cat emoji, no meows.";
+
+#[test]
+fn persona_drops_the_cat_act() {
+    let s = system_prompt();
+    assert!(s.contains(NO_CAT_ACT), "{s}");
+    // The instruction itself names "purr" to forbid it, so check the rest of the persona without that sentence.
+    let rest = s.replace(NO_CAT_ACT, "");
+    assert!(!rest.contains("purr"), "{rest}");
+    assert!(!rest.contains("🐾"), "{rest}");
+}
