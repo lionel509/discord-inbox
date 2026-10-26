@@ -120,8 +120,10 @@ async fn fix_replayed_late_replaces_the_meal_before_it() {
     assert_eq!(run(&nut, &Msg::new(3, T19, "cooked rice 180g")).await, Outcome::Saved);
     let before = daylog::meals(&nut, DAY).into_iter().find(|m| m.msg_id == 3).expect("meal 3 logged");
     let _ = run(&nut, &Msg::new(2, T19, "fix salmon 120g")).await;
+    let mut live = live_meals_on(&nut, DAY);
+    live.sort();
     assert_eq!(
-        live_meals_on(&nut, DAY),
+        live,
         vec![2, 3],
         "fix sent before meal 3 must replace meal 1, leaving 2 and 3. note:\n{}",
         note_on(&nut, DAY)
