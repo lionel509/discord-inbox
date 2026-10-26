@@ -233,7 +233,7 @@ pub async fn handle<M: Inbound>(allow: &Allowlist, cfg: &Config, m: &M) -> Outco
         if let Some(out) = claim(cfg, m, msg_id).await {
             return out;
         }
-        match daylog::undo_last(&cfg.nutrition_dir, &day, cfg.low_kcal, msg_id) {
+        match daylog::undo_before(&cfg.nutrition_dir, &day, cfg.low_kcal, msg_id, msg_id) {
             Ok(Some(_)) => {}
             Ok(None) => {
                 let _ = m.reply("Nothing logged today to fix; send it as a new meal.").await;
@@ -312,7 +312,7 @@ async fn run_command<M: Inbound>(cfg: &Config, m: &M, day: &str, msg_id: u64, cm
         Command::Help => m.reply(HELP).await,
         Command::Today => m.reply_rich(&summary::day_card(dir, day, cfg.low_kcal, cfg.kcal_target)).await,
         Command::Week => m.reply_rich(&summary::week_card(dir, day, cfg.low_kcal, cfg.kcal_target)).await,
-        Command::Undo => match daylog::undo_last(dir, day, cfg.low_kcal, msg_id) {
+        Command::Undo => match daylog::undo_before(dir, day, cfg.low_kcal, msg_id, msg_id) {
             Ok(Some(row)) => {
                 let (k, n) = today_numbers(dir, day, cfg.low_kcal);
                 m.reply(&format!(

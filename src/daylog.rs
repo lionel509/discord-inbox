@@ -527,12 +527,22 @@ pub fn meals(dir: &Path, day: &str) -> Vec<MealRow> {
 /// and a `- undone:` line is inserted under the open one. No other byte changes except the totals
 /// interior, which is re-rendered when it is Pip's own. `None` when the day has no meal.
 pub fn undo_last(dir: &Path, day: &str, low_kcal: u32, by_msg: u64) -> io::Result<Option<MealRow>> {
+    undo_before(dir, day, low_kcal, by_msg, u64::MAX)
+}
+
+/// Like `undo_last`, but only a live meal whose message id is below `before` can be undone: the one with
+/// the greatest such id. Discord ids are time-ordered, so an undo or fix passes its own id and a late replay
+/// cannot remove a meal that was sent after it. `None` when no live meal is below `before`.
+pub fn undo_before(dir: &Path, day: &str, low_kcal: u32, by_msg: u64, before: u64) -> io::Result<Option<MealRow>> {
     let _guard = dump::LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let Some(text) = read_note(dir, day)? else { return Ok(None) };
     let segs: Vec<&str> = text.split_inclusive('\n').collect();
     let mut target: Option<(usize, usize, u64)> = None;
     for (i, seg) in segs.iter().enumerate() {
         let Some(id) = meal_open_id(seg) else { continue };
+        if id >= before || target.is_some_and(|(_, _, t)| t > id) {
+            continue;
+        }
         if let Some(j) = (i + 1..segs.len()).find(|&j| meal_close_id(segs[j]) == Some(id)) {
             target = Some((i, j, id));
         }
