@@ -133,3 +133,12 @@ fn presence_is_persona_only() {
         assert!(!words.iter().any(|w| w == bad), "presence {PRESENCE:?} names {bad}");
     }
 }
+
+#[test]
+fn just_woke_is_false_for_a_normal_tick_and_true_after_a_sleep() {
+    let t0 = at(26, 21, 0);
+    assert!(!checkin::just_woke(t0, t0 + chrono::Duration::seconds(60)), "60 s is a normal tick");
+    assert!(!checkin::just_woke(t0, t0 + chrono::Duration::seconds(120)), "120 s is still a normal tick");
+    assert!(checkin::just_woke(t0, t0 + chrono::Duration::seconds(121)), "121 s means the laptop slept");
+    assert!(checkin::just_woke(t0, t0 + chrono::Duration::hours(3)), "3 h means the laptop slept");
+}

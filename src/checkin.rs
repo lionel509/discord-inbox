@@ -42,6 +42,12 @@ pub fn due(dir: &Path, now_local: NaiveDateTime) -> Option<String> {
     Some(day)
 }
 
+/// True when more than 120 s passed since the last tick, which means the laptop slept in between.
+/// Read from the wall clock: `Instant` does not advance while a Mac sleeps.
+pub fn just_woke(prev: NaiveDateTime, now: NaiveDateTime) -> bool {
+    now - prev > chrono::Duration::seconds(120)
+}
+
 pub fn text(day: &str) -> String {
     let ord = NaiveDate::parse_from_str(day, "%Y-%m-%d").map(|d| d.ordinal() as usize).unwrap_or(0);
     let pick = SUGGESTIONS[ord % SUGGESTIONS.len()];

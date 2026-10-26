@@ -39,6 +39,20 @@ impl EventHandler for Handler {
         eprintln!("pip: connected");
         ctx.set_presence(Some(ActivityData::custom(PRESENCE)), OnlineStatus::Idle);
 
+        // Stop the old check-in loop first, so no tick from a previous `ready` runs during catch-up.
+        if let Some(old) = CHECKIN_LOOP.lock().unwrap().take() {
+            old.abort();
+        }
+
+        // Catch-up before the check-in loop starts: a 21:00 tick must not beat the DMs that were sent while asleep.
+        catch_up_each(
+            &self.allow,
+            &self.cfg.nutrition_dir,
+            &Live { http: ctx.http.clone() },
+            &PipHandler { allow: &self.allow, cfg: &self.cfg },
+        )
+        .await;
+
         // Every `ready` (including a re-identify) replaces the check-in loop, so it never holds a dead shard's Context.
         let http = ctx.http.clone();
         let allow = self.allow.clone();
@@ -46,9 +60,17 @@ impl EventHandler for Handler {
         install_checkin_loop(tokio::spawn(async move {
             let mut tick = interval(CHECKIN_TICK);
             tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            // The tick after a sleep is skipped, so RESUME replays and catch-up land before any check-in is judged.
+            let mut prev = chrono::Local::now().naive_local();
             loop {
                 tick.tick().await;
-                if let Some(day) = checkin::due(&dir, chrono::Local::now().naive_local()) {
+                let now = chrono::Local::now().naive_local();
+                let woke = checkin::just_woke(prev, now);
+                prev = now;
+                if woke {
+                    continue;
+                }
+                if let Some(day) = checkin::due(&dir, now) {
                     let result = checkin::send(&dir, &day, |text: String| {
                         let http = http.clone();
                         let allow = allow.clone();
@@ -68,14 +90,6 @@ impl EventHandler for Handler {
                 }
             }
         }));
-
-        catch_up_each(
-            &self.allow,
-            &self.cfg.nutrition_dir,
-            &Live { http: ctx.http.clone() },
-            &PipHandler { allow: &self.allow, cfg: &self.cfg },
-        )
-        .await;
     }
 
     async fn message(&self, ctx: Context, msg: Message) {
