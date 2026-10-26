@@ -595,3 +595,85 @@ pub fn claim_command(dir: &Path, msg_id: u64) -> io::Result<bool> {
 pub fn record_command(dir: &Path, msg_id: u64) -> io::Result<()> {
     claim_command(dir, msg_id).map(|_| ())
 }
+
+/// The owed-message file beside the notes: one `"{id} {day} {time}"` line per message that is being logged and
+/// has not saved yet. A meal that failed to save stays here until its replay (the restart catch-up) saves it.
+const OWED: &str = ".pip-owed";
+
+/// The id, day and time of an owed line. Junk lines give `None`.
+fn owed_line(line: &str) -> Option<(u64, &str, &str)> {
+    let mut parts = line.split_whitespace();
+    let id = parts.next()?.parse().ok()?;
+    let day = parts.next()?;
+    let time = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((id, day, time))
+}
+
+fn read_owed(dir: &Path) -> io::Result<Vec<String>> {
+    match fs::read_to_string(dir.join(OWED)) {
+        Ok(t) => Ok(t.lines().map(str::to_string).collect()),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Writes the owed lines through a tmp file, or removes the file when no line is left.
+fn write_owed(dir: &Path, lines: &[String]) -> io::Result<()> {
+    let path = dir.join(OWED);
+    if lines.is_empty() {
+        return match fs::remove_file(&path) {
+            Err(e) if e.kind() != ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        };
+    }
+    fs::create_dir_all(dir)?;
+    let tmp = dir.join(format!("{OWED}.tmp"));
+    fs::write(&tmp, lines.iter().map(|l| format!("{l}\n")).collect::<String>())?;
+    fs::rename(&tmp, path)
+}
+
+/// Marks a message as owed before it is logged. Lines for earlier days are dropped, since the restart catch-up
+/// only replays today's messages. A message already in the file is not added twice.
+pub fn owe(dir: &Path, msg_id: u64, day: &str, time: &str) -> io::Result<()> {
+    let _guard = dump::LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let mut lines: Vec<String> = read_owed(dir)?
+        .into_iter()
+        .filter(|l| owed_line(l).is_some_and(|(_, d, _)| d >= day))
+        .collect();
+    if !lines.iter().any(|l| owed_line(l).is_some_and(|(id, _, _)| id == msg_id)) {
+        lines.push(format!("{msg_id} {day} {time}"));
+    }
+    write_owed(dir, &lines)
+}
+
+/// Clears a message's owed line once it has saved, or was answered as not a meal. A missing file is `Ok`.
+pub fn paid(dir: &Path, msg_id: u64) -> io::Result<()> {
+    let _guard = dump::LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let before = read_owed(dir)?;
+    let after: Vec<String> = before.iter().filter(|l| owed_line(l).map(|(id, _, _)| id) != Some(msg_id)).cloned().collect();
+    if after.len() == before.len() {
+        return Ok(());
+    }
+    write_owed(dir, &after)
+}
+
+/// The owed message from `day` with the greatest id below `before`, as `(id, time)`. Undo and fix pass their own
+/// id, so they are refused while an earlier meal from today has not saved. A file that cannot be read gives `None`.
+pub fn owed_before(dir: &Path, day: &str, before: u64) -> Option<(u64, String)> {
+    let lines = match read_owed(dir) {
+        Ok(lines) => lines,
+        Err(e) => {
+            eprintln!("pip: owed file in {} unreadable: {e}", dir.display());
+            return None;
+        }
+    };
+    lines
+        .iter()
+        .filter_map(|l| owed_line(l))
+        .filter(|(id, d, _)| *d == day && *id < before)
+        .max_by_key(|(id, _, _)| *id)
+        .map(|(id, _, time)| (id, time.to_string()))
+}
