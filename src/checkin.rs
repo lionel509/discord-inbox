@@ -91,3 +91,20 @@ where
     })
     .await
 }
+
+/// One pass of the check-in loop: the check-in, the daily card and the weekly card, each per recipient.
+/// Returns the log lines. U0 stub: does nothing yet (U3 moves the loop body here).
+pub async fn tick<F, Fut>(
+    _dir: &Path,
+    _now: NaiveDateTime,
+    _ids: &[u64],
+    _low_kcal: u32,
+    _kcal_target: u32,
+    _send: F,
+) -> Vec<String>
+where
+    F: FnMut(u64, crate::rich::Rich) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    Vec::new()
+}

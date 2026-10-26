@@ -101,6 +101,7 @@ pub enum Unit {
     Tsp,
     Piece,
     FlOz,
+    Portion,
 }
 
 #[derive(Clone, Debug)]
@@ -168,6 +169,7 @@ fn unit_name(u: Unit) -> &'static str {
         Unit::Tsp => "tsp",
         Unit::Piece => "piece",
         Unit::FlOz => "fl oz",
+        Unit::Portion => "portion",
     }
 }
 
@@ -649,6 +651,7 @@ pub fn parse_line(piece: &str) -> Result<Item, Unknown> {
                 Unit::Tsp => food.cup_g.map(|c| c / 48.0),
                 Unit::Piece => food.piece_g,
                 Unit::FlOz => food.cup_g.map(|c| c / 8.0),
+                Unit::Portion => Some(food.portion_g),
             };
             match per {
                 Some(p) => {
@@ -740,4 +743,46 @@ pub fn item_line(item: &Item) -> String {
         format!(" ({} {})", fmt_qty(item.qty), unit_name(item.unit))
     };
     format!("{g} g {}{tail} · {kcal} kcal", item.food.name)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Kind {
+    Mass,                 // value is grams: g/gram(s)/kg/oz/ounce(s)/lb/lbs/pound(s); "2 lb 4 oz" and "1 kg 200 g" summed into one
+    Volume(Unit),         // value is a count of Cup/Tbsp/Tsp/FlOz (grams need the food's density)
+    Piece { head: bool }, // explicit PIECE_WORDS unit (piece(s), pc(s), fillet(s), clove(s), slice(s), head(s)); head = raw unit is head/heads
+    Serving,              // a number then serving/servings/portion/portions (a following "of" is consumed too)
+    Multiplier,           // x2, X2, ×2, 2x, 2×, "x 2", "2 x"
+    Bare,                 // a number (digits or a number word) with none of the above after it
+    Range,                // 1-2, 1–2, 1 - 2, 1 – 2
+    Negative,             // -100
+    Unreadable,           // starts like a number but quantity() fails (1/0)
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Amount {
+    pub value: f64,      // grams for Mass; the count otherwise; 0.0 for Range/Negative/Unreadable
+    pub kind: Kind,
+    pub start: usize,    // byte span in Scan.text: the number, its unit word(s), and any word the kind consumed ("an", "of", "x")
+    pub end: usize,
+    pub bracketed: bool, // the amount starts inside ( ) or [ ]
+    pub word: bool,      // the number was a number word
+    pub after: String,   // Bare only: word_after_amount(rest), lowercased; "" otherwise
+    pub unit: String,    // raw unit text taken ("g", "cups", "fillet", "fl oz"); "" when none
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Scan {
+    pub text: String,
+    pub amounts: Vec<Amount>,
+}
+
+/// Every amount in one piece, read once. U0 stub: reads nothing yet (U1 implements it).
+pub fn scan(piece: &str) -> Scan {
+    Scan { text: piece.to_string(), amounts: Vec::new() }
+}
+
+/// `text` with the byte spans removed, ( ) [ ] turned into spaces, whitespace collapsed, trimmed.
+/// U0 stub: returns `text` unchanged (U1 implements it).
+pub fn strip_spans(text: &str, _spans: &[(usize, usize)]) -> String {
+    text.to_string()
 }

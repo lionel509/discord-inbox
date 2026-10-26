@@ -697,3 +697,21 @@ fn count(s: &str) -> Option<f64> {
     };
     (v.is_finite() && v > 0.0).then_some(v)
 }
+
+/// A recipe line the typed text could not use. `rest` is the text after the refused piece (U0 stub: no pieces yet).
+#[derive(Clone, Debug)]
+pub struct Refused {
+    pub unknown: nutrition::Unknown,
+    pub rest: String,
+}
+
+/// `resolve`, with the refusal kept. U0 stub: never refuses (U1 implements the refusals).
+pub fn resolve_or_refuse<'a>(text: &str, recipes: &'a [Recipe]) -> Result<Option<Hit<'a>>, Refused> {
+    Ok(resolve(text, recipes))
+}
+
+/// The ingredient a recipe scales by. U0 stub: the heaviest item (today's pick). U1 picks the title-named protein.
+pub fn reference(r: &Recipe) -> Option<nutrition::Item> {
+    let base = nutrition::parse_meal(&r.lines.join("\n"));
+    base.items.into_iter().max_by(|a, b| a.grams.total_cmp(&b.grams))
+}
