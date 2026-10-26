@@ -136,3 +136,11 @@ fn every_vegetable_row_has_a_real_portion() {
         assert!(f.portion_g >= 30.0, "{} portion {} g", f.name, f.portion_g);
     }
 }
+
+#[test]
+fn uppercase_and_keeps_both_items() {
+    let p = nutrition::parse_meal("100g salmon AND 1/2 cup dry rice");
+    let names: Vec<&str> = p.items.iter().map(|i| i.food.name).collect();
+    assert_eq!(names.len(), 2, "expected salmon and dry rice, got items {names:?} unknown {:?}", p.unknown);
+    assert!(names.contains(&"salmon"), "salmon missing, items {names:?}");
+}

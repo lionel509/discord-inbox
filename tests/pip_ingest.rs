@@ -6,7 +6,8 @@ use discord_inbox::daylog;
 use discord_inbox::pip::{self, Config, PipHandler};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 const MAIN: u64 = 100000000000000001;
 const STRANGER: u64 = 100000000000000009;
@@ -24,6 +25,7 @@ struct Spec {
 struct FakeMsg {
     spec: Spec,
     live: bool,
+    downloads: Arc<AtomicUsize>,
 }
 
 impl Inbound for FakeMsg {
@@ -49,6 +51,7 @@ impl Inbound for FakeMsg {
         self.live
     }
     async fn download(&self, i: usize) -> Result<Vec<u8>, String> {
+        self.downloads.fetch_add(1, Ordering::SeqCst);
         let (name, bytes) = &self.spec.files[i];
         if name.starts_with("bad") {
             return Err("cdn 503".to_string());
@@ -92,7 +95,7 @@ impl History for FakeHistory {
             .unwrap()
             .iter()
             .filter(|s| after.is_none_or(|a| s.id > a))
-            .map(|s| FakeMsg { spec: s.clone(), live: false })
+            .map(|s| FakeMsg { spec: s.clone(), live: false, downloads: Arc::new(AtomicUsize::new(0)) })
             .collect())
     }
     async fn fetch(&self, _channel: u64, msg_id: u64) -> Result<FakeMsg, String> {
@@ -101,7 +104,7 @@ impl History for FakeHistory {
             .unwrap()
             .iter()
             .find(|s| s.id == msg_id)
-            .map(|s| FakeMsg { spec: s.clone(), live: false })
+            .map(|s| FakeMsg { spec: s.clone(), live: false, downloads: Arc::new(AtomicUsize::new(0)) })
             .ok_or_else(|| "gone".to_string())
     }
 }
@@ -197,8 +200,28 @@ async fn a_live_message_with_no_text_and_no_files_is_ignored() {
     let m = FakeMsg {
         spec: Spec { id: 3001, author: MAIN, received: "2026-10-25T12:00:00-04:00", text: "   ", files: vec![] },
         live: true,
+        downloads: Arc::new(AtomicUsize::new(0)),
     };
     let out = pip::handle(&a, &c, &m).await;
     assert!(matches!(out, Outcome::Ignored), "{out:?}");
     assert!(snapshot(&dir).is_empty(), "nothing written");
+}
+
+#[tokio::test]
+async fn replayed_photo_dm_is_not_downloaded_again() {
+    let dir = scratch("replay-photo");
+    let (a, c) = (allow(), cfg(&dir));
+    let downloads = Arc::new(AtomicUsize::new(0));
+    let m = FakeMsg {
+        spec: Spec { id: 4001, author: MAIN, received: "2026-10-25T12:00:00-04:00", text: "cabbage", files: vec![("IMG_4.jpg", b"abc".to_vec())] },
+        live: false,
+        downloads: downloads.clone(),
+    };
+    let first = pip::handle(&a, &c, &m).await;
+    assert!(matches!(first, Outcome::Saved), "first delivery: {first:?}");
+    assert_eq!(downloads.load(Ordering::SeqCst), 1, "first delivery downloads once");
+
+    let second = pip::handle(&a, &c, &m).await;
+    assert!(matches!(second, Outcome::Skipped), "replay: {second:?}");
+    assert_eq!(downloads.load(Ordering::SeqCst), 1, "a replayed photo DM must not download again (logged() gates the download)");
 }
