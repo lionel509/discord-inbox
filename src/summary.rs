@@ -6,6 +6,7 @@ use crate::nutrition::Macros;
 use crate::rich::Rich;
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Timelike, Weekday};
 use std::fs;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 
 /// Local hour from which the daily and weekly summaries are due.
@@ -90,6 +91,32 @@ fn meal_line(r: &MealRow) -> String {
     format!("{} · {} kcal · {shown}", r.time, r.kcal.round() as i64)
 }
 
+/// The Meals field value: meal lines in order while the joined text stays within 1000 characters (Discord caps a
+/// value at 1024). Rows that do not fit are counted in a final `+N more` line, so none vanish silently.
+fn meals_value(meals: &[String]) -> String {
+    if meals.is_empty() {
+        return "none logged".to_string();
+    }
+    let mut out = String::new();
+    let mut shown = 0;
+    for m in meals {
+        let next = if shown == 0 { m.clone() } else { format!("{out}\n{m}") };
+        if next.chars().count() > 1000 {
+            break;
+        }
+        out = next;
+        shown += 1;
+    }
+    if shown == 0 {
+        out = meals[0].chars().take(1000).collect();
+    }
+    let left = meals.len() - shown.max(1);
+    if left > 0 {
+        out += &format!("\n+{left} more");
+    }
+    out
+}
+
 /// Field rows as `Name: value` lines, with the title first: the plain-text fallback of a card.
 fn plain(title: &str, fields: &[(String, String, bool)]) -> String {
     std::iter::once(title.to_string())
@@ -115,7 +142,7 @@ pub fn day_card(dir: &Path, day: &str, low: u32, kcal_target: u32) -> Rich {
         ("Carbs".to_string(), format!("{} / {} g", num(s.macros.carbs), num(t.carbs)), true),
         ("Fat".to_string(), format!("{} / {} g", num(s.macros.fat), num(t.fat)), true),
         ("Veg".to_string(), veg.to_string(), true),
-        ("Meals".to_string(), if meals.is_empty() { "none logged".to_string() } else { meals.join("\n") }, false),
+        ("Meals".to_string(), meals_value(&meals), false),
         ("Flags".to_string(), flags, true),
         ("Streak".to_string(), format!("{} day(s)", streak(dir, day)), true),
     ];
@@ -215,14 +242,14 @@ pub fn daily_due(dir: &Path, now: NaiveDateTime) -> Option<String> {
     Some(day)
 }
 
-/// The Sunday whose weekly summary is due: from 22:00 on a Sunday, once. Sent even when the week has no
-/// meals (the card then reads "not logged" for each day).
+/// The Sunday whose weekly summary is due: from 22:00 on a Sunday, once, and only when some day of that week has a
+/// meal.
 pub fn weekly_due(dir: &Path, now: NaiveDateTime) -> Option<String> {
     if now.weekday() != Weekday::Sun || now.hour() < SUMMARY_HOUR {
         return None;
     }
     let day = now.date().format("%Y-%m-%d").to_string();
-    if weekly_marker(dir, &day).exists() {
+    if weekly_marker(dir, &day).exists() || !week_days(&day).iter().any(|d| daylog::has_meal(dir, d)) {
         return None;
     }
     Some(day)
@@ -248,4 +275,39 @@ where
 {
     claim(marker)?;
     f().inspect_err(|_| release(marker))
+}
+
+/// One recipient's marker: the day's marker with `-{uid}` appended to its name.
+pub fn recipient_marker(marker: &Path, uid: u64) -> PathBuf {
+    let name = marker.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    marker.with_file_name(format!("{name}-{uid}"))
+}
+
+/// Sends to each recipient in order, each at most once per day. A recipient whose marker exists is skipped. A
+/// failed send releases only that recipient's marker and is collected. The day marker is claimed only when every
+/// recipient has been sent, so a retry reaches just the ones that failed.
+pub async fn send_each<F, Fut>(marker: &Path, ids: &[u64], mut send: F) -> Result<(), String>
+where
+    F: FnMut(u64) -> Fut,
+    Fut: Future<Output = Result<(), String>>,
+{
+    let mut errors = Vec::new();
+    for &uid in ids {
+        let mine = recipient_marker(marker, uid);
+        if mine.exists() {
+            continue;
+        }
+        if let Err(e) = claim(&mine) {
+            errors.push(e);
+            continue;
+        }
+        if let Err(e) = send(uid).await {
+            release(&mine);
+            errors.push(e);
+        }
+    }
+    if !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+    claim(marker)
 }

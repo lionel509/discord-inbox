@@ -35,13 +35,10 @@ struct Handler {
     cfg: Arc<Config>,
 }
 
-/// Sends one card to every allowlisted user, as a DM, in allowlist order.
-async fn dm_all(http: &Arc<Http>, allow: &Allowlist, card: &Rich) -> Result<(), String> {
-    for user in allow.ids() {
-        let dm = UserId::new(user).create_dm_channel(http).await.map_err(|e| e.to_string())?;
-        send_rich(http, dm.id, card).await?;
-    }
-    Ok(())
+/// Sends one card to one user, as a DM.
+async fn dm_one(http: &Arc<Http>, uid: u64, card: &Rich) -> Result<(), String> {
+    let dm = UserId::new(uid).create_dm_channel(http).await.map_err(|e| e.to_string())?;
+    send_rich(http, dm.id, card).await
 }
 
 #[async_trait]
@@ -100,20 +97,12 @@ impl EventHandler for Handler {
                         Err(e) => eprintln!("pip: check-in for {day} failed: {e}"),
                     }
                 }
-                // Daily (22:00, a meal logged) and weekly (Sunday 22:00): the marker is claimed before the DMs go out.
+                // Daily (22:00, a meal logged) and weekly (Sunday 22:00): each recipient is marked as it is sent.
+                let ids: Vec<u64> = allow.ids().collect();
                 if let Some(day) = summary::daily_due(&dir, now) {
                     let card = summary::day_card(&dir, &day, cfg.low_kcal, cfg.kcal_target);
                     let marker = summary::marker_path(&dir, &day);
-                    let result = match summary::claim(&marker) {
-                        Ok(()) => {
-                            let sent = dm_all(&http, &allow, &card).await;
-                            if sent.is_err() {
-                                summary::release(&marker);
-                            }
-                            sent
-                        }
-                        Err(e) => Err(e),
-                    };
+                    let result = summary::send_each(&marker, &ids, |uid| dm_one(&http, uid, &card)).await;
                     match result {
                         Ok(()) => eprintln!("pip: summary sent for {day}"),
                         Err(e) => eprintln!("pip: summary for {day} failed: {e}"),
@@ -122,16 +111,7 @@ impl EventHandler for Handler {
                 if let Some(day) = summary::weekly_due(&dir, now) {
                     let card = summary::week_card(&dir, &day, cfg.low_kcal, cfg.kcal_target);
                     let marker = summary::weekly_marker(&dir, &day);
-                    let result = match summary::claim(&marker) {
-                        Ok(()) => {
-                            let sent = dm_all(&http, &allow, &card).await;
-                            if sent.is_err() {
-                                summary::release(&marker);
-                            }
-                            sent
-                        }
-                        Err(e) => Err(e),
-                    };
+                    let result = summary::send_each(&marker, &ids, |uid| dm_one(&http, uid, &card)).await;
                     match result {
                         Ok(()) => eprintln!("pip: weekly sent for {day}"),
                         Err(e) => eprintln!("pip: weekly for {day} failed: {e}"),
