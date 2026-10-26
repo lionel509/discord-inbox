@@ -28,8 +28,12 @@ const NO_CAT_ACT: &str = "Answer first. Talk like a normal person: no cat manner
 fn persona_drops_the_cat_act() {
     let s = system_prompt();
     assert!(s.contains(NO_CAT_ACT), "{s}");
+    // Both prompts are built from PERSONA, so both must carry the instruction.
+    let (answer, _) = answer_prompt("how much does willam owe me", &[]);
+    assert!(answer.contains(NO_CAT_ACT), "{answer}");
     // The instruction itself names "purr" to forbid it, so check the rest of the persona without that sentence.
-    let rest = s.replace(NO_CAT_ACT, "");
-    assert!(!rest.contains("purr"), "{rest}");
-    assert!(!rest.contains("🐾"), "{rest}");
+    let rest = s.replace(NO_CAT_ACT, "").to_lowercase();
+    for word in ["purr", "meow", "🐾", "😺", "😸", "😿", "🐈", "🐱"] {
+        assert!(!rest.contains(word), "{word} in {rest}");
+    }
 }
