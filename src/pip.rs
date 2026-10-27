@@ -167,6 +167,10 @@ pub async fn handle<M: Inbound>(allow: &Allowlist, cfg: &Config, m: &M) -> Outco
 
     // Already in the day note or the command ledger (a replay, or a reply that failed): nothing to do, no download.
     if daylog::logged(&cfg.nutrition_dir, &day, msg_id) || daylog::command_seen(&cfg.nutrition_dir, msg_id) {
+        // A crash after the save but before `paid` leaves a stale owed line; clear it here or it blocks undo all day.
+        if let Err(e) = daylog::paid(&cfg.nutrition_dir, msg_id) {
+            eprintln!("pip: clearing owed line for {msg_id} failed: {e}");
+        }
         return Outcome::Skipped;
     }
     if let Err(e) = std::fs::create_dir_all(&cfg.nutrition_dir) {
