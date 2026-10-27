@@ -4,7 +4,8 @@
 //! id's marker is staged before its send (see `summary::send_each`), so a failed send is retried on the next tick, and
 //! an id whose send failed does not get it once a meal is logged before the retry. A repeat happens when a DM was sent
 //! and its marker could not be finalized (a crash, or a rename failing mid-pass), and also when a send returned `Err`
-//! after delivery (a timeout), because `Err` means delivery is unknown. Each of those repeats happens once more.
+//! after delivery (a timeout), because `Err` means delivery is unknown. A crash or a failed rename repeats a DM once; a
+//! send that keeps returning `Err` is retried on every tick until one succeeds, a meal is logged, or the day ends.
 use crate::daylog;
 use crate::rich::Rich;
 use crate::summary;
