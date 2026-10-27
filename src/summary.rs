@@ -283,10 +283,18 @@ pub fn recipient_marker(marker: &Path, uid: u64) -> PathBuf {
     marker.with_file_name(format!("{name}-{uid}"))
 }
 
-/// Sends to each recipient in order, at least once per day (I3). A recipient whose marker exists is skipped. The
-/// recipient's marker is written after its send succeeds, so a failed send leaves no marker and is collected. The
-/// only way to send twice is a crash between a successful send and its marker write, and then only once more. The
-/// day marker is claimed only when every recipient has been sent, so a retry reaches just the ones that failed.
+/// One recipient's staged marker, written before its send and renamed to the recipient's marker after it.
+fn staged_marker(mine: &Path) -> PathBuf {
+    let name = mine.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    mine.with_file_name(format!("{name}.tmp"))
+}
+
+/// Sends to each recipient in order, at least once per day (I3). A recipient whose marker exists is skipped. Before
+/// each send, the recipient's marker is staged (`{marker}.tmp`); if the staging write fails, that recipient is not
+/// sent and the error is collected. After a successful send the staged file is renamed to the recipient's marker. A
+/// failed send removes the staged file, so the recipient is retried. A repeat therefore happens only when a DM was
+/// sent and its marker could not be finalized (a crash, or a rename that fails mid-pass), and then once more. The day
+/// marker is claimed only when every recipient has been sent, so a retry reaches just the ones that failed.
 pub async fn send_each<F, Fut>(marker: &Path, ids: &[u64], mut send: F) -> Result<(), String>
 where
     F: FnMut(u64) -> Fut,
@@ -298,13 +306,21 @@ where
         if mine.exists() {
             continue;
         }
+        let staged = staged_marker(&mine);
+        if let Err(e) = claim(&staged) {
+            errors.push(e);
+            continue;
+        }
         match send(uid).await {
             Ok(()) => {
-                if let Err(e) = claim(&mine) {
+                if let Err(e) = fs::rename(&staged, &mine).map_err(|e| e.to_string()) {
                     errors.push(e);
                 }
             }
-            Err(e) => errors.push(e),
+            Err(e) => {
+                release(&staged);
+                errors.push(e);
+            }
         }
     }
     if !errors.is_empty() {

@@ -1,7 +1,8 @@
-//! Evening check-in rule (U3). At most one check-in per local day, and none on a day that already has a meal.
-//! Every allowlisted id gets each day's check-in at least once (I3). Each id's marker is written after its send, so a
-//! failed send is retried on the next tick, and only a crash between a successful send and its marker write repeats
-//! that one DM, once.
+//! Evening check-in rule (U3). At most one check-in per local day, and none on a day that already has a meal. It is due
+//! from 21:00 to midnight of its own day only, so a Mac asleep through that window misses it and it is not sent the
+//! next morning. Every allowlisted id gets each day's check-in at least once (I3): each id's marker is staged before its
+//! send (see `summary::send_each`), so a failed send is retried on the next tick. A repeat happens only when a DM was
+//! sent and its marker could not be finalized (a crash, or a rename failing mid-pass), and then once more.
 use crate::daylog;
 use crate::rich::Rich;
 use crate::summary;
@@ -72,9 +73,9 @@ where
     fs::write(marker_path(dir, day), "sent\n").map_err(|e| e.to_string())
 }
 
-/// Sends the check-in to each id, at least once (I3), through `summary::send_each`: each id's marker is written after
-/// its send, so a failed id is retried on the next tick and the ids that already got it are skipped. The day marker is
-/// written only when every id has been sent. A failed send is returned to the caller.
+/// Sends the check-in to each id, at least once (I3), through `summary::send_each`, which stages each id's marker before
+/// its send and finalizes it after. A failed id is retried on the next tick, and the ids that already got it are
+/// skipped. The day marker is written only when every id has been sent. A failed send is returned to the caller.
 pub async fn send_all<F, Fut>(dir: &Path, day: &str, ids: &[u64], mut send_one: F) -> Result<(), String>
 where
     F: FnMut(u64, String) -> Fut,
