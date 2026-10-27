@@ -833,7 +833,7 @@ pub struct Scan {
 
 /// Every amount in one piece, read once. The only quantity reader: `parse_line` and both recipe paths use it.
 pub fn scan(piece: &str) -> Scan {
-    let text = drop_percent(&drop_times(&join_thousands(piece)).replace(':', " "));
+    let text = drop_percent(&drop_times(&join_thousands(&piece.replace('~', " "))).replace(':', " "));
     let amounts = amounts_in(&text, None);
     Scan { text, amounts }
 }
