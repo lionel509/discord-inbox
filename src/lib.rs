@@ -9,6 +9,7 @@ pub mod tools;
 pub mod vaults;
 pub mod when;
 pub mod ocr;
+pub mod receipt;
 pub mod pantry;
 pub mod redact;
 pub mod live;
