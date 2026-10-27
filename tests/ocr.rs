@@ -1,6 +1,6 @@
 //! The OCR helper contract and the note bookkeeping around it. Stub helpers only: no Vision needed.
 use discord_inbox::dump::{self, note_is_complete, sha256_hex, write_note, Incoming};
-use discord_inbox::ocr::{is_image, run};
+use discord_inbox::ocr::{is_image, read_all_with, run};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -260,4 +260,15 @@ fn quick_helpers_are_not_paced_by_the_poll_interval() {
         assert_eq!(run(&s, b"x", Duration::from_secs(5)), Some("x".to_string()));
     }
     assert!(start.elapsed() < Duration::from_millis(300), "{:?}", start.elapsed());
+}
+
+#[tokio::test]
+async fn read_all_with_runs_the_helper_it_is_given_not_the_env_one() {
+    let dir = scratch("with").parent().unwrap().to_path_buf();
+    let wrong = stub(&dir.join("wrong"), "cat >/dev/null; printf 'WRONG\\n'");
+    let right = stub(&dir.join("right"), "cat >/dev/null; printf 'RIGHT\\n'");
+    std::env::set_var("DISCORD_INBOX_OCR", &wrong);
+    let got = read_all_with(&right, 7, &[("r.jpg".to_string(), Some(b"img".to_vec()))]).await;
+    std::env::remove_var("DISCORD_INBOX_OCR");
+    assert_eq!(got, vec![(0, "RIGHT".to_string())]);
 }
