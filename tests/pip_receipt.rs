@@ -78,13 +78,13 @@ impl Inbound for Msg {
     }
 }
 
-/// A fresh scratch nutrition dir and the OCR counter file next to it.
+/// A fresh scratch nutrition dir, and the root above it (the OCR helper and its call counter live there).
 fn world(name: &str) -> (PathBuf, PathBuf) {
     let root = std::env::temp_dir().join(format!("pip-receipt-{}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     let dir = root.join("Private").join("Nutrition");
     fs::create_dir_all(&dir).unwrap();
-    (dir, root.join("ocr-count"))
+    (dir, root)
 }
 
 /// A `/bin/sh` OCR helper that counts its calls and prints `text` (or exits 1 when `text` is None).
@@ -149,7 +149,7 @@ async fn same_night_receipt_logs_at_the_printed_time() {
         assert!(n.contains(food), "{food} missing from {n}");
     }
     assert!(n.contains("soda"), "{n}");
-    assert!(n.contains("receipts have no weights"), "{n}");
+    assert!(n.contains("portions assumed (no weights on receipts)"), "{n}");
     let r = joined(&replies);
     assert!(r.contains("Portions are assumed"), "{r}");
     assert!(r.contains("Not counted"), "{r}");

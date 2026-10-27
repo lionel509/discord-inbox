@@ -7,6 +7,7 @@ use crate::daylog::{self, Meal, NoteMsg, Totals, Written};
 use crate::ingest::{Handle, Inbound, Outcome, FAILED_MARK, SAVED_MARK};
 use crate::nutrition::{self, Parsed};
 use crate::recipes::{self, Recipe, Scaled};
+use crate::receipt;
 use crate::rich::Rich;
 use crate::summary;
 use std::path::PathBuf;
@@ -173,7 +174,11 @@ pub async fn handle<M: Inbound>(allow: &Allowlist, cfg: &Config, m: &M) -> Outco
     let msg_id = m.msg_id();
 
     // Already in the day note or the command ledger (a replay, or a reply that failed): nothing to do, no download.
-    if daylog::logged(&cfg.nutrition_dir, &day, msg_id) || daylog::command_seen(&cfg.nutrition_dir, msg_id) {
+    // A receipt is logged to the previous day's note when its printed time says so, so that day is checked too.
+    if daylog::logged(&cfg.nutrition_dir, &day, msg_id)
+        || receipt::prev_day(&day).is_some_and(|p| daylog::logged(&cfg.nutrition_dir, &p, msg_id))
+        || daylog::command_seen(&cfg.nutrition_dir, msg_id)
+    {
         // A crash after the save but before `paid` leaves a stale owed line; clear it here or it blocks undo all day.
         if let Err(e) = daylog::paid(&cfg.nutrition_dir, msg_id) {
             eprintln!("pip: clearing owed line for {msg_id} failed: {e}");
@@ -243,11 +248,20 @@ async fn log_message<M: Inbound>(
         let _ = daylog::paid(&cfg.nutrition_dir, msg_id);
     }
 
+    // OCR only for a photo that isn't food, with no `fix` in play, and only when a helper is configured.
+    let want_ocr = !an.is_meal && fix_rest.is_none() && cfg.ocr.is_some();
+    let mut images: Vec<(String, Option<Vec<u8>>)> = Vec::new();
     let mut photos = Vec::new();
     for (i, name) in files.iter().enumerate() {
         let path = daylog::photo_path(&cfg.nutrition_dir, &day, &hhmm, msg_id, i, name);
         let saved = match m.download(i).await {
-            Ok(bytes) => daylog::save_photo(&path, &bytes).map_err(|e| e.to_string()),
+            Ok(bytes) => {
+                let r = daylog::save_photo(&path, &bytes).map_err(|e| e.to_string());
+                if want_ocr && r.is_ok() {
+                    images.push((name.clone(), Some(bytes)));
+                }
+                r
+            }
             Err(e) => Err(e),
         };
         if let Err(e) = saved {
@@ -256,6 +270,12 @@ async fn log_message<M: Inbound>(
             return Outcome::Failed;
         }
         photos.push(path.file_name().unwrap_or_default().to_string_lossy().into_owned());
+    }
+
+    if want_ocr {
+        if let Some(out) = log_receipt(cfg, m, &day, msg_id, &time, &text, &photos, &images).await {
+            return out;
+        }
     }
 
     if !an.is_meal {
@@ -346,6 +366,97 @@ async fn log_message<M: Inbound>(
     }
     let _ = m.react(SAVED_MARK).await;
     Outcome::Saved
+}
+
+/// A receipt photo: the local OCR reads it and its food lines are logged as one meal, at the printed time when
+/// that is today or yesterday. `None` when no photo is a receipt or OCR failed, so the caller's note path runs
+/// as on `main`. The OCR text is never printed, logged or replied; only the cleaned lines and the date leave `receipt`.
+#[allow(clippy::too_many_arguments)]
+async fn log_receipt<M: Inbound>(
+    cfg: &Config,
+    m: &M,
+    msg_day: &str,
+    msg_id: u64,
+    msg_time: &str,
+    text: &str,
+    photos: &[String],
+    images: &[(String, Option<Vec<u8>>)],
+) -> Option<Outcome> {
+    let helper = cfg.ocr.as_deref()?;
+    let ocr_text = crate::ocr::read_all_with(helper, msg_id, images)
+        .await
+        .into_iter()
+        .map(|(_, t)| t)
+        .find(|t| receipt::is_receipt(t))?;
+    let r = receipt::read(&ocr_text);
+    let (day, time, stamp) = receipt::pick_time(r.printed.clone(), msg_day, msg_time);
+    let mut parsed = nutrition::parse_meal(&r.items.join(", "));
+    for d in &r.drinks {
+        parsed.unknown.push(nutrition::Unknown { text: d.clone(), hint: receipt::DRINK_HINT.to_string() });
+    }
+
+    if parsed.items.is_empty() && parsed.unknown.is_empty() {
+        // Nothing to count: the photo is kept as a note on the send day, and the reply says why.
+        let n = NoteMsg { msg_id, time: msg_time.to_string(), text: text.to_string(), photos: photos.to_vec() };
+        match daylog::write_note(&cfg.nutrition_dir, msg_day, &n, cfg.low_kcal) {
+            Ok(Written::Already) => return Some(Outcome::Skipped),
+            Ok(Written::Logged) => {}
+            Err(e) => {
+                eprintln!("pip: day note {msg_day} failed: {e}");
+                let _ = m.react(FAILED_MARK).await;
+                return Some(Outcome::Failed);
+            }
+        }
+        let _ = m.reply("That looks like a receipt, but I couldn't read any food lines off it, so nothing is logged. Reply with what you had (e.g. salmon 100g, cooked rice 180g).").await;
+        let _ = m.react(SAVED_MARK).await;
+        return Some(Outcome::Saved);
+    }
+
+    let mut assumed = vec![match &stamp {
+        receipt::Stamp::Printed => format!("Logged at the receipt's printed time, {time}."),
+        receipt::Stamp::PrintedYesterday => format!(
+            "Logged at the receipt's printed time, {day} {time}, on yesterday's note. undo and fix only reach today (#128), so edit {day}.md to change it."
+        ),
+        receipt::Stamp::NotFound => format!("No printed time on the receipt, so logged at {msg_time}, when you sent it."),
+        receipt::Stamp::OutOfRange(p) => {
+            format!("The receipt says {p}, which isn't today or yesterday, so logged at {msg_time}, when you sent it.")
+        }
+    }];
+    assumed.push("Portions are assumed: receipts have no weights.".to_string());
+    let an = Analysis { parsed, overridden: Vec::new(), recipe: None, skipped: Vec::new(), assumed, is_meal: true };
+
+    let caption = if text.is_empty() { String::new() } else { format!("; caption: {text}") };
+    let meal = Meal {
+        msg_id,
+        time: time.clone(),
+        lines: an.parsed.items.iter().map(nutrition::item_line).collect(),
+        macros: nutrition::macros(&an.parsed.items),
+        veg: nutrition::has_veg(&an.parsed.items),
+        recipe: None,
+        unknown: an.parsed.unknown.iter().map(|u| format!("{} ({})", u.text, u.hint)).collect(),
+        note: Some(format!("read from a receipt photo; portions assumed (no weights on receipts){caption}")),
+        photos: photos.to_vec(),
+    };
+    match daylog::write_meal(&cfg.nutrition_dir, &day, &meal, cfg.low_kcal) {
+        Ok(Written::Already) => return Some(Outcome::Skipped),
+        Ok(Written::Logged) => {}
+        Err(e) => {
+            // The owed line was cleared before the download, so owe it again for the catch-up to retry.
+            let _ = daylog::owe(&cfg.nutrition_dir, msg_id, msg_day, msg_time);
+            eprintln!("pip: day note {day} failed: {e}");
+            let _ = m.react(FAILED_MARK).await;
+            return Some(Outcome::Failed);
+        }
+    }
+
+    // The note is on disk, so a failed reply is not a failed log. Today's totals only when the meal is today's.
+    let today = if day == msg_day { daylog::totals(&cfg.nutrition_dir, &day, cfg.low_kcal) } else { None };
+    let card = meal_card(&an, today.as_ref(), cfg.kcal_target);
+    if let Err(e) = m.reply_rich(&card).await {
+        eprintln!("pip: reply on {msg_id} failed: {e}");
+    }
+    let _ = m.react(SAVED_MARK).await;
+    Some(Outcome::Saved)
 }
 
 /// Claims a command id in the ledger before its action runs. `Some(outcome)` means stop: the id was already
