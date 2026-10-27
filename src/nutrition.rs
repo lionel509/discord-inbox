@@ -272,6 +272,25 @@ fn join_thousands(s: &str) -> String {
     out
 }
 
+/// A tilde between two numbers is a range and reads as `-`. Any other tilde (`~150`, `150~ g`, `～150`) means
+/// "about" and becomes a space, so the amount after it stays. The full-width forms (U+FF5E, U+301C) count the same.
+fn tildes(piece: &str) -> String {
+    let cs: Vec<char> = piece.chars().collect();
+    let is_tilde = |c: char| matches!(c, '~' | '\u{FF5E}' | '\u{301C}');
+    let mut out = String::with_capacity(piece.len());
+    for (k, &c) in cs.iter().enumerate() {
+        if !is_tilde(c) {
+            out.push(c);
+            continue;
+        }
+        let before = cs[..k].iter().rev().find(|x| !x.is_whitespace());
+        let after = cs[k + 1..].iter().find(|x| !x.is_whitespace());
+        let range = before.is_some_and(|b| b.is_ascii_digit()) && after.is_some_and(|a| a.is_ascii_digit());
+        out.push(if range { '-' } else { ' ' });
+    }
+    out
+}
+
 /// Splits on `sep` in any letter case (` AND ` too), so no item is silently dropped.
 /// Split `p` on " and ", except where a `keep` phrase (lowercase) covers the " and ".
 fn split_and<'a>(p: &'a str, keep: &[String]) -> Vec<&'a str> {
@@ -833,7 +852,7 @@ pub struct Scan {
 
 /// Every amount in one piece, read once. The only quantity reader: `parse_line` and both recipe paths use it.
 pub fn scan(piece: &str) -> Scan {
-    let text = drop_percent(&drop_times(&join_thousands(&piece.replace('~', " "))).replace(':', " "));
+    let text = drop_percent(&drop_times(&join_thousands(&tildes(piece))).replace(':', " "));
     let amounts = amounts_in(&text, None);
     Scan { text, amounts }
 }
