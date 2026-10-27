@@ -237,7 +237,8 @@ fn exact<'a>(text: &str, recipes: &'a [Recipe]) -> Exact<'a> {
     let (sc, toks) = &scans[pi];
     let span = (toks[i].0, toks[i + k - 1].1);
     let matched = sc.text[span.0..span.1].to_string();
-    let amounts: Vec<nutrition::Amount> = sc.amounts.iter().filter(|a| !(a.start < span.1 && span.0 < a.end)).cloned().collect();
+    // The name's own words are not read as amounts (`tofu 65 1/2 kg` keeps its 1/2 kg); anything else that overlaps the name is dropped.
+    let amounts: Vec<nutrition::Amount> = nutrition::scan_outside(sc, span).into_iter().filter(|a| !(a.start < span.1 && span.0 < a.end)).collect();
     let other_pieces: Vec<String> = pieces.iter().enumerate().filter(|(j, _)| *j != pi).map(|(_, p)| p.clone()).collect();
     let nw = all_name_words(recipe);
     let ref_food = ref_food_name(recipe);
@@ -249,7 +250,7 @@ fn exact<'a>(text: &str, recipes: &'a [Recipe]) -> Exact<'a> {
         Ok(q) => {
             // The matched piece keeps what the name and its amounts did not use.
             let mut spans = vec![span];
-            spans.extend(sc.amounts.iter().map(|a| (a.start, a.end)));
+            spans.extend(amounts.iter().map(|a| (a.start, a.end)));
             let leftover = nutrition::strip_spans(&sc.text, &spans);
             let mut parts: Vec<String> = Vec::new();
             for (j, p) in pieces.iter().enumerate() {

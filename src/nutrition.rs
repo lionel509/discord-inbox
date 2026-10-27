@@ -257,19 +257,15 @@ pub fn quantity(s: &str) -> Option<(f64, &str)> {
     Some((value, rest))
 }
 
-/// `1,000` is one thousand; `1,5` is a decimal (`1.5`), so it is not split into two pieces.
+/// `1,000` is one thousand. A comma between digits that is not a thousands group (`1,5`, `1,0000`) is kept:
+/// `scan` refuses it, so it is never read as a decimal or as one gram.
 fn join_thousands(s: &str) -> String {
     let cs: Vec<char> = s.chars().collect();
     let digit = |i: usize| cs.get(i).is_some_and(|c| c.is_ascii_digit());
     let mut out = String::with_capacity(s.len());
     for i in 0..cs.len() {
         let thousands = cs[i] == ',' && i > 0 && digit(i - 1) && digit(i + 1) && digit(i + 2) && digit(i + 3) && !digit(i + 4);
-        if thousands {
-            continue;
-        }
-        if cs[i] == ',' && i > 0 && digit(i - 1) && digit(i + 1) {
-            out.push('.');
-        } else {
+        if !thousands {
             out.push(cs[i]);
         }
     }
@@ -291,8 +287,19 @@ fn split_on<'a>(p: &'a str, sep: &str) -> Vec<&'a str> {
 
 /// Split a message into line items on `,`, `+`, `;`, newline and the word ` and `. Bullets (`- `, `* `) are dropped.
 pub fn split_pieces(text: &str) -> Vec<String> {
-    join_thousands(text)
-        .split(|c| matches!(c, ',' | '+' | ';' | '\n'))
+    // A comma between two digits is never a list separator: `1,5 kg` stays one piece, so `scan` can refuse it.
+    let cs: Vec<char> = join_thousands(text).chars().collect();
+    let mut parts: Vec<String> = vec![String::new()];
+    for (i, &c) in cs.iter().enumerate() {
+        let digit_comma = c == ',' && i > 0 && cs[i - 1].is_ascii_digit() && cs.get(i + 1).is_some_and(|d| d.is_ascii_digit());
+        if matches!(c, ',' | '+' | ';' | '\n') && !digit_comma {
+            parts.push(String::new());
+        } else if let Some(last) = parts.last_mut() {
+            last.push(c);
+        }
+    }
+    parts
+        .iter()
         .flat_map(|p| split_on(p, " and "))
         .map(|p| {
             let p = p.trim();
@@ -522,8 +529,12 @@ fn drop_times(s: &str) -> String {
             continue;
         }
         let next = i + 1;
-        let no_unit_after = toks.get(next + 1).is_none_or(|t| unit_word(t.trim_end_matches('.')).is_none());
-        let bare_hour = !drop[next] && toks[next].len() <= 2 && toks[next].bytes().all(|b| b.is_ascii_digit()) && toks[next].parse::<u32>().is_ok_and(|h| (1..=24).contains(&h)) && no_unit_after;
+        // A bare hour is a time only when it ends the phrase: the end, punctuation, another number or am/pm.
+        // So `salmon at 7 150 g` drops the 7, and `around 2 eggs` keeps its 2.
+        let hour = toks[next].trim_end_matches(|c: char| c.is_ascii_punctuation());
+        let punct_after = hour.len() < toks[next].len();
+        let time_after = punct_after || toks.get(next + 1).is_none_or(|t| t.starts_with(|c: char| c.is_ascii_digit()) || is_ampm(t) || t.bytes().all(|b| b.is_ascii_punctuation()));
+        let bare_hour = !drop[next] && !hour.is_empty() && hour.len() <= 2 && hour.bytes().all(|b| b.is_ascii_digit()) && hour.parse::<u32>().is_ok_and(|h| (1..=24).contains(&h)) && time_after;
         if drop[next] || bare_hour {
             drop[i] = true;
             drop[next] |= bare_hour;
@@ -533,6 +544,12 @@ fn drop_times(s: &str) -> String {
 }
 
 const TWO_AMOUNTS: &str = "two amounts in one line; send one";
+
+/// Whether a bare count is typed first in its piece: nothing before it, or only `around` (`around 2 eggs`).
+fn typed_first(before: &str) -> bool {
+    let b = before.trim();
+    b.is_empty() || b.eq_ignore_ascii_case("around")
+}
 
 /// The table entry for `per` of a unit (`cup`, `tbsp`, `piece`, `portion` ...), or None when the food has no such weight.
 fn per_unit(food: &Food, u: Unit) -> Option<f64> {
@@ -663,7 +680,7 @@ pub fn parse_line(piece: &str) -> Result<Item, Unknown> {
                     return Err(whole(TWO_AMOUNTS));
                 }
                 // A bare count of a food with a piece weight is pieces (up to 12), when it is typed first: "2 eggs".
-                let (Some(p), true) = (food.piece_g, sc.text[..a.start].trim().is_empty()) else {
+                let (Some(p), true) = (food.piece_g, typed_first(&sc.text[..a.start])) else {
                     return Err(Unknown { text: food_text.clone(), hint: "no unit; add g, oz, lb, cup or pcs".to_string() });
                 };
                 if a.value > 12.0 {
@@ -674,6 +691,10 @@ pub fn parse_line(piece: &str) -> Result<Item, Unknown> {
             Kind::Multiplier | Kind::Range | Kind::Negative | Kind::Unreadable | Kind::Serving => return Err(whole(TWO_AMOUNTS)),
         },
     };
+    // T9: a zero amount is refused (the recipe path does the same), so a typo never logs a 0 g row.
+    if grams == 0.0 {
+        return Err(Unknown { text: food_text, hint: "zero amount; nothing logged".to_string() });
+    }
     // T9: a weight that is not finite, or over 10 kg, is refused.
     if !grams.is_finite() || grams > 10_000.0 {
         return Err(Unknown { text: food_text, hint: "over 10 kg; check the amount".to_string() });
@@ -789,11 +810,28 @@ pub struct Scan {
 /// Every amount in one piece, read once. The only quantity reader: `parse_line` and both recipe paths use it.
 pub fn scan(piece: &str) -> Scan {
     let text = drop_percent(&drop_times(&join_thousands(piece)).replace(':', " "));
+    let amounts = amounts_in(&text, None);
+    Scan { text, amounts }
+}
+
+/// The amounts of `sc` that start outside `skip`, a byte span of `sc.text` (the recipe name the caller matched).
+/// The name's own words are not read as amounts, so a title that ends in a number (`tofu 65 1/2 kg`) leaves the
+/// fraction after it to be read on its own.
+pub fn scan_outside(sc: &Scan, skip: (usize, usize)) -> Vec<Amount> {
+    amounts_in(&sc.text, Some(skip))
+}
+
+/// Every amount in `text` whose start is not inside `skip`, read left to right.
+fn amounts_in(text: &str, skip: Option<(usize, usize)>) -> Vec<Amount> {
     let mut amounts: Vec<Amount> = Vec::new();
     let mut i = 0;
     while let Some(c) = text[i..].chars().next() {
         let next = i + c.len_utf8();
-        match scan_at(&text, i, c) {
+        if skip.is_some_and(|(s, e)| i >= s && i < e) {
+            i = next;
+            continue;
+        }
+        match scan_at(text, i, c) {
             Some(mut a) => {
                 a.bracketed = bracket_depth(&text[..a.start]) > 0;
                 i = a.end.max(next);
@@ -802,7 +840,7 @@ pub fn scan(piece: &str) -> Scan {
             None => i = next,
         }
     }
-    Scan { text, amounts }
+    amounts
 }
 
 /// `text` with the byte spans removed, ( ) [ ] turned into spaces, whitespace collapsed, trimmed.
@@ -849,11 +887,16 @@ fn scan_at(text: &str, i: usize, c: char) -> Option<Amount> {
     // S4: a number word (`two`, `half`) followed by a space, the end or punctuation. `half` and `quarter` take a following a/an.
     if c.is_alphabetic() && word_start(text, i) {
         let tok_end = text[i..].find(|ch: char| !ch.is_alphabetic()).map_or(text.len(), |p| i + p);
-        if let Some((v, takes_article)) = number_word(&text[i..tok_end].to_lowercase()) {
+        let word = text[i..tok_end].to_lowercase();
+        if let Some((v, takes_article)) = number_word(&word) {
             if boundary_after(text, tok_end) {
                 let end = if takes_article { article_end(text, tok_end).unwrap_or(tok_end) } else { tok_end };
                 return Some(unit_step(text, i, v, end, true));
             }
+        }
+        // `thirteen`, `twenty`, `hundred`: not read, so refused with the hint, never dropped.
+        if is_big_number_word(&word) && boundary_after(text, tok_end) {
+            return Some(at(0.0, Kind::Unreadable, tok_end));
         }
     }
     // S5: a digit, `.5` or a vulgar fraction, read by `quantity`.
@@ -862,6 +905,10 @@ fn scan_at(text: &str, i: usize, c: char) -> Option<Amount> {
             None => at(0.0, Kind::Unreadable, token_end(text, i)),
             Some((q, rest)) => {
                 let end = text.len() - rest.len();
+                // A comma between digits that is not a thousands group (`1,5`, `1,0000`) is refused.
+                if text[end..].starts_with(',') && text[end + 1..].starts_with(|d: char| d.is_ascii_digit()) {
+                    return Some(at(0.0, Kind::Unreadable, token_end(text, i)));
+                }
                 if text[i..end].contains(['-', '–']) {
                     at(0.0, Kind::Range, end)
                 } else {
@@ -950,6 +997,14 @@ fn number_word(w: &str) -> Option<(f64, bool)> {
         "quarter" => Some((0.25, true)),
         _ => None,
     }
+}
+
+/// Number words the grammar does not read: thirteen to nineteen, the tens and `hundred`.
+fn is_big_number_word(w: &str) -> bool {
+    matches!(
+        w,
+        "thirteen" | "fourteen" | "fifteen" | "sixteen" | "seventeen" | "eighteen" | "nineteen" | "twenty" | "thirty" | "forty" | "fifty" | "sixty" | "seventy" | "eighty" | "ninety" | "hundred"
+    )
 }
 
 /// The end of a whole word `a` or `an` after `tok_end`, if one follows after spaces.
