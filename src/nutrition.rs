@@ -74,6 +74,11 @@ pub const FOODS: &[Food] = &[
     Food { name: "kimchi", aliases: &[], kcal: 15.0, protein: 1.1, carbs: 2.4, fat: 0.5, veg: true, cup_g: None, piece_g: None, portion_g: 100.0, source: "USDA SR (recall)" },
     Food { name: "lettuce", aliases: &["romaine", "romaine lettuce"], kcal: 15.0, protein: 1.4, carbs: 2.9, fat: 0.2, veg: true, cup_g: Some(47.0), piece_g: None, portion_g: 100.0, source: "USDA SR (recall)" },
     Food { name: "mushroom", aliases: &["button mushroom"], kcal: 22.0, protein: 3.1, carbs: 3.3, fat: 0.3, veg: true, cup_g: Some(70.0), piece_g: None, portion_g: 70.0, source: "USDA SR (recall)" },
+    Food { name: "fried chicken", aliases: &["spicy fried chicken", "fried chicken breast", "fried chicken thigh", "fried chicken drumstick", "fried chicken wing"], kcal: 230.0, protein: 24.0, carbs: 6.0, fat: 12.0, veg: false, cup_g: None, piece_g: Some(140.0), portion_g: 140.0, source: "USDA SR fast foods, fried chicken, breast, meat+skin+breading (nutritionvalue.org); breast 203 g, piece 140 g assumed mixed piece" },
+    Food { name: "mashed potato", aliases: &["mashed potatoes", "potato mash"], kcal: 113.0, protein: 1.9, carbs: 16.8, fat: 4.2, veg: false, cup_g: Some(210.0), piece_g: None, portion_g: 150.0, source: "USDA SR potatoes, mashed, home-prepared, whole milk and butter (nutritionvalue.org); 1 cup 210 g" },
+    Food { name: "gravy", aliases: &["brown gravy", "cajun gravy", "chicken gravy"], kcal: 53.0, protein: 3.75, carbs: 4.81, fat: 2.36, veg: false, cup_g: Some(233.0), piece_g: None, portion_g: 60.0, source: "USDA SR gravy, beef, canned, ready-to-serve (FatSecret USDA entry); 1 cup 233 g" },
+    Food { name: "regular soda", aliases: &["cola", "coke", "pepsi", "sprite", "lemon lime soda", "soft drink"], kcal: 42.0, protein: 0.0, carbs: 10.4, fat: 0.25, veg: false, cup_g: Some(246.0), piece_g: None, portion_g: 370.0, source: "USDA SR beverages, carbonated, cola, regular (nutritionvalue.org); 1 fl oz 30.7 g, 12 fl oz can 370 g" },
+    Food { name: "diet soda", aliases: &["diet coke", "coke zero", "diet pepsi", "pepsi zero", "diet cola", "sprite zero"], kcal: 0.0, protein: 0.0, carbs: 0.0, fat: 0.0, veg: false, cup_g: Some(237.0), piece_g: None, portion_g: 355.0, source: "label (Diet Coke / Coke Zero: 0 kcal per can)" },
 ];
 
 pub const AMBIGUOUS: &[(&str, &str)] = &[
