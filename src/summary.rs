@@ -293,8 +293,10 @@ fn staged_marker(mine: &Path) -> PathBuf {
 /// each send, the recipient's marker is staged (`{marker}.tmp`); if the staging write fails, that recipient is not
 /// sent and the error is collected. After a successful send the staged file is renamed to the recipient's marker. A
 /// failed send removes the staged file, so the recipient is retried. A repeat therefore happens only when a DM was
-/// sent and its marker could not be finalized (a crash, or a rename that fails mid-pass), and then once more. The day
-/// marker is claimed only when every recipient has been sent, so a retry reaches just the ones that failed.
+/// sent and its marker could not be finalized (a crash, or a rename that fails mid-pass), and then once more. A send
+/// that returns `Err` after the DM was delivered (a timeout) is also released and sent again on the next pass: an
+/// `Err` means delivery is unknown, so the design is at-least-once. The day marker is claimed only when every
+/// recipient has been sent, so a retry reaches just the ones that failed.
 pub async fn send_each<F, Fut>(marker: &Path, ids: &[u64], mut send: F) -> Result<(), String>
 where
     F: FnMut(u64) -> Fut,

@@ -1,8 +1,10 @@
 //! Evening check-in rule (U3). At most one check-in per local day, and none on a day that already has a meal. It is due
 //! from 21:00 to midnight of its own day only, so a Mac asleep through that window misses it and it is not sent the
-//! next morning. Every allowlisted id gets each day's check-in at least once (I3): each id's marker is staged before its
-//! send (see `summary::send_each`), so a failed send is retried on the next tick. A repeat happens only when a DM was
-//! sent and its marker could not be finalized (a crash, or a rename failing mid-pass), and then once more.
+//! next morning. Every allowlisted id gets each day's check-in at least once (I3), while the day still has no meal: each
+//! id's marker is staged before its send (see `summary::send_each`), so a failed send is retried on the next tick, and
+//! an id whose send failed does not get it once a meal is logged before the retry. A repeat happens when a DM was sent
+//! and its marker could not be finalized (a crash, or a rename failing mid-pass), and also when a send returned `Err`
+//! after delivery (a timeout), because `Err` means delivery is unknown. Each of those repeats happens once more.
 use crate::daylog;
 use crate::rich::Rich;
 use crate::summary;
