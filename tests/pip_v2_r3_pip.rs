@@ -92,7 +92,7 @@ fn allow() -> allowlist::Allowlist {
 }
 
 fn cfg(nut: &Path) -> Config {
-    Config { nutrition_dir: nut.to_path_buf(), recipes_dir: None, low_kcal: 1800, kcal_target: 2400 }
+    Config { nutrition_dir: nut.to_path_buf(), recipes_dir: None, low_kcal: 1800, kcal_target: 2400, ocr: None }
 }
 
 async fn run(nut: &Path, m: &Msg) -> Outcome {
@@ -190,7 +190,7 @@ async fn recipe_refusal_hint_reaches_the_note() {
     let recipes = nut.parent().unwrap().join("Private").join("Recipes");
     fs::create_dir_all(&recipes).unwrap();
     fs::write(recipes.join("Gochujang Honey Garlic Salmon.md"), SALMON).unwrap();
-    let cfg = Config { nutrition_dir: nut.clone(), recipes_dir: Some(recipes), low_kcal: 1800, kcal_target: 2400 };
+    let cfg = Config { nutrition_dir: nut.clone(), recipes_dir: Some(recipes), low_kcal: 1800, kcal_target: 2400, ocr: None };
     let m = Msg::new(40, T19, "gochujang honey garlic salmon 150");
     assert_eq!(pip::handle(&allow(), &cfg, &m).await, Outcome::Saved);
     let note = note_on(&nut, DAY);

@@ -26,6 +26,8 @@ pub struct Config {
     pub recipes_dir: Option<PathBuf>,
     pub low_kcal: u32,
     pub kcal_target: u32,
+    /// The OCR helper for receipt photos. `None` (`PIP_OCR=off`) leaves every photo unread, as before.
+    pub ocr: Option<PathBuf>,
 }
 
 impl Config {
@@ -51,7 +53,12 @@ impl Config {
             .and_then(|v| v.trim().parse::<u32>().ok())
             .filter(|k| *k > 0)
             .unwrap_or(DEFAULT_KCAL_TARGET);
-        Ok(Config { nutrition_dir, recipes_dir, low_kcal: daylog::low_kcal_threshold(), kcal_target })
+        let ocr = if std::env::var("PIP_OCR").is_ok_and(|v| v.trim().eq_ignore_ascii_case("off")) {
+            None
+        } else {
+            Some(crate::ocr::command())
+        };
+        Ok(Config { nutrition_dir, recipes_dir, low_kcal: daylog::low_kcal_threshold(), kcal_target, ocr })
     }
 }
 

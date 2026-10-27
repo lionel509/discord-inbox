@@ -21,7 +21,7 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 fn cfg(dir: &Path) -> Config {
-    Config { nutrition_dir: dir.to_path_buf(), recipes_dir: None, low_kcal: 1800, kcal_target: 2400 }
+    Config { nutrition_dir: dir.to_path_buf(), recipes_dir: None, low_kcal: 1800, kcal_target: 2400, ocr: None }
 }
 
 fn allow() -> allowlist::Allowlist {

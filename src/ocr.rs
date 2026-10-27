@@ -101,14 +101,22 @@ pub async fn read_all(
     msg_id: u64,
     attachments: &[(String, Option<Vec<u8>>)],
 ) -> Vec<(usize, String)> {
-    let cmd = command();
+    read_all_with(&command(), msg_id, attachments).await
+}
+
+/// `read_all` with the helper given, so a caller can name its own (the Pip receipt path, and tests).
+pub async fn read_all_with(
+    cmd: &Path,
+    msg_id: u64,
+    attachments: &[(String, Option<Vec<u8>>)],
+) -> Vec<(usize, String)> {
     let mut out = Vec::new();
     for (i, (name, bytes)) in attachments.iter().enumerate() {
         let Some(bytes) = bytes else { continue };
         if !is_image(name) {
             continue;
         }
-        let (cmd, bytes) = (cmd.clone(), bytes.clone());
+        let (cmd, bytes) = (cmd.to_path_buf(), bytes.clone());
         match tokio::task::spawn_blocking(move || run(&cmd, &bytes, TIMEOUT)).await {
             Ok(Some(text)) => out.push((i, text)),
             _ => eprintln!(
