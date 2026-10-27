@@ -322,6 +322,11 @@ pub trait Inbound: Send + Sync {
     fn own_reactions(&self) -> Vec<String>;
     /// Sends `text` back into the channel this message came from.
     fn reply(&self, text: &str) -> impl std::future::Future<Output = Result<(), String>> + Send;
+    /// Sends a rich reply (embed, optional image) into the same channel. Default: its plain-text fallback.
+    fn reply_rich(&self, r: &crate::rich::Rich) -> impl std::future::Future<Output = Result<(), String>> + Send {
+        let t = r.text.clone();
+        async move { self.reply(&t).await }
+    }
     /// False for a message replayed from history (catch-up). Only live messages show typing (#45).
     fn live(&self) -> bool {
         true

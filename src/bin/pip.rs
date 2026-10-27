@@ -2,9 +2,10 @@
 use discord_inbox::allowlist::{self, Allowlist};
 use discord_inbox::checkin;
 use discord_inbox::ingest::catch_up_each;
-use discord_inbox::live::{Live, LiveMsg};
+use discord_inbox::live::{send_rich, Live, LiveMsg};
 use discord_inbox::pip::{self, Config, PipHandler, PRESENCE};
-use serenity::all::{ActivityData, Client, Context, EventHandler, GatewayIntents, Message, OnlineStatus, Ready, UserId};
+use discord_inbox::rich::Rich;
+use serenity::all::{ActivityData, Client, Context, EventHandler, GatewayIntents, Http, Message, OnlineStatus, Ready, UserId};
 use serenity::async_trait;
 use std::fs;
 use std::process::ExitCode;
@@ -33,6 +34,12 @@ struct Handler {
     cfg: Arc<Config>,
 }
 
+/// Sends one card to one user, as a DM.
+async fn dm_one(http: &Arc<Http>, uid: u64, card: &Rich) -> Result<(), String> {
+    let dm = UserId::new(uid).create_dm_channel(http).await.map_err(|e| e.to_string())?;
+    send_rich(http, dm.id, card).await
+}
+
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, _: Ready) {
@@ -57,6 +64,7 @@ impl EventHandler for Handler {
         let http = ctx.http.clone();
         let allow = self.allow.clone();
         let dir = self.cfg.nutrition_dir.clone();
+        let cfg = self.cfg.clone();
         install_checkin_loop(tokio::spawn(async move {
             let mut tick = interval(CHECKIN_TICK);
             tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -70,23 +78,23 @@ impl EventHandler for Handler {
                 if woke {
                     continue;
                 }
-                if let Some(day) = checkin::due(&dir, now) {
-                    let result = checkin::send(&dir, &day, |text: String| {
-                        let http = http.clone();
-                        let allow = allow.clone();
-                        async move {
-                            for user in allow.ids() {
-                                let dm = UserId::new(user).create_dm_channel(&http).await.map_err(|e| e.to_string())?;
-                                dm.id.say(&http, &text).await.map_err(|e| e.to_string())?;
-                            }
+                // Each allowlisted id gets each check-in or card at least once (I3), marked per recipient as it is sent.
+                let ids: Vec<u64> = allow.ids().collect();
+                let lines = checkin::tick(&dir, now, &ids, cfg.low_kcal, cfg.kcal_target, |uid, r: Rich| {
+                    let http = http.clone();
+                    async move {
+                        if r.title.is_empty() && r.fields.is_empty() && r.image.is_none() {
+                            let dm = UserId::new(uid).create_dm_channel(&http).await.map_err(|e| e.to_string())?;
+                            dm.id.say(&http, &r.text).await.map_err(|e| e.to_string())?;
                             Ok(())
+                        } else {
+                            dm_one(&http, uid, &r).await
                         }
-                    })
-                    .await;
-                    match result {
-                        Ok(()) => eprintln!("pip: check-in sent for {day}"),
-                        Err(e) => eprintln!("pip: check-in for {day} failed: {e}"),
                     }
+                })
+                .await;
+                for line in lines {
+                    eprintln!("pip: {line}");
                 }
             }
         }));
