@@ -273,6 +273,23 @@ fn join_thousands(s: &str) -> String {
 }
 
 /// Splits on `sep` in any letter case (` AND ` too), so no item is silently dropped.
+/// Split `p` on " and ", except where a `keep` phrase (lowercase) covers the " and ".
+fn split_and<'a>(p: &'a str, keep: &[String]) -> Vec<&'a str> {
+    let lower = p.to_ascii_lowercase();
+    let kept: Vec<(usize, usize)> = keep.iter().flat_map(|k| lower.match_indices(k.as_str()).map(move |(i, _)| (i, i + k.len()))).collect();
+    let mut out = Vec::new();
+    let mut last = 0;
+    for (i, _) in lower.match_indices(" and ") {
+        if kept.iter().any(|&(s, e)| s <= i && i < e) {
+            continue;
+        }
+        out.push(&p[last..i]);
+        last = i + 5;
+    }
+    out.push(&p[last..]);
+    out
+}
+
 fn split_on<'a>(p: &'a str, sep: &str) -> Vec<&'a str> {
     let lower = p.to_ascii_lowercase();
     let mut out = Vec::new();
@@ -287,6 +304,12 @@ fn split_on<'a>(p: &'a str, sep: &str) -> Vec<&'a str> {
 
 /// Split a message into line items on `,`, `+`, `;`, newline and the word ` and `. Bullets (`- `, `* `) are dropped.
 pub fn split_pieces(text: &str) -> Vec<String> {
+    split_pieces_keeping(text, &[])
+}
+
+/// `split_pieces`, except that an " and " inside one of the `keep` phrases (lowercase, ASCII) does not split.
+/// Recipe titles with " and " in them (`Salt and Pepper Chicken`) stay whole this way.
+pub fn split_pieces_keeping(text: &str, keep: &[String]) -> Vec<String> {
     // A comma between two digits is never a list separator: `1,5 kg` stays one piece, so `scan` can refuse it.
     let cs: Vec<char> = join_thousands(text).chars().collect();
     let mut parts: Vec<String> = vec![String::new()];
@@ -300,7 +323,7 @@ pub fn split_pieces(text: &str) -> Vec<String> {
     }
     parts
         .iter()
-        .flat_map(|p| split_on(p, " and "))
+        .flat_map(|p| split_and(p, keep))
         .map(|p| {
             let p = p.trim();
             let p = p.strip_prefix("- ").or_else(|| p.strip_prefix("* ")).unwrap_or(p);
@@ -531,9 +554,10 @@ fn drop_times(s: &str) -> String {
         let next = i + 1;
         // A bare hour is a time only when it ends the phrase: the end, punctuation, another number or am/pm.
         // So `salmon at 7 150 g` drops the 7, and `around 2 eggs` keeps its 2.
+        // A fraction is not another number: `around 1 1/2 cup` keeps its 1.
         let hour = toks[next].trim_end_matches(|c: char| c.is_ascii_punctuation());
         let punct_after = hour.len() < toks[next].len();
-        let time_after = punct_after || toks.get(next + 1).is_none_or(|t| t.starts_with(|c: char| c.is_ascii_digit()) || is_ampm(t) || t.bytes().all(|b| b.is_ascii_punctuation()));
+        let time_after = punct_after || toks.get(next + 1).is_none_or(|t| (t.starts_with(|c: char| c.is_ascii_digit()) && !t.contains('/')) || is_ampm(t) || t.bytes().all(|b| b.is_ascii_punctuation()));
         let bare_hour = !drop[next] && !hour.is_empty() && hour.len() <= 2 && hour.bytes().all(|b| b.is_ascii_digit()) && hour.parse::<u32>().is_ok_and(|h| (1..=24).contains(&h)) && time_after;
         if drop[next] || bare_hour {
             drop[i] = true;

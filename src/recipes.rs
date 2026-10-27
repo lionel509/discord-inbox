@@ -201,7 +201,9 @@ fn ref_food_name(r: &Recipe) -> String {
 
 /// The exact name path. Each piece is read on its own: the longest name wins; ties keep the first recipe, then the first piece.
 fn exact<'a>(text: &str, recipes: &'a [Recipe]) -> Exact<'a> {
-    let pieces = nutrition::split_pieces(text);
+    // A recipe name with " and " in it is matched before the text is split at " and ".
+    let keep: Vec<String> = recipes.iter().flat_map(|r| r.names.iter()).map(|n| n.to_ascii_lowercase()).filter(|n| n.contains(" and ")).collect();
+    let pieces = nutrition::split_pieces_keeping(text, &keep);
     let scans: Vec<(nutrition::Scan, Vec<(usize, usize, String)>)> = pieces
         .iter()
         .map(|p| {
