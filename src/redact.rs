@@ -64,7 +64,7 @@ fn digit(c: char) -> bool {
     c.is_ascii_digit() || ('\u{ff10}'..='\u{ff19}').contains(&c)
 }
 
-fn digit_value(c: char) -> u32 {
+pub(crate) fn digit_value(c: char) -> u32 {
     if c.is_ascii_digit() {
         c as u32 - '0' as u32
     } else {
@@ -146,7 +146,7 @@ fn run_end(c: &[char], q: usize) -> (usize, Vec<u32>) {
     (end, digits)
 }
 
-fn luhn_ok(digits: &[u32]) -> bool {
+pub(crate) fn luhn_ok(digits: &[u32]) -> bool {
     let sum: u32 = digits
         .iter()
         .rev()

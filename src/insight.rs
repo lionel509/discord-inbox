@@ -342,13 +342,19 @@ fn is_digit(c: char) -> bool {
 }
 
 /// Masks each run of 12 or more digits except its last four. A run can bridge a gap of 1 to 16 characters
-/// that are any Unicode whitespace (spaces, NBSP, thin space, line breaks, tabs) or a `-`, en dash or em dash
-/// between groups. Full-width digits count. A wide gap can join two table columns, and a line break can
+/// that are any Unicode whitespace (spaces, NBSP, thin space, line breaks, tabs), a `-`, en dash or em dash,
+/// a `.`, or a zero-width space, joiner or BOM (U+200B, U+200C, U+200D, U+2060, U+FEFF) between groups.
+/// Full-width digits count. A wide gap can join two table columns, and a line break can
 /// bridge digits on neighbouring lines, so a 12+ digit total across either is masked too: a false mask is
-/// the cheaper error next to a card number that reaches a model.
+/// the cheaper error next to a card number that reaches a model. A run with a `.` is masked as one card only
+/// when it has 13 to 19 digits and passes Luhn; otherwise each dot-separated part is masked on its own, so
+/// `12.99 4111 1111 1111 1111` keeps `12` and masks the card.
 pub fn mask_cards(text: &str) -> String {
     const MAX_GAP: usize = 16;
-    let is_gap = |c: char| c.is_whitespace() || matches!(c, '-' | '\u{2013}' | '\u{2014}');
+    let is_gap = |c: char| {
+        c.is_whitespace()
+            || matches!(c, '-' | '\u{2013}' | '\u{2014}' | '.' | '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}' | '\u{FEFF}')
+    };
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
@@ -379,22 +385,41 @@ pub fn mask_cards(text: &str) -> String {
         }
         let span = &chars[i..j];
         let digits = span.iter().filter(|&&c| is_digit(c)).count();
-        if digits >= 12 {
-            let mut seen = 0;
-            for &c in span {
-                if is_digit(c) {
-                    seen += 1;
-                    out.push(if seen + 4 <= digits { '*' } else { c });
-                } else {
-                    out.push(c);
+        let card = (13..=19).contains(&digits) && {
+            let values: Vec<u32> = span.iter().filter(|&&c| is_digit(c)).map(|&c| crate::redact::digit_value(c)).collect();
+            crate::redact::luhn_ok(&values)
+        };
+        if span.contains(&'.') && !card {
+            for (k, part) in span.split(|&c| c == '.').enumerate() {
+                if k > 0 {
+                    out.push('.');
                 }
+                push_masked(&mut out, part);
             }
         } else {
-            out.extend(span);
+            push_masked(&mut out, span);
         }
         i = j;
     }
     out
+}
+
+/// Pushes `span` with all but the last four digits masked when it holds 12 or more digits.
+fn push_masked(out: &mut String, span: &[char]) {
+    let digits = span.iter().filter(|&&c| is_digit(c)).count();
+    if digits >= 12 {
+        let mut seen = 0;
+        for &c in span {
+            if is_digit(c) {
+                seen += 1;
+                out.push(if seen + 4 <= digits { '*' } else { c });
+            } else {
+                out.push(c);
+            }
+        }
+    } else {
+        out.extend(span);
+    }
 }
 
 /// `$` then digits, with optional `,` thousands and `.dd`. Returns cents and the byte index after the token.
