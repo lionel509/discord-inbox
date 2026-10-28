@@ -143,3 +143,19 @@ fn privacy_no_card_balance_order_or_totals_in_items_or_drinks() {
         }
     }
 }
+
+#[test]
+fn singular_tender_item_is_kept() {
+    let r = read("CAMPUS DINING\n10/26/2026 12:10\n>1PC Chicken Tender  $ 3.25\nTotal  $ 3.25");
+    assert!(r.items.iter().any(|i| i.contains("chicken tender")), "{:?}", r);
+}
+
+#[test]
+fn nutrition_label_with_a_decimal_is_not_a_receipt() {
+    assert!(!is_receipt("Nutrition Facts\nServing Size 1.50 cup\nCalories 250\nTotal Fat 8g\nTotal Carbohydrate 30g"));
+}
+
+#[test]
+fn price_on_the_line_after_total_still_counts() {
+    assert!(is_receipt("CAMPUS DINING\nTotal\n$ 11.45"));
+}
