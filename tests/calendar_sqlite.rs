@@ -395,3 +395,30 @@ fn empty_day_closing() {
     assert!(mf.ends_with("Can't slip: nothing due. Biggest free gap: 08:00-22:00."), "{mf}");
     assert!(mf.contains("Today: nothing on the list"), "{mf}");
 }
+
+// Made-up names only. The title decides what an all-day item is, not the calendar name alone (#138 MF2).
+fn all_day(uid: &str, calendar: &str, date: &str, summary: &str) -> Event {
+    Event { uid: uid.into(), calendar: calendar.into(), date: date.into(), time: None, summary: summary.into() }
+}
+
+#[test]
+fn deadline_span_is_due_today_not_background() {
+    let _g = lock();
+    let evs = vec![
+        all_day("u-dl", "Career", "2026-10-28", "DEADLINE: Intern form closes tonight"),
+        all_day("u-dl", "Career", "2026-10-29", "DEADLINE: Intern form closes tonight"),
+    ];
+    let facts = daily::morning_facts(&empty_dir("mf2a"), &evs, None, d(2026, 10, 28));
+    assert!(facts.contains("Due today:\n- all day: DEADLINE: Intern form closes tonight (Career)"), "{facts}");
+    assert!(!facts.contains("Running in the background"), "{facts}");
+}
+
+#[test]
+fn study_day_is_background_not_due() {
+    let _g = lock();
+    let evs = vec![all_day("u-study-day", "Study", "2026-10-28", "Study — Block day")];
+    let facts = daily::morning_facts(&empty_dir("mf2b"), &evs, None, d(2026, 10, 28));
+    assert!(!facts.contains("Due today:"), "{facts}");
+    assert!(facts.contains("Running in the background: Study — Block day (Study)"), "{facts}");
+    assert!(!facts.contains(" through "), "{facts}");
+}

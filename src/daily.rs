@@ -149,8 +149,12 @@ pub fn answered(inbox: &Path, day: &str) -> Result<(), String> {
 
 /// Any open event that is not a lecture, office hour or study block counts as a deadline. A timed Career meeting does not, unless its summary says due.
 pub fn is_deadline(ev: &Event) -> bool {
-    !ev.done()
-        && !ev.calendar.ends_with("Lectures")
+    !ev.done() && deadline_calendar(ev)
+}
+
+// The calendar test alone: does this calendar hold deadlines? Done state is not checked here.
+fn deadline_calendar(ev: &Event) -> bool {
+    !ev.calendar.ends_with("Lectures")
         && !ev.calendar.ends_with("Office Hours")
         && ev.calendar != "Study"
         && !(ev.calendar == "Career" && ev.time.is_some() && !due_word(ev))
@@ -271,14 +275,11 @@ pub fn morning_facts(todo_dir: &Path, events: &[Event], weather: Option<&Weather
     out.push(if exam_today { "Bring: calculator (exam today)".to_string() } else { "Bring: nothing extra".to_string() });
 
     let todays = day_sorted(events, &d);
-    // Due today: an all-day item whose run ends today, or a timed item whose summary says it is due.
-    let due: Vec<&Event> = todays
-        .iter()
-        .copied()
-        .filter(|e| (e.time.is_none() && last_day(events, e, today) == today) || (e.time.is_some() && due_word(e)))
-        .collect();
-    let background: Vec<&Event> = todays.iter().copied().filter(|e| e.time.is_none() && last_day(events, e, today) > today).collect();
-    let timeline: Vec<&Event> = todays.iter().copied().filter(|e| e.time.is_some() && !due_word(e)).collect();
+    // Due today: a title that says due, deadline, closes or submit (on every day of its run), or an all-day item on a deadline calendar on the last day of its run.
+    let is_due = |e: &Event| due_word(e) || (e.time.is_none() && last_day(events, e, today) == today && deadline_calendar(e));
+    let due: Vec<&Event> = todays.iter().copied().filter(|e| is_due(e)).collect();
+    let background: Vec<&Event> = todays.iter().copied().filter(|e| e.time.is_none() && !is_due(e)).collect();
+    let timeline: Vec<&Event> = todays.iter().copied().filter(|e| e.time.is_some() && !is_due(e)).collect();
     let mut todo_lines: Vec<String> = todo::day_items(todo_dir, today).iter().map(|it| format!("- (todo) {}", it.text)).collect();
     todo_lines.extend(todo::note_items(todo_dir).iter().map(|it| format!("- (open) {}", it.text)));
 
@@ -312,7 +313,14 @@ pub fn morning_facts(todo_dir: &Path, events: &[Event], weather: Option<&Weather
         out.push("Today: nothing on the list".to_string());
     }
     if !background.is_empty() {
-        let items: Vec<String> = background.iter().map(|e| format!("{} ({}) through {}", e.summary, e.calendar, ymd(last_day(events, e, today)))).collect();
+        let items: Vec<String> = background
+            .iter()
+            .map(|e| {
+                let last = last_day(events, e, today);
+                let through = if last > today { format!(" through {}", ymd(last)) } else { String::new() };
+                format!("{} ({}){through}", e.summary, e.calendar)
+            })
+            .collect();
         out.push(format!("Running in the background: {}", items.join("; ")));
     }
     let soon = due_soon(events, today);
