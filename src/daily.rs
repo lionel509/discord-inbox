@@ -65,16 +65,13 @@ fn minutes(t: NaiveTime) -> i64 {
     (t.hour() * 60 + t.minute()) as i64
 }
 
-fn answered_path(inbox: &Path, day: &str) -> PathBuf {
-    inbox.join(format!("stormy-answered-{day}.sent"))
-}
 
-// An empty marker file. Written before any DM is sent, so a crash after sending never sends twice.
-fn mark(path: &Path) -> Result<(), String> {
+// A marker file holding its state word (`sent`, `answered`). Written before any DM is sent, so a crash after sending never sends twice.
+fn mark(path: &Path, state: &str) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
-    fs::write(path, b"").map_err(|e| format!("{}: {e}", path.display()))
+    fs::write(path, state.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 pub fn parse_time(s: &str) -> Option<NaiveTime> {
@@ -112,17 +109,23 @@ pub fn due(inbox: &Path, times: &Times, now: NaiveDateTime) -> Option<(Slot, Str
 }
 
 pub fn stage(inbox: &Path, slot: Slot, day: &str) -> Result<(), String> {
-    mark(&marker_path(inbox, slot, day))
+    mark(&marker_path(inbox, slot, day), "sent")
 }
 
-/// Yesterday's night check-in when it was sent and no reply has been answered yet.
+/// The most recent night check-in (today's, then yesterday's, so a reply after midnight still counts) that was sent and has no answer yet.
 pub fn awaiting(inbox: &Path, now: NaiveDateTime) -> Option<String> {
+    // The night marker reads `sent` until the reply is answered, then `answered`.
+    let open = |day: &str| fs::read_to_string(marker_path(inbox, Slot::Night, day)).map(|s| s.trim() == "sent").unwrap_or(false);
+    let today = ymd(now.date());
+    if open(&today) {
+        return Some(today);
+    }
     let yesterday = ymd(now.date().checked_sub_days(Days::new(1))?);
-    (marker_path(inbox, Slot::Night, &yesterday).exists() && !answered_path(inbox, &yesterday).exists()).then_some(yesterday)
+    open(&yesterday).then_some(yesterday)
 }
 
 pub fn answered(inbox: &Path, day: &str) -> Result<(), String> {
-    mark(&answered_path(inbox, day))
+    mark(&marker_path(inbox, Slot::Night, day), "answered")
 }
 
 pub fn is_deadline(ev: &Event) -> bool {
@@ -319,13 +322,18 @@ pub fn apply(todo_dir: &Path, day: NaiveDate, items: &[Item], a: &Answer) -> Res
         todo::mark_done(item, day)?;
         done.push(item.text.clone());
     }
+    // The rest: today's open lines the model did not strike, then the model's own tomorrow items.
+    let mut carried: Vec<String> = items
+        .iter()
+        .enumerate()
+        .filter(|(i, it)| matches!(it.place, todo::Place::Line { .. }) && !a.done.contains(&(i + 1)))
+        .map(|(_, it)| it.text.clone())
+        .collect();
+    carried.extend(a.tomorrow.iter().cloned());
     let next = day.checked_add_days(Days::new(1)).ok_or_else(|| "no next day".to_string())?;
-    let carried = if a.tomorrow.is_empty() {
-        Vec::new()
-    } else {
-        todo::carry(todo_dir, next, &a.tomorrow)?;
-        a.tomorrow.clone()
-    };
+    if !carried.is_empty() {
+        todo::carry(todo_dir, next, &carried)?;
+    }
     Ok((done, carried))
 }
 
