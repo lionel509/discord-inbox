@@ -297,3 +297,21 @@ fn property_mixed_lists_never_masked() {
         assert_eq!(insight::mask_cards(&s), s, "list was masked: {s:?}");
     }
 }
+
+#[test]
+fn letter_between_groups_breaks_the_card() {
+    // I3 (amendment 4): a letter between groups breaks the card, on purpose. His references and product codes look like this.
+    for s in ["4111x1111x1111x1111", "4111a1111b1111c1111"] {
+        assert_eq!(insight::mask_cards(s), s);
+        assert_eq!(redact::sensitive(s), s);
+    }
+}
+
+#[test]
+fn gap_bound_is_sixteen() {
+    let s16 = format!("4111{}1111 1111 1111", " ".repeat(16));
+    assert_eq!(insight::mask_cards(&s16), format!("****{}**** **** 1111", " ".repeat(16)));
+    // Accepted under-mask: a gap of 17+ ends the run (MAX_GAP = 16, the same bound as main). Pinned so a change is visible.
+    let s17 = format!("4111{}1111 1111 1111", " ".repeat(17));
+    assert_eq!(insight::mask_cards(&s17), format!("4111{}**** **** 1111", " ".repeat(17)));
+}
