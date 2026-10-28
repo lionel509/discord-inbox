@@ -147,41 +147,6 @@ impl Event {
     }
 }
 
-// The day window (PAST_DAYS, AHEAD_DAYS) is written out here: keep it in step with the consts above.
-// Read-only: it prints one line per event and the first line is the "ok" sentinel, so an empty window still gives output.
-pub const LIST_SCRIPT: &str = r#"on pad2(n)
-	return text -2 thru -1 of ("0" & n)
-end pad2
-
-on run argv
-	set wantedNames to items 2 thru -1 of argv
-	set startWindow to (current date) - (21 * days)
-	set endWindow to (current date) + (45 * days)
-	set tabChar to ASCII character 9
-	set out to {"ok"}
-	tell application "Calendar"
-		repeat with calName in wantedNames
-			try
-				repeat with ev in (every event of calendar calName whose start date >= startWindow and start date <= endWindow)
-					set d to start date of ev
-					set iso to ((year of d) as text) & "-" & my pad2((month of d) as integer) & "-" & my pad2(day of d)
-					set tf to "allday"
-					if not (allday event of ev) then
-						set secs to time of d
-						set tf to my pad2(secs div 3600) & ":" & my pad2((secs mod 3600) div 60)
-					end if
-					set end of out to (uid of ev) & tabChar & (calName as text) & tabChar & iso & tabChar & tf & tabChar & (summary of ev)
-				end repeat
-			end try
-		end repeat
-	end tell
-	set AppleScript's text item delimiters to linefeed
-	set res to out as text
-	set AppleScript's text item delimiters to ""
-	return res
-end run
-"#;
-
 // The only write: prefixes `✅ ` once. Never delete, move or create.
 pub const CHECK_SCRIPT: &str = r#"on run argv
 	set calName to item 2 of argv

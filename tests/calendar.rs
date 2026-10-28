@@ -86,7 +86,7 @@ fn missing_or_empty_calendars_file_means_feature_off() {
 
 #[test]
 fn scripts_never_delete_move_or_create() {
-    for s in [calendar::LIST_SCRIPT, calendar::CHECK_SCRIPT] {
+    for s in [calendar::CHECK_SCRIPT] {
         let l = s.to_lowercase();
         assert!(!l.contains("delete") && !l.contains("make new") && !l.contains("move "), "{s}");
     }
@@ -106,12 +106,6 @@ fn parse_events_five_fields() {
     assert_eq!(evs[1].date, "2026-10-21");
     assert_eq!(evs[1].time, Some("09:30".to_string()));
     assert_eq!(evs[1].summary, "Midterm 1");
-}
-
-#[test]
-fn list_script_emits_time() {
-    assert!(calendar::LIST_SCRIPT.contains("time of d"), "{}", calendar::LIST_SCRIPT);
-    assert!(calendar::LIST_SCRIPT.contains("allday event of ev"), "{}", calendar::LIST_SCRIPT);
 }
 
 #[test]
