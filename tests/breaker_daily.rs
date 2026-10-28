@@ -70,13 +70,17 @@ fn b3_midterm_two_days_out_is_in_due_soon() {
     assert!(out.contains("Due soon:") && out.contains("Midterm 1"), "midterm 2 days out missing from Due soon:\n{out}");
 }
 
-// B4. Plan: is_deadline excludes Lectures and Office Hours calendars. The code lists any summary containing "due".
+// B4. The title decides, not the calendar name (#138 MF-C, main-session ruling): a Lectures item with a due word is in Due soon; one without a due word is not.
 #[test]
-fn b4_lecture_calendar_is_not_a_deadline() {
+fn b4_lecture_calendar_due_title_is_listed() {
     let dir = tmp("b4");
-    let evs = vec![ev("SBU - Lectures", "2026-10-21", None, "Reading due Friday")];
+    let evs = vec![
+        ev("SBU - Lectures", "2026-10-21", None, "Reading due Friday"),
+        ev("SBU - Lectures", "2026-10-21", None, "Reading for Friday"),
+    ];
     let out = daily::morning_facts(&dir, &evs, None, day());
-    assert!(!out.contains("Reading due"), "a Lectures event reached Due soon:\n{out}");
+    assert!(out.contains("Reading due Friday (SBU - Lectures)"), "a due-titled Lectures item missing from Due soon:\n{out}");
+    assert!(!out.contains("Reading for Friday"), "an untitled Lectures item reached Due soon:\n{out}");
 }
 
 // B5. Huge day. A 40-event day plus a deadline two days out: compose() cuts the DM at 1900 chars, the plan's voice cap is 1500, and the cut falls after the deadline heads-up, so the heads-up disappears.
