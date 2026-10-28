@@ -86,7 +86,7 @@ fn old_mask_cards(text: &str) -> String {
 
 #[test]
 fn property_never_masks_less_than_master() {
-    const ODD: [char; 7] = [' ', '.', '-', '\u{200B}', '\u{A0}', 'x', '\n'];
+    const ODD: [char; 14] = [' ', '.', '-', '\u{200B}', '\u{A0}', 'x', '\n', '\u{2063}', '\u{AD}', '\u{2013}', '/', ':', '\u{FE0F}', '\u{3164}'];
     let mut x: u64 = 0x130_u64;
     let mut next = move || {
         x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
