@@ -109,15 +109,17 @@ pub fn enforce(text: &str, name: &str, grams: f64, typed: bool, kcal_100: f64, p
     if name.is_empty() || name.chars().count() > 60 || name.contains(['\n', '\r']) {
         return Err(Unknown { text: name.to_string(), hint: "the reader gave no usable name".to_string() });
     }
+    // The model's numbers are checked even when a table name will override them. Limit 1000 kcal/100 g (pure fat is ~900).
+    let table = nutrition::table_food(name);
     let in_range = (1.0..=3000.0).contains(&grams)
-        && (0.0..=900.0).contains(&kcal_100)
+        && (0.0..=1000.0).contains(&kcal_100)
         && (0.0..=100.0).contains(&p)
         && (0.0..=100.0).contains(&c)
         && (0.0..=100.0).contains(&f);
     if !in_range {
         return Err(Unknown { text: format!("{name} {grams} g"), hint: IMPOSSIBLE.to_string() });
     }
-    let food: &'static Food = match nutrition::table_food(name) {
+    let food: &'static Food = match table {
         Some(food) => food,
         None => Food::model(name, kcal_100, p, c, f, veg),
     };
