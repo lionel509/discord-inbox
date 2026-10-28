@@ -406,9 +406,12 @@ pub fn voice(chat: &dyn Chat, slot: Slot, facts: &str) -> String {
             let long = t.chars().count() > 1500;
             let (lower, lower_facts) = (t.to_lowercase(), facts.to_lowercase());
             let rain = ["umbrella", "rain", "poncho", "\u{2614}", "\u{1f302}"].iter().any(|w| lower.matches(w).count() > lower_facts.matches(w).count());
+            // The closing "Can't slip" line must be kept word for word, and every "overlaps" note must survive.
+            let closing = facts.lines().map(str::trim).find(|l| l.starts_with("Can't slip:"));
+            let dropped = closing.is_some_and(|c| !t.lines().any(|r| bare(r) == c)) || lower.matches("overlaps").count() < lower_facts.matches("overlaps").count();
             // Every numbered fact line ("N. text") must appear on a line of its own in the reply, or "done N" in the reply points at an item he did not see.
             let lost = facts.lines().map(str::trim).filter(|l| l.split_once(". ").is_some_and(|(n, _)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))).any(|l| !t.lines().any(|r| bare(r) == l));
-            if short || long || rain || lost { facts.to_string() } else { text }
+            if short || long || rain || lost || dropped { facts.to_string() } else { text }
         }
         Err(_) => facts.to_string(),
     }

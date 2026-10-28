@@ -475,3 +475,17 @@ fn unread_morning_makes_no_calendar_claims() {
         assert!(!facts.contains(bad), "{bad} in {facts}");
     }
 }
+
+// A reply that keeps the closing line and every overlap note is sent as written (#138 MF6).
+#[test]
+fn voice_keeps_a_reply_that_keeps_closing_and_overlaps() {
+    let _g = lock();
+    let evs = vec![
+        Event { uid: "u-a".into(), calendar: "CHEM 103 - Lectures".into(), date: "2026-10-28".into(), time: Some("10:00-11:00".into()), summary: "Lecture A".into() },
+        Event { uid: "u-b".into(), calendar: "CHEM 103 - Exams".into(), date: "2026-10-28".into(), time: Some("10:30-12:00".into()), summary: "Lab B".into() },
+    ];
+    let facts = daily::morning_facts(&empty_dir("mf6"), &evs, None, d(2026, 10, 28));
+    assert!(facts.contains("overlaps"), "setup: {facts}");
+    let reply = format!("Morning Lionel.\n{facts}");
+    assert_eq!(daily::voice(&Fixed(reply.clone()), Slot::Morning, &facts), reply);
+}
