@@ -222,7 +222,7 @@ fn event_line(e: &Event) -> String {
 fn due_soon_events<'a>(events: &'a [Event], today: NaiveDate) -> Vec<&'a Event> {
     let mut v: Vec<(NaiveDate, &Event)> = events
         .iter()
-        .filter(|e| is_deadline(e))
+        .filter(|e| !e.done() && (due_word(e) || deadline_calendar(e)))
         .filter_map(|e| NaiveDate::parse_from_str(&e.date, "%Y-%m-%d").ok().map(|d| (d, e)))
         .filter(|(d, _)| {
             let gap = (*d - today).num_days();
