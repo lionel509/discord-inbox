@@ -32,6 +32,11 @@ pub fn day_file(dir: &Path, day: NaiveDate) -> PathBuf {
     dir.join(format!("{}.md", day.format("%Y-%m-%d")))
 }
 
+/// A regular file, not a symlink: a symlink's target is not ours to read or rewrite.
+fn regular(p: &Path) -> bool {
+    fs::symlink_metadata(p).map(|m| m.file_type().is_file()).unwrap_or(false)
+}
+
 /// Index of the first body line: 0 without front matter, else the line after the closing `---`.
 fn body_start(lines: &[&str]) -> (usize, Option<usize>) {
     if lines.first().map(|l| l.trim_start_matches('\u{feff}').trim()) != Some("---") {
@@ -72,6 +77,9 @@ fn norm(line: &str) -> String {
 
 pub fn day_items(dir: &Path, day: NaiveDate) -> Vec<Item> {
     let file = day_file(dir, day);
+    if !regular(&file) {
+        return Vec::new();
+    }
     let Ok(body) = fs::read_to_string(&file) else {
         return Vec::new();
     };
@@ -107,8 +115,7 @@ pub fn note_items(dir: &Path) -> Vec<Item> {
     };
     let mut files: Vec<PathBuf> = rd
         .filter_map(|e| e.ok().map(|e| e.path()))
-        // A symlink is not a note: its target is not ours to read or rewrite.
-        .filter(|p| fs::symlink_metadata(p).map(|m| m.file_type().is_file()).unwrap_or(false) && p.extension().and_then(|x| x.to_str()) == Some("md"))
+        .filter(|p| regular(p) && p.extension().and_then(|x| x.to_str()) == Some("md"))
         .collect();
     files.sort();
     let mut out = Vec::new();
@@ -135,6 +142,10 @@ pub fn note_items(dir: &Path) -> Vec<Item> {
 }
 
 fn write_atomic(path: &Path, content: &str) -> Result<(), String> {
+    // Renaming over a symlink would replace the link with a copy and leave the target as it was: refuse instead.
+    if fs::symlink_metadata(path).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        return Err(format!("refusing to replace symlink {}", path.display()));
+    }
     let dir = path.parent().ok_or("no parent dir")?;
     let name = path.file_name().and_then(|s| s.to_str()).ok_or("bad file name")?;
     let n = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
