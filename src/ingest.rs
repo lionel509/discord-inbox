@@ -460,11 +460,8 @@ pub async fn ingest_with<M: Inbound>(
                     Ok(None) => {}
                     Err(e) => {
                         // Said out loud, then the message is filed as usual below.
+                        // No reply here: the filer below answers the message, so a model outage gets one reply.
                         eprintln!("discord-inbox: daily check-in for {id} failed: {e}");
-                        let text = "I couldn't sort your check-in just now 😿 Your message is saved in your Inbox.";
-                        if let Err(e) = m.reply(&reply_text(text, None)).await {
-                            eprintln!("discord-inbox: reply on {id} failed: {e}");
-                        }
                     }
                 }
             }
