@@ -1,4 +1,4 @@
-//! Local nutrition table and line parser (U1). No model or network calls; every number comes from `FOODS`.
+//! Local nutrition table and line parser (U1). The table path makes no model or network calls; model-read items are built by pip_model.rs and only ever use this file's arithmetic.
 use std::fmt;
 
 /// One row of the table. Per-100 g values. `carbs` is available carbohydrate (USDA carbs minus fibre) for the
@@ -16,6 +16,37 @@ pub struct Food {
     pub piece_g: Option<f64>,
     pub portion_g: f64,
     pub source: &'static str,
+}
+
+impl Food {
+    /// A model-read food. Leaks one small allocation (~150 bytes) per model item; a few meals a day in a
+    /// process that lives for weeks, so the bound is tiny and `&'static Food` keeps every reader unchanged.
+    pub fn model(name: &str, kcal: f64, protein: f64, carbs: f64, fat: f64, veg: bool) -> &'static Food {
+        Box::leak(Box::new(Food {
+            name: Box::leak(name.to_string().into_boxed_str()),
+            aliases: &[],
+            kcal,
+            protein,
+            carbs,
+            fat,
+            veg,
+            cup_g: None,
+            piece_g: None,
+            portion_g: 100.0,
+            source: "model",
+        }))
+    }
+}
+
+/// The table food whose name or alias equals `name` (trimmed, case-insensitive). Never fuzzy.
+pub fn table_food(name: &str) -> Option<&'static Food> {
+    let n = name.trim().to_lowercase();
+    FOODS.iter().find(|f| f.name == n || f.aliases.iter().any(|a| *a == n))
+}
+
+/// The grams of every mass amount (g, kg, oz, lb) in `text`.
+pub fn typed_grams(text: &str) -> Vec<f64> {
+    scan(text).amounts.iter().filter(|a| a.kind == Kind::Mass).map(|a| a.value).collect()
 }
 
 pub const FOODS: &[Food] = &[
@@ -111,6 +142,7 @@ pub struct Item {
     pub unit: Unit,
     pub qty: f64,
     pub assumed: bool,
+    pub estimated: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -742,7 +774,7 @@ pub fn parse_line(piece: &str) -> Result<Item, Unknown> {
     if !grams.is_finite() || grams > 10_000.0 {
         return Err(Unknown { text: food_text, hint: "over 10 kg; check the amount".to_string() });
     }
-    Ok(Item { food, grams, unit, qty, assumed })
+    Ok(Item { food, grams, unit, qty, assumed, estimated: false })
 }
 
 pub fn parse_meal(text: &str) -> Parsed {
@@ -809,7 +841,9 @@ fn fmt_qty(q: f64) -> String {
 pub fn item_line(item: &Item) -> String {
     let g = fmt_num(item.grams);
     let kcal = (item.grams / 100.0 * item.food.kcal).round() as i64;
-    let tail = if item.assumed {
+    let tail = if item.estimated {
+        " (estimated)".to_string()
+    } else if item.assumed {
         format!(" (default {g} g)")
     } else if item.unit == Unit::G {
         String::new()
