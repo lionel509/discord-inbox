@@ -64,20 +64,21 @@ Say `restock` to Stormy after a grocery trip and the food lines land in `Fidelit
 
 Say a task is done and Stormy marks its school-calendar event: `done with math hw 3`, `finished the seltzer run`, `HW 3 done`, `submitted lab 2`. The event's title gets a `✅ ` in front. Nothing is deleted or moved, and no event is created.
 
-- Calendars: list the school calendars, one name per line, in `~/.config/discord-inbox/calendars`. No file (or an empty one) turns the feature off. Only these names are ever read or changed. Override the path with `DISCORD_INBOX_CALENDARS_FILE`.
+- Calendars: list the calendars, one name per line, in `~/.config/discord-inbox/calendars`: the course `- Lectures`, `- Exams`, `- Work` and `- Office Hours` calendars, `SBU - Bursar`, `SBU - Registrar`, `Career` and `Study`. No file (or an empty one) turns the feature off. Only these names are ever read or changed, and `Home`, `Work`, `Important` and `lionel` are always ignored, whatever the file says. Override the path with `DISCORD_INBOX_CALENDARS_FILE`.
 - The model picks the event from the next few weeks, or says `NONE` and the message goes to chat as usual. When two events fit it asks which one you meant and changes nothing.
 - The first live use after you copy the binary to `~/.local/bin` raises macOS's "discord-inbox wants to control Calendar" prompt. Allow it in System Settings → Privacy & Security → Automation. If it was denied, check-off replies "I couldn't reach your calendar" and nothing changes.
 - `DISCORD_INBOX_OSASCRIPT` swaps in another `osascript` (the demo and tests use `examples/calendar_stub.sh`).
+- Reads: `calendar::list` copies Calendar's database into a temp directory and runs one read-only query on the copy, so the live file is never opened. The copy is deleted on every path. `DISCORD_INBOX_CALENDAR_DB` overrides the path (the tests and the demo use `tests/fixtures/calendar.sqlitedb`). The bot binary needs Full Disk Access to read the database; without it every DM starts with the "Calendar didn't load" line.
 
 ## Daily DMs
 
 Stormy DMs the allowlisted owner IDs twice a day: a morning brief at `08:00` (weather with what to wear, today's calendar and to-dos in one list, deadlines in the next 3 days) and a night check-in at `22:30`. Each slot sends once per local day. The brief has no rain line on purpose: the phone already alerts on rain.
 
 - Times: `DISCORD_INBOX_MORNING_AT` and `DISCORD_INBOX_NIGHT_AT` (`HH:MM`). Unset or unparsable values fall back to the defaults. A slot not sent within 90 minutes of its time is skipped for that day.
-- Calendar: the same `calendars` file as check-off. Timed events show `HH:MM`; all-day events show no time.
+- Calendar: the same `calendars` file as check-off. Timed events show `HH:MM` (`HH:MM-HH:MM` when they have an end); all-day events show no time. The "Due today", "Timeline" and "Running in the background" sections come first, then to-dos, then the deadlines in the next 3 days, then a "Can't slip" line that names what must not slip and the biggest free gap between 08:00 and 22:00.
 - To-dos: one dated file per day, `! Todo/YYYY-MM-DD.md`, one task per body line. A finished task is struck through (`~~task~~`) when you check it off in the night reply. Unfinished tasks carry to tomorrow's file.
 - Night reply: while the night check-in is open (its marker reads `sent`), your next text-only DM is the reply. It is sorted by the model into done items and new tasks for tomorrow, and logged to `! Todo/Stormy Check-ins.md`. A photo or a message the model does not read as a check-in is filed as usual.
-- Dry run: `cargo run --bin stormy-daily -- morning`, `night`, or `reply "<text>"` prints the facts and the DM (or the reply and the to-do changes) and sends nothing. `DISCORD_INBOX_VAULTS_DIR` points it at a copy of the vault. `scripts/demo-daily.sh` runs all three on a scratch copy.
+- Dry run: `cargo run --bin stormy-daily -- morning`, `night`, or `reply "<text>"` prints the facts and the DM (or the reply and the to-do changes) and sends nothing. `DISCORD_INBOX_VAULTS_DIR` points it at a copy of the vault. `scripts/demo-daily.sh` runs all three on a scratch copy. `DISCORD_INBOX_TODAY=YYYY-MM-DD` pins the date for those dry runs.
 
 ## Privacy
 

@@ -8,6 +8,8 @@ S=$(mktemp -d); trap 'rm -rf "$S"' EXIT
 printf 'MATH 101 - Work\nPHYS 102 - Exams\n' >"$S/calendars"
 export DISCORD_INBOX_CALENDARS_FILE="$S/calendars"
 export DISCORD_INBOX_OSASCRIPT="$PWD/examples/calendar_stub.sh"
+# Reads come from the fixture, so the "after" list will not show the stub's tick.
+export DISCORD_INBOX_CALENDAR_DB="$PWD/tests/fixtures/calendar.sqlitedb"
 export DISCORD_INBOX_CALENDAR_LOG="$S/stub.log"
 export DISCORD_INBOX_CALENDAR_STATE="$S/state"
 "$D"
