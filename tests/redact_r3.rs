@@ -58,7 +58,6 @@ fn card_after_order_number_same_line() {
 }
 
 // B3: a Luhn-invalid card (an OCR misread of one digit) after a label is kept whole.
-#[ignore = "follow-up #39"]
 #[test]
 fn b3_ocr_misread_card_after_label() {
     let out = sensitive("Ref: 4111 1111 1111 1112");
