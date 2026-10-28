@@ -284,6 +284,8 @@ pub fn morning_facts(todo_dir: &Path, events: &[Event], weather: Option<&Weather
     let due: Vec<&Event> = todays.iter().copied().filter(|e| is_due(e)).collect();
     let background: Vec<&Event> = todays.iter().copied().filter(|e| e.time.is_none() && !is_due(e)).collect();
     let timeline: Vec<&Event> = todays.iter().copied().filter(|e| e.time.is_some() && !is_due(e)).collect();
+    // Every timed item today blocks its time and can overlap, including a timed due item (#138 MF-B).
+    let timed: Vec<&Event> = todays.iter().copied().filter(|e| e.time.is_some()).collect();
     let mut todo_lines: Vec<String> = todo::day_items(todo_dir, today).iter().map(|it| format!("- (todo) {}", it.text)).collect();
     todo_lines.extend(todo::note_items(todo_dir).iter().map(|it| format!("- (open) {}", it.text)));
 
@@ -293,14 +295,13 @@ pub fn morning_facts(todo_dir: &Path, events: &[Event], weather: Option<&Weather
     }
     if !timeline.is_empty() {
         out.push("Timeline:".to_string());
-        for (i, e) in timeline.iter().enumerate() {
+        for e in timeline.iter() {
             let mut line = event_line(e);
             if let Some((s, en)) = e.time.as_deref().and_then(busy) {
-                let other = timeline
+                let other = timed
                     .iter()
-                    .enumerate()
-                    .filter(|(j, _)| *j != i)
-                    .map(|(_, o)| o)
+                    .copied()
+                    .filter(|o| !std::ptr::eq(*o, *e))
                     .find(|o| o.time.as_deref().and_then(busy).is_some_and(|(os, oe)| s < oe && os < en));
                 if let Some(o) = other {
                     line += &format!(", overlaps {}", o.summary);
@@ -351,7 +352,7 @@ pub fn morning_facts(todo_dir: &Path, events: &[Event], weather: Option<&Weather
     must.retain(|s| named.insert(s.clone()));
     let clock = |t: &str| span_min(t).map_or(0, |s| s.0);
     let end = clock(GAP_TO);
-    let mut spans: Vec<(u32, u32)> = timeline.iter().filter_map(|e| e.time.as_deref().and_then(busy)).collect();
+    let mut spans: Vec<(u32, u32)> = timed.iter().filter_map(|e| e.time.as_deref().and_then(busy)).collect();
     spans.sort();
     let mut cur = clock(GAP_FROM);
     let mut best = (cur, cur);
