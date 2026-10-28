@@ -104,7 +104,7 @@ pub fn typed_spans(text: &str) -> Vec<TypedSpan> {
         let next_start = |e: usize| all.iter().map(|&(s, _)| s).filter(|&s| s >= e).min().unwrap_or(t.len());
         let prev_end = |s: usize| all.iter().map(|&(_, e)| e).filter(|&e| e <= s).max().unwrap_or(0);
         let last_end = w[w.len() - 1].2;
-        let food_first = meal_words(&t[last_end..next_start(last_end)]).is_empty();
+        let food_first = meal_words(&t[last_end..next_start(last_end)]).is_empty() && !meal_words(&t[prev_end(w[0].1)..w[0].1]).is_empty();
         for &(grams, start, end) in &w {
             let food = if food_first { &t[prev_end(start)..start] } else { &t[end..next_start(end)] };
             let words = meal_words(food);

@@ -144,7 +144,7 @@ pub fn parse(text: &str, out: &str) -> Option<Parsed> {
         let typed = binds[at].map(|j| spans[j].grams);
         match item_from(raw, typed) {
             Ok(item) => parsed.items.push(item),
-            Err(u) => parsed.unknown.push(u),
+            Err(u) => parsed.unknown.push(with_typed(u, typed)),
         }
     }
     parsed.unknown.extend(unbound);
@@ -366,7 +366,17 @@ fn check(name: &str, grams: f64, source: Source, typed: Option<f64>, kcal_100: f
 pub fn enforce(text: &str, name: &str, grams: f64, source: Source, kcal_100: f64, p: f64, c: f64, f: f64, veg: bool) -> Result<Item, Unknown> {
     let spans = nutrition::typed_spans(text);
     let (binds, _) = bind(&spans, &[model_text(name)]);
-    check(name, grams, source, binds[0].map(|j| spans[j].grams), kcal_100, p, c, f, veg)
+    let typed = binds[0].map(|j| spans[j].grams);
+    check(name, grams, source, typed, kcal_100, p, c, f, veg).map_err(|u| with_typed(u, typed))
+}
+
+/// A bound item that is rejected still shows his typed weight: the weight goes in front of the rejection's text,
+/// unless the text already has it. The weight comes first, so `model_text`'s length cap cannot cut it off.
+fn with_typed(u: Unknown, typed: Option<f64>) -> Unknown {
+    match typed {
+        Some(g) if !u.text.contains(&format!("{g} g")) => Unknown { text: model_text(&format!("{g} g {}", u.text)), hint: u.hint },
+        _ => u,
+    }
 }
 
 /// Redacts first, then flattens to one line and caps the length, so a card number is never cut into a visible half.

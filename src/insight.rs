@@ -343,7 +343,7 @@ fn is_digit(c: char) -> bool {
 
 /// Masks each run of 12 or more digits except its last four. A run can bridge a gap of 1 to 16 characters
 /// that are any Unicode whitespace (spaces, NBSP, thin space, line breaks, tabs), a `-`, en dash or em dash,
-/// a `.`, or a zero-width space, joiner or BOM (U+200B, U+200C, U+200D, U+2060, U+FEFF) between groups.
+/// a `.`, or a zero-width space, joiner, mark or BOM (U+200B to U+200F, U+2060, U+FEFF) or soft hyphen (U+00AD) between groups.
 /// Full-width digits count. A wide gap can join two table columns, and a line break can
 /// bridge digits on neighbouring lines, so a 12+ digit total across either is masked too: a false mask is
 /// the cheaper error next to a card number that reaches a model. A run with a `.` is masked as one card only
@@ -353,7 +353,7 @@ pub fn mask_cards(text: &str) -> String {
     const MAX_GAP: usize = 16;
     let is_gap = |c: char| {
         c.is_whitespace()
-            || matches!(c, '-' | '\u{2013}' | '\u{2014}' | '.' | '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{2060}' | '\u{FEFF}')
+            || matches!(c, '-' | '\u{2013}' | '\u{2014}' | '.' | '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{200E}' | '\u{200F}' | '\u{00AD}' | '\u{2060}' | '\u{FEFF}')
     };
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
@@ -389,19 +389,62 @@ pub fn mask_cards(text: &str) -> String {
             let values: Vec<u32> = span.iter().filter(|&&c| is_digit(c)).map(|&c| crate::redact::digit_value(c)).collect();
             crate::redact::luhn_ok(&values)
         };
+        let mut piece = String::new();
         if span.contains(&'.') && !card {
             for (k, part) in span.split(|&c| c == '.').enumerate() {
                 if k > 0 {
-                    out.push('.');
+                    piece.push('.');
                 }
-                push_masked(&mut out, part);
+                push_masked(&mut piece, part);
             }
         } else {
-            push_masked(&mut out, span);
+            push_masked(&mut piece, span);
         }
+        let mut masked: Vec<char> = piece.chars().collect();
+        mask_card_windows(span, &mut masked);
+        out.extend(masked);
         i = j;
     }
     out
+}
+
+/// Stars the digits of every window of 13 to 19 digits that passes Luhn, across its digit groups, keeping the
+/// window's last four. `masked` is `span` after `push_masked`, so it has the same length and only ever gains `*`.
+/// A card written with a dot and followed by another number (`4111.1111.1111.1111 12.99`) is found this way.
+fn mask_card_windows(span: &[char], masked: &mut [char]) {
+    // Each maximal run of digits, as (start, end) indices into `span`; `end` is exclusive.
+    let mut groups: Vec<(usize, usize)> = Vec::new();
+    let mut k = 0;
+    while k < span.len() {
+        if is_digit(span[k]) {
+            let start = k;
+            while k < span.len() && is_digit(span[k]) {
+                k += 1;
+            }
+            groups.push((start, k));
+        } else {
+            k += 1;
+        }
+    }
+    for a in 0..groups.len() {
+        let mut sum = 0;
+        for b in a..groups.len() {
+            sum += groups[b].1 - groups[b].0;
+            if sum > 19 {
+                break;
+            }
+            if sum < 13 {
+                continue;
+            }
+            let idx: Vec<usize> = (groups[a].0..groups[b].1).filter(|&x| is_digit(span[x])).collect();
+            let values: Vec<u32> = idx.iter().map(|&x| crate::redact::digit_value(span[x])).collect();
+            if crate::redact::luhn_ok(&values) {
+                for &x in &idx[..idx.len() - 4] {
+                    masked[x] = '*';
+                }
+            }
+        }
+    }
 }
 
 /// Pushes `span` with all but the last four digits masked when it holds 12 or more digits.
