@@ -152,7 +152,12 @@ on run argv
 				repeat with ev in (every event of calendar calName whose start date >= startWindow and start date <= endWindow)
 					set d to start date of ev
 					set iso to ((year of d) as text) & "-" & my pad2((month of d) as integer) & "-" & my pad2(day of d)
-					set end of out to (uid of ev) & tabChar & (calName as text) & tabChar & iso & tabChar & (summary of ev)
+					set tf to "allday"
+					if not (allday event of ev) then
+						set secs to time of d
+						set tf to my pad2(secs div 3600) & ":" & my pad2((secs mod 3600) div 60)
+					end if
+					set end of out to (uid of ev) & tabChar & (calName as text) & tabChar & iso & tabChar & tf & tabChar & (summary of ev)
 				end repeat
 			end try
 		end repeat
@@ -179,17 +184,17 @@ pub const CHECK_SCRIPT: &str = r#"on run argv
 end run
 "#;
 
-/// One event per line: `uid TAB calendar TAB date TAB summary`. The summary keeps any tabs it has. Malformed lines are dropped.
+/// One event per line: `uid TAB calendar TAB date TAB time|allday TAB summary`. The time sits before the summary so a tab inside the summary survives. Malformed lines are dropped.
 pub fn parse_events(out: &str) -> Vec<Event> {
     out.lines()
         .filter_map(|line| {
-            let f: Vec<&str> = line.splitn(4, '\t').collect();
-            (f.len() == 4 && !f[0].is_empty()).then(|| Event {
+            let f: Vec<&str> = line.splitn(5, '\t').collect();
+            (f.len() == 5 && !f[0].is_empty()).then(|| Event {
                 uid: f[0].to_string(),
                 calendar: f[1].to_string(),
                 date: f[2].to_string(),
-                time: None,
-                summary: f[3].to_string(),
+                time: (f[3] != "allday").then(|| f[3].to_string()),
+                summary: f[4].to_string(),
             })
         })
         .collect()
