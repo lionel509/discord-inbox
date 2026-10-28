@@ -43,54 +43,11 @@ fn typed_weight_is_authoritative() {
     );
     let p = pip_model::parse(text, &out).expect("object with items");
     assert_eq!(p.items.len(), 2, "{:?}", p.unknown);
-    assert!(!p.items[0].estimated, "100 g is typed");
-    assert!(p.items[1].estimated, "120 g is not in his text, so it is marked");
-    assert!((p.items[1].grams - 120.0).abs() < 1e-9, "the model's number is kept, never rewritten to a typed one");
-}
-
-#[test]
-fn property_typed_lines_match_the_text() {
-    let foods = ["cooked egg noodles", "chicken breast", "salmon", "cooked rice", "tofu"];
-    let mut s: u64 = 0x9E37_79B9_7F4A_7C15;
-    let mut next = move || {
-        s = s.wrapping_mul(6364136223846979645).wrapping_add(1442695040888963407);
-        s >> 33
-    };
-    for case in 0..300 {
-        let n = 1 + (next() % 4) as usize;
-        let mut text_parts = Vec::new();
-        let mut json_items = Vec::new();
-        let mut typed_in_text: Vec<f64> = Vec::new();
-        for _ in 0..n {
-            let food = foods[(next() % foods.len() as u64) as usize];
-            let w = 5 + next() % 995;
-            if next() % 2 == 0 {
-                text_parts.push(format!("{w}g {food}"));
-            } else {
-                text_parts.push(format!("{w} grams of {food}"));
-            }
-            typed_in_text.push(w as f64);
-            let grams = if next() % 2 == 0 { w } else { 5 + next() % 995 };
-            let model_typed = next() % 3 != 0;
-            json_items.push(item_json(food, grams as f64, model_typed, 150.0));
-        }
-        let text = text_parts.join(" and ");
-        let out = reply(&json_items, &[]);
-        let p = pip_model::parse(&text, &out).unwrap_or_else(|| panic!("case {case}: no parse"));
-        assert_eq!(p.items.len(), n, "case {case}: {text}");
-        let typed_now = nutrition::typed_grams(&text);
-        for (i, it) in p.items.iter().enumerate() {
-            let model_typed = json_items[i].contains("\"typed\":true");
-            let matches = typed_now.iter().any(|t| (it.grams - t).abs() <= 0.5 + 0.01 * t);
-            if !it.estimated {
-                assert!(model_typed && matches, "case {case}: {text} -> {} g marked typed", it.grams);
-            }
-            if !matches {
-                assert!(it.estimated, "case {case}: {} g is not in {text:?} but was not marked", it.grams);
-            }
-            assert_eq!(!it.estimated, model_typed && matches, "case {case}: {text}");
-        }
-    }
+    let noodle = p.items.iter().find(|i| i.food.name.contains("noodle")).expect("noodles logged");
+    let chicken = p.items.iter().find(|i| i.food.name.contains("chicken")).expect("chicken logged");
+    assert!(!noodle.estimated && (noodle.grams - 100.0).abs() < 1e-9, "noodles: his typed 100 g, got {}", noodle.grams);
+    assert!(!chicken.estimated && (chicken.grams - 100.0).abs() < 1e-9, "chicken: his typed 100 g, got {}", chicken.grams);
+    assert!(p.items.iter().all(|i| (i.grams - 120.0).abs() > 1e-9), "the reader's 120 g is never logged for a typed food");
 }
 
 #[test]

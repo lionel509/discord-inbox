@@ -116,3 +116,15 @@ fn overflow_items_are_reported_not_silently_dropped() {
 
 #[allow(dead_code)]
 fn unused(_: &Path) {}
+
+// 6. Source spoof across foods: the typed 100 belongs to chicken, but cabbage claims it and is logged as typed.
+#[test]
+fn text_weight_for_another_food_is_flagged() {
+    let p = pip_model::parse(
+        "100 grams of chicken",
+        &format!("{{\"items\":[{}]}}", item_json("cabbage", "100", "text")),
+    )
+    .expect("parse");
+    let it = &p.items[0];
+    assert!(it.estimated, "cabbage 100 g logged as typed; the only 100 g in the text is for chicken");
+}
