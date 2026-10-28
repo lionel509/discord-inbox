@@ -162,7 +162,7 @@ fn deadline_calendar(ev: &Event) -> bool {
 
 // "due", "deadline", "closes" or "submit" as a whole word in the summary.
 fn due_word(e: &Event) -> bool {
-    e.summary.to_lowercase().split(|c: char| !c.is_alphanumeric()).any(|w| matches!(w, "due" | "deadline" | "closes" | "submit"))
+    e.summary.to_lowercase().split(|c: char| !c.is_alphanumeric()).any(|w| matches!(w, "due" | "deadline" | "deadlines" | "closes" | "submit"))
 }
 
 // Minutes since midnight for "HH:MM" or "HH:MM-HH:MM". An end before the start is past midnight; no end, or an end equal to the start, counts as one minute.
