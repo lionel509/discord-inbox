@@ -189,15 +189,14 @@ fn last_day(events: &[Event], e: &Event, today: NaiveDate) -> NaiveDate {
     d
 }
 
-/// An exam calendar, or an exam word as a whole word in the summary ("Example" is not "exam").
+/// An exam word as a whole word in the summary ("Example" is not "exam"), and no due word. The calendar name is never used: an Exams calendar also holds labs and projects.
 pub fn is_exam(ev: &Event) -> bool {
-    if ev.calendar.ends_with("Exams") {
-        return true;
-    }
-    ev.summary
-        .to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .any(|w| matches!(w, "exam" | "exams" | "midterm" | "midterms" | "quiz" | "quizzes" | "final" | "finals"))
+    !due_word(ev)
+        && ev
+            .summary
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|w| matches!(w, "exam" | "exams" | "midterm" | "midterms" | "quiz" | "quizzes" | "final" | "finals"))
 }
 
 // Events on one day: all-day first, then timed events by clock time.
@@ -330,9 +329,9 @@ pub fn morning_facts(todo_dir: &Path, events: &[Event], weather: Option<&Weather
     }
 
     // The closing line: what must not slip, and the longest free stretch of the day between GAP_FROM and GAP_TO.
-    let mut must: Vec<String> = due.iter().filter(|e| !e.done()).map(|e| e.summary.clone()).collect();
+    let mut must: Vec<String> = due.iter().filter(|e| !e.done() && due_word(e)).map(|e| e.summary.clone()).collect();
     must.extend(timeline.iter().filter(|e| is_exam(e) && !e.done()).map(|e| e.summary.clone()));
-    must.extend(due_soon_events(events, today).iter().map(|e| e.summary.clone()));
+    must.extend(due_soon_events(events, today).into_iter().filter(|e| due_word(e) || is_exam(e)).map(|e| e.summary.clone()));
     must.dedup();
     must.truncate(2);
     let clock = |t: &str| span_min(t).map_or(0, |s| s.0);

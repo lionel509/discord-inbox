@@ -422,3 +422,30 @@ fn study_day_is_background_not_due() {
     assert!(facts.contains("Running in the background: Study — Block day (Study)"), "{facts}");
     assert!(!facts.contains(" through "), "{facts}");
 }
+
+// The exam check reads the title, never the calendar name (#138 MF3).
+#[test]
+fn bring_ignores_the_calendar_name() {
+    let _g = lock();
+    let evs = vec![Event {
+        uid: "u-proj".into(),
+        calendar: "ESE 999 - Exams".into(),
+        date: "2026-10-28".into(),
+        time: Some("09:00-12:00".into()),
+        summary: "Matlab Lab 2 (project)".into(),
+    }];
+    let facts = daily::morning_facts(&empty_dir("mf3a"), &evs, None, d(2026, 10, 28));
+    assert!(facts.contains("Bring: nothing extra"), "{facts}");
+}
+
+// An untitled side item is not a Can't slip item, even when its calendar is due soon (#138 MF3).
+#[test]
+fn cant_slip_skips_untitled_items() {
+    let _g = lock();
+    let evs = vec![
+        all_day("u-side", "Career", "2026-10-29", "Side challenge — Wave 3"),
+        all_day("u-hw7", "CHEM 103 - Exams", "2026-10-30", "HW 7 due"),
+    ];
+    let facts = daily::morning_facts(&empty_dir("mf3b"), &evs, None, d(2026, 10, 28));
+    assert_eq!(facts.lines().last(), Some("Can't slip: HW 7 due. Biggest free gap: 08:00-22:00."), "{facts}");
+}
