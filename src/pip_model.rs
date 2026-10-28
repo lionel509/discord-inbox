@@ -19,6 +19,7 @@ const UNBOUND: &str = "you typed this weight but no food the reader listed match
 const TIED: &str = "this typed weight fits more than one food; those lines are estimates";
 const EACH: &str = "a weight typed with \"each\" is not split across foods; type a weight beside each food";
 const TYPED_RANGE: &str = "you typed this weight; one food must be 1 g to 5 kg";
+const NO_WEIGHT: &str = "the reader gave no weight";
 const MORE: &str = "not counted";
 /// The only foods logged at 0 kcal without a table row: plain water (ruling 6460436671: no coffee).
 const ZERO_KCAL: &[&str] = &["water", "sparkling water"];
@@ -294,7 +295,15 @@ fn is_echo(v: &Value) -> bool {
 fn item_from(raw: &Value, typed: Option<f64>) -> Result<Item, Unknown> {
     let no_name = || Unknown { text: "(unnamed item)".to_string(), hint: "the reader gave no usable name".to_string() };
     let name = raw.get("name").and_then(Value::as_str).ok_or_else(no_name)?;
-    let grams = raw.get("grams").and_then(Value::as_f64).ok_or_else(no_name)?;
+    let grams = match (raw.get("grams").and_then(Value::as_f64), typed) {
+        (Some(g), _) => g,
+        // `check` logs his typed weight and ignores the reader's grams, so a reply without them still counts.
+        (None, Some(t)) => t,
+        (None, None) => {
+            let text = model_text(name);
+            return Err(if text.is_empty() { no_name() } else { Unknown { text, hint: NO_WEIGHT.to_string() } });
+        }
+    };
     let kcal = raw.get("kcal_100").and_then(Value::as_f64).ok_or_else(no_name)?;
     let veg = raw.get("veg").and_then(Value::as_bool).unwrap_or(false);
     let macro_of = |key: &str| raw.get(key).and_then(Value::as_f64).unwrap_or(0.0);
@@ -374,9 +383,20 @@ pub fn enforce(text: &str, name: &str, grams: f64, source: Source, kcal_100: f64
 /// unless the text already has it. The weight comes first, so `model_text`'s length cap cannot cut it off.
 fn with_typed(u: Unknown, typed: Option<f64>) -> Unknown {
     match typed {
-        Some(g) if !u.text.contains(&format!("{g} g")) => Unknown { text: model_text(&format!("{g} g {}", u.text)), hint: u.hint },
+        Some(g) if !names_weight(&u.text, g) => Unknown { text: model_text(&format!("{g} g {}", u.text)), hint: u.hint },
         _ => u,
     }
+}
+
+/// True when `text` already shows the typed weight `g` as its own number, not as the tail of a longer one (`150 g` does
+/// not name `50 g`).
+fn names_weight(text: &str, g: f64) -> bool {
+    let w = format!("{g} g");
+    text.match_indices(&w).any(|(i, _)| {
+        let before = text[..i].chars().next_back();
+        let after = text[i + w.len()..].chars().next();
+        !before.is_some_and(|c| c.is_ascii_digit() || c == '.') && !after.is_some_and(char::is_alphanumeric)
+    })
 }
 
 /// Redacts first, then flattens to one line and caps the length, so a card number is never cut into a visible half.
