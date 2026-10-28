@@ -148,11 +148,17 @@ fn deadline_and_exam_rules() {
     assert!(daily::is_deadline(&ev("h", "MATH 101 - Work", "2026-10-23", None, "HW 4 due")));
     assert!(!daily::is_deadline(&ev("l", "BIO 101 - Lectures", "2026-10-23", None, "Lecture 10")));
     assert!(!daily::is_deadline(&ev("d", "MATH 101 - Work", "2026-10-23", None, "✅ HW 2 due")));
+    assert!(daily::is_deadline(&ev("m", "SBU - Exams", "2026-10-22", None, "Midterm 1")));
+    assert!(!daily::is_deadline(&ev("r", "SBU - Lectures", "2026-10-21", None, "Reading due Friday")));
+    assert!(daily::is_exam(&ev("q", "MATH 131 - Work", "2026-10-20", Some("10:00"), "Quiz 3")));
+    assert!(daily::is_exam(&ev("f", "MATH 131 - Work", "2026-10-20", None, "Final review")));
+    assert!(!daily::is_exam(&ev("x", "PHYS - Lectures", "2026-10-20", None, "Example sheet 4")));
 }
 
 #[test]
 fn morning_facts_lays_out_weather_wear_today_and_due_soon() {
     let dir = todo_fixture("morning");
+    fs::write(dir.join("Call the TA.md"), "about the lab\n").unwrap();
     let facts = daily::morning_facts(&dir, &week(), Some(&weather_now()), day());
     let lines: Vec<&str> = facts.lines().collect();
     assert_eq!(lines[0], "Weather (Stony Brook): 52°F now, high 61 / low 45, rain", "{facts}");
@@ -162,7 +168,7 @@ fn morning_facts_lays_out_weather_wear_today_and_due_soon() {
     assert!(pos("- all day: HW 3 due (MATH 101 - Work)") < pos("- 09:30 Lab check-in (CHEM 101 - Work)"), "{facts}");
     assert!(pos("- 09:30 Lab check-in (CHEM 101 - Work)") < pos("- 14:00 Lecture 9 (PHYS 102 - Lectures)"), "{facts}");
     assert!(pos("- 14:00 Lecture 9 (PHYS 102 - Lectures)") < pos("- (todo) email the TA"), "{facts}");
-    assert!(pos("- (todo) email the TA") < pos("Due soon:"), "{facts}");
+    assert!(pos("- (todo) email the TA") < pos("- (open) Call the TA") && pos("- (open) Call the TA") < pos("Due soon:"), "{facts}");
     assert!(facts.contains("HW 4 due"), "{facts}");
     assert!(!facts.contains("HW 5 due"), "{facts}");
     assert!(!facts.contains("Lecture 10"), "lectures are not deadlines: {facts}");
@@ -255,15 +261,10 @@ fn answer_that_is_not_a_checkin_writes_nothing() {
 }
 
 #[test]
-fn answer_without_a_model_still_logs_the_reply() {
+fn answer_without_a_model_writes_nothing() {
     let dir = todo_fixture("answer-nochat");
     let before = snapshot(&dir);
-    let got = daily::answer(&deps(&dir, Arc::new(NoChat)), day(), "finished the email").unwrap();
-    assert!(got.is_some());
-    let log = fs::read_to_string(dir.join(todo::CHECKIN_LOG)).unwrap();
-    assert!(log.contains("finished the email"), "{log}");
-    for (p, b) in &before {
-        assert_eq!(&fs::read(p).unwrap(), b, "{p:?} changed");
-    }
-    assert!(!dir.join("2026-10-21.md").exists());
+    let got = daily::answer(&deps(&dir, Arc::new(NoChat)), day(), "finished the email");
+    assert!(got.is_err());
+    assert_eq!(snapshot(&dir), before);
 }

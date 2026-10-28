@@ -48,6 +48,18 @@ fn day_items_of_a_missing_file_is_empty() {
 }
 
 #[test]
+fn note_items_skip_symlinks() {
+    let dir = fixture("symlink");
+    let outside = tmp("symlink-target");
+    let target = outside.join("Secret.md");
+    fs::write(&target, "outside text\n").unwrap();
+    std::os::unix::fs::symlink(&target, dir.join("Linked.md")).unwrap();
+    let notes = todo::note_items(&dir);
+    assert!(!texts(&notes).contains(&"Linked".to_string()), "{:?}", texts(&notes));
+    assert_eq!(fs::read_to_string(&target).unwrap(), "outside text\n");
+}
+
+#[test]
 fn note_items_are_open_notes_only() {
     let dir = fixture("notes");
     let notes = todo::note_items(&dir);

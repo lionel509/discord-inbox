@@ -1,10 +1,11 @@
 // Daily check-in reply (#135): a text DM while the night marker reads `sent` is answered by daily::answer; anything else files as before. The model is a scripted fake and the calendar is the stub.
-use chrono::Local;
+use chrono::{Local, Utc};
 use discord_inbox::allowlist::{self, Allowlist};
 use discord_inbox::chat::Chat;
 use discord_inbox::daily::{self, Slot};
 use discord_inbox::ingest::{ingest_with, Filer, Inbound, Outcome};
 use discord_inbox::vaults::Vaults;
+use discord_inbox::when;
 use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -83,7 +84,8 @@ impl Inbound for Msg {
         CH
     }
     fn received(&self) -> String {
-        "2026-10-02T15:00:00Z".to_string()
+        // A live reply arrives after the night DM was staged, so it is the reply and not a replay.
+        when::local_stamp(Utc::now())
     }
     fn content(&self) -> String {
         self.text.clone()

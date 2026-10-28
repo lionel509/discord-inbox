@@ -3,7 +3,7 @@ use chrono::Local;
 use discord_inbox::allowlist::{self, Allowlist};
 use discord_inbox::chat::Chat;
 use discord_inbox::daily::{self, Slot};
-use discord_inbox::ingest::{ingest_with, Filer, Inbound, Outcome};
+use discord_inbox::ingest::{ingest_with, Filer, Inbound};
 use discord_inbox::vaults::Vaults;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -88,7 +88,9 @@ async fn b9_night_window_note_is_filed_when_model_is_down() {
         window: Default::default(),
     };
     let out = ingest_with(&allow(), &inbox, &m, &filer).await;
-    assert!(!matches!(out, Outcome::Saved), "a non-check-in note was swallowed by the check-in path");
-    assert!(has_note(&inbox), "the note was not filed to Inbox; replies sent: {:?}", replies.lock().unwrap());
+    // Filing also returns Saved, so the outcome cannot tell the paths apart: check the reply text and the Inbox.
+    assert!(replies.lock().unwrap().iter().all(|r| !r.contains("Logged your reply")), "a non-check-in note was swallowed by the check-in path: {:?}", replies.lock().unwrap());
+    assert!(has_note(&inbox), "the note was not filed to Inbox; replies sent: {:?} outcome: {out:?}", replies.lock().unwrap());
+    assert_eq!(fs::read_to_string(daily::marker_path(&inbox, Slot::Night, &today)).unwrap().trim(), "sent");
 }
 

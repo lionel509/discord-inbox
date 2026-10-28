@@ -428,8 +428,10 @@ pub async fn ingest_with<M: Inbound>(
         ocr,
     };
     // Daily check-in (#135): while the night marker reads `sent`, a text-only DM answers the check-in. Before the Inbox write, so a check-in reply files no note; ahead of the calendar hook so "done with the lab" strikes the to-do, not a calendar event.
-    if incoming.attachments.is_empty() {
-        if let Some(day) = crate::daily::awaiting(inbox, chrono::Local::now().naive_local()) {
+    // A catch-up replay of a message older than the night DM is not the reply: it files as usual.
+    if incoming.attachments.is_empty() && !incoming.content.trim().is_empty() {
+        let open = crate::daily::awaiting(inbox, chrono::Local::now().naive_local());
+        if let Some(day) = open.filter(|d| crate::daily::after_send(inbox, d, &incoming.received)) {
             if let Ok(day_date) = chrono::NaiveDate::parse_from_str(&day, "%Y-%m-%d") {
                 let deps = crate::daily::Deps {
                     todo_dir: filer.vaults.root().join(crate::todo::DIR),

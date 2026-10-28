@@ -2,10 +2,19 @@
 use chrono::NaiveDate;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 pub const DIR: &str = "! Todo";
 pub const CHECKIN_LOG: &str = "Stormy Check-ins.md";
 const HEADER: &str = "---\ntags:\n  - todo\n---\n";
+// Serialises the read-modify-write of day files and the check-in log within this process: two replies at once must not lose an entry or race on one file.
+static WRITE: Mutex<()> = Mutex::new(());
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn write_lock() -> MutexGuard<'static, ()> {
+    WRITE.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Place {
@@ -25,7 +34,7 @@ pub fn day_file(dir: &Path, day: NaiveDate) -> PathBuf {
 
 /// Index of the first body line: 0 without front matter, else the line after the closing `---`.
 fn body_start(lines: &[&str]) -> (usize, Option<usize>) {
-    if lines.first().map(|l| l.trim()) != Some("---") {
+    if lines.first().map(|l| l.trim_start_matches('\u{feff}').trim()) != Some("---") {
         return (0, None);
     }
     match lines.iter().skip(1).position(|l| l.trim() == "---") {
@@ -38,6 +47,7 @@ fn body_start(lines: &[&str]) -> (usize, Option<usize>) {
 fn bullet_text(trimmed: &str) -> &str {
     let t = trimmed
         .strip_prefix("- [ ] ")
+        .or_else(|| trimmed.strip_prefix("* [ ] "))
         .or_else(|| trimmed.strip_prefix("- "))
         .or_else(|| trimmed.strip_prefix("* "))
         .unwrap_or(trimmed);
@@ -45,13 +55,16 @@ fn bullet_text(trimmed: &str) -> &str {
 }
 
 fn is_open(trimmed: &str) -> bool {
-    !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.starts_with("~~") && !trimmed.starts_with("Hub:") && !trimmed.starts_with('>')
+    // A ticked box is done, and a rule line (`---`, `***`, `___`) is not an item.
+    let ticked = ["- [x]", "- [X]", "* [x]", "* [X]"].iter().any(|p| trimmed.starts_with(p));
+    let rule = trimmed.chars().count() >= 3 && trimmed.chars().all(|c| matches!(c, '-' | '*' | '_' | ' '));
+    !trimmed.is_empty() && !ticked && !rule && !trimmed.starts_with('#') && !trimmed.starts_with("~~") && !trimmed.starts_with("Hub:") && !trimmed.starts_with('>')
 }
 
 /// Normalised form used for duplicate checks: no bullet, no strike marks, trimmed.
 fn norm(line: &str) -> String {
     let t = bullet_text(line.trim());
-    t.trim_matches('~').trim().to_string()
+    t.trim_matches('~').trim().to_lowercase()
 }
 
 pub fn day_items(dir: &Path, day: NaiveDate) -> Vec<Item> {
@@ -91,7 +104,8 @@ pub fn note_items(dir: &Path) -> Vec<Item> {
     };
     let mut files: Vec<PathBuf> = rd
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.is_file() && p.extension().and_then(|x| x.to_str()) == Some("md"))
+        // A symlink is not a note: its target is not ours to read or rewrite.
+        .filter(|p| fs::symlink_metadata(p).map(|m| m.file_type().is_file()).unwrap_or(false) && p.extension().and_then(|x| x.to_str()) == Some("md"))
         .collect();
     files.sort();
     let mut out = Vec::new();
@@ -120,17 +134,23 @@ pub fn note_items(dir: &Path) -> Vec<Item> {
 fn write_atomic(path: &Path, content: &str) -> Result<(), String> {
     let dir = path.parent().ok_or("no parent dir")?;
     let name = path.file_name().and_then(|s| s.to_str()).ok_or("bad file name")?;
-    let tmp = dir.join(format!(".{name}.tmp-{}", std::process::id()));
+    let n = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = dir.join(format!(".{name}.tmp-{}-{n}", std::process::id()));
     fs::write(&tmp, content).map_err(|e| format!("write {}: {e}", tmp.display()))?;
     fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", path.display()))
 }
 
 pub fn mark_done(item: &Item, day: NaiveDate) -> Result<(), String> {
+    let _write = write_lock();
     match &item.place {
         Place::Line { file, idx } => {
             let body = fs::read_to_string(file).map_err(|e| format!("read {}: {e}", file.display()))?;
             let mut lines: Vec<String> = body.lines().map(|l| l.to_string()).collect();
             let line = lines.get(*idx).ok_or("line index out of range")?.clone();
+            // Already struck (a repeat reply, or two at once): leave it as it is.
+            if line.trim().starts_with("~~") {
+                return Ok(());
+            }
             let text = bullet_text(line.trim());
             lines[*idx] = format!("~~{text}~~");
             let mut out = lines.join("\n");
@@ -158,6 +178,7 @@ pub fn mark_done(item: &Item, day: NaiveDate) -> Result<(), String> {
 }
 
 pub fn carry(dir: &Path, day: NaiveDate, texts: &[String]) -> Result<usize, String> {
+    let _write = write_lock();
     let file = day_file(dir, day);
     let existing = fs::read_to_string(&file).unwrap_or_default();
     let mut seen: Vec<String> = existing.lines().map(norm).filter(|s| !s.is_empty()).collect();
@@ -183,6 +204,7 @@ pub fn carry(dir: &Path, day: NaiveDate, texts: &[String]) -> Result<usize, Stri
 }
 
 pub fn log_checkin(dir: &Path, day: NaiveDate, reply: &str, done: &[String], carried: &[String]) -> Result<(), String> {
+    let _write = write_lock();
     let file = dir.join(CHECKIN_LOG);
     let mut body = fs::read_to_string(&file).unwrap_or_else(|_| HEADER.to_string());
     if !body.ends_with('\n') {

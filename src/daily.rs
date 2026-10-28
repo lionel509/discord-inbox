@@ -124,21 +124,39 @@ pub fn awaiting(inbox: &Path, now: NaiveDateTime) -> Option<String> {
     open(&yesterday).then_some(yesterday)
 }
 
+/// True when the message was received at or after the night marker was staged, so a catch-up replay of an older message is not the reply. Compared in whole seconds, as the stamp is.
+pub fn after_send(inbox: &Path, day: &str, received: &str) -> bool {
+    let Ok(got) = chrono::DateTime::parse_from_rfc3339(received) else {
+        return false;
+    };
+    let Ok(meta) = fs::metadata(marker_path(inbox, Slot::Night, day)) else {
+        return false;
+    };
+    let Ok(modified) = meta.modified() else {
+        return false;
+    };
+    let sent: chrono::DateTime<chrono::Utc> = modified.into();
+    got.timestamp() >= sent.timestamp()
+}
+
 pub fn answered(inbox: &Path, day: &str) -> Result<(), String> {
     mark(&marker_path(inbox, Slot::Night, day), "answered")
 }
 
+/// Any open event that is not a lecture or office hour counts as a deadline.
 pub fn is_deadline(ev: &Event) -> bool {
-    if ev.done() {
-        return false;
-    }
-    let s = ev.summary.to_lowercase();
-    s.split(|c: char| !c.is_alphanumeric()).any(|w| w == "due") || s.contains("deadline")
+    !ev.done() && !ev.calendar.ends_with("Lectures") && !ev.calendar.ends_with("Office Hours")
 }
 
+/// An exam calendar, or an exam word as a whole word in the summary ("Example" is not "exam").
 pub fn is_exam(ev: &Event) -> bool {
-    let s = ev.summary.to_lowercase();
-    ev.calendar.ends_with("Exams") || s.contains("exam") || s.contains("midterm")
+    if ev.calendar.ends_with("Exams") {
+        return true;
+    }
+    ev.summary
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|w| matches!(w, "exam" | "exams" | "midterm" | "midterms" | "quiz" | "quizzes" | "final" | "finals"))
 }
 
 // Events on one day: all-day first, then timed events by clock time.
@@ -193,6 +211,7 @@ pub fn morning_facts(todo_dir: &Path, events: &[Event], weather: Option<&Weather
 
     let mut today_lines: Vec<String> = day_sorted(events, &d).into_iter().map(event_line).collect();
     today_lines.extend(todo::day_items(todo_dir, today).iter().map(|it| format!("- (todo) {}", it.text)));
+    today_lines.extend(todo::note_items(todo_dir).iter().map(|it| format!("- (open) {}", it.text)));
     if today_lines.is_empty() {
         out.push("Today: nothing on the list".to_string());
     } else {
@@ -237,13 +256,18 @@ pub fn night_facts(todo_dir: &Path, events: &[Event], today: NaiveDate) -> Strin
 /// Stormy's wording of the facts. The facts stand when the model is silent or sends a stub.
 pub fn voice(chat: &dyn Chat, slot: Slot, facts: &str) -> String {
     let job = match slot {
-        Slot::Morning => "Write Lionel's morning brief as a short Discord DM. Keep every fact line with its numbers and names. Add nothing that is not in the facts.",
-        Slot::Night => "Write Lionel's night check-in as a short Discord DM. Keep every fact line. End by asking which numbered items he finished and what should carry to tomorrow.",
+        Slot::Morning => "Write Lionel's morning brief as a short Discord DM. Keep every fact line with its numbers and names. Add nothing that is not in the facts. Do not mention umbrellas, rain gear or the chance of rain. No markdown headings. Under 1500 characters.",
+        Slot::Night => "Write Lionel's night check-in as a short Discord DM. Keep every fact line. End by asking which numbered items he finished and what should carry to tomorrow. No markdown headings. Under 1500 characters.",
     };
     let system = format!("{PERSONA}\n\n{job}");
     match chat.ask(&system, facts) {
-        Ok(text) if text.trim().chars().count() >= 40 => text,
-        _ => facts.to_string(),
+        Ok(text) => {
+            // The facts stand when the reply is a third of the facts or less, or brings in an umbrella the facts do not have.
+            let short = text.trim().chars().count() < facts.chars().count() / 3;
+            let umbrella = text.to_lowercase().contains("umbrella") && !facts.to_lowercase().contains("umbrella");
+            if short || umbrella { facts.to_string() } else { text }
+        }
+        Err(_) => facts.to_string(),
     }
 }
 
@@ -267,7 +291,7 @@ pub fn compose(deps: &Deps, slot: Slot, today: NaiveDate) -> String {
 }
 
 pub fn answer_prompt(items: &[Item], reply: &str, day: NaiveDate) -> (String, String) {
-    let system = "You read Lionel's reply to his night check-in. Reply with only a JSON object: {\"checkin\": true or false, \"done\": [numbers of the listed items he finished], \"tomorrow\": [short task texts to carry to tomorrow]}. Set checkin to false when the message is not a check-in. Use only numbers from the list. Do not invent tasks.".to_string();
+    let system = "You read Lionel's reply to his night check-in. Reply with only a JSON object: {\"checkin\": true or false, \"done\": [numbers of the listed items he finished], \"tomorrow\": [new tasks he names for tomorrow that are not already in the list]}. Set checkin to false when the message is not a check-in. Use only numbers from the list. Do not invent tasks.".to_string();
     let list = if items.is_empty() {
         "(no open items)".to_string()
     } else {
@@ -291,7 +315,7 @@ pub fn parse_answer(text: &str, n: usize) -> Option<Answer> {
         .and_then(|d| d.as_array())
         .map(|a| {
             a.iter()
-                .filter_map(|x| x.as_u64())
+                .filter_map(|x| x.as_u64().or_else(|| x.as_str().and_then(|s| s.trim().parse::<u64>().ok())))
                 .filter(|&x| x >= 1 && x <= n as u64)
                 .map(|x| x as usize)
                 .collect()
@@ -337,22 +361,12 @@ pub fn apply(todo_dir: &Path, day: NaiveDate, items: &[Item], a: &Answer) -> Res
     Ok((done, carried))
 }
 
-fn log_only(deps: &Deps, day: NaiveDate, reply: &str) -> Result<Option<String>, String> {
-    todo::log_checkin(&deps.todo_dir, day, reply, &[], &[])?;
-    Ok(Some("Logged your reply in Stormy Check-ins, but I couldn't update the list just now.".to_string()))
-}
-
-/// The night reply. `Ok(None)` when the message is not a check-in: nothing is written.
+/// The night reply. `Ok(None)` when the message is not a check-in: nothing is written. `Err` when the model is down or its reply is unreadable: nothing is written either, so the caller files the message as usual.
 pub fn answer(deps: &Deps, day: NaiveDate, reply: &str) -> Result<Option<String>, String> {
     let items = check_items(&deps.todo_dir, day);
     let (system, user) = answer_prompt(&items, reply, day);
-    let raw = match deps.chat.ask(&system, &user) {
-        Ok(raw) => raw,
-        Err(_) => return log_only(deps, day, reply),
-    };
-    let Some(a) = parse_answer(&raw, items.len()) else {
-        return log_only(deps, day, reply);
-    };
+    let raw = deps.chat.ask(&system, &user).map_err(|_| "check-in model unavailable".to_string())?;
+    let a = parse_answer(&raw, items.len()).ok_or_else(|| "check-in model unavailable".to_string())?;
     if !a.checkin {
         return Ok(None);
     }
