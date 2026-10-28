@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod calendar;
 pub mod allowlist;
 pub mod chat;
 pub mod commands;

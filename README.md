@@ -60,6 +60,15 @@ Typed DM commands, matched exactly and not Discord slash commands. `/commands` l
 
 Say `restock` to Stormy after a grocery trip and the food lines land in `Fidelity/Pantry/On Hand.md`. `restock 2026-10-02` picks another day, and `restock all` allows a solo Costco receipt with no split. The source is the split note for that day (only the rows whose Who names Lionel), otherwise the receipts filed that day; a Costco receipt with no split note is refused unless `all` is given. Items are matched against a fixed list of food words, so anything else never enters the note. `out of cod` drops a row, and recipe questions read `On Hand.md` first. The bot rewrites `On Hand.md` whole, so prose outside its table is not kept; hand-added table rows survive.
 
+## Check off a finished task
+
+Say a task is done and Stormy marks its school-calendar event: `done with math hw 3`, `finished the seltzer run`, `HW 3 done`, `submitted lab 2`. The event's title gets a `✅ ` in front. Nothing is deleted or moved, and no event is created.
+
+- Calendars: list the school calendars, one name per line, in `~/.config/discord-inbox/calendars`. No file (or an empty one) turns the feature off. Only these names are ever read or changed. Override the path with `DISCORD_INBOX_CALENDARS_FILE`.
+- The model picks the event from the next few weeks, or says `NONE` and the message goes to chat as usual. When two events fit it asks which one you meant and changes nothing.
+- The first live use after you copy the binary to `~/.local/bin` raises macOS's "discord-inbox wants to control Calendar" prompt. Allow it in System Settings → Privacy & Security → Automation. If it was denied, check-off replies "I couldn't reach your calendar" and nothing changes.
+- `DISCORD_INBOX_OSASCRIPT` swaps in another `osascript` (the demo and tests use `examples/calendar_stub.sh`).
+
 ## Privacy
 
 One function, `redact::sensitive`, runs on every text that is written to disk, sent to a model, or sent back to Discord. It masks, in code and with no model:

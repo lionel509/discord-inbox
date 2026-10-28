@@ -504,6 +504,41 @@ pub async fn ingest_with<M: Inbound>(
             return Outcome::Saved;
         }
     }
+    // School-calendar check-off (#95): "done with <task>" marks the matching event. Answered before any chat call; no match falls through to chat.
+    if incoming.attachments.is_empty() {
+        if crate::calendar::wanted(&incoming.content).is_some() {
+            if let Some(cal) = crate::calendar::Cal::from_env() {
+                let today = local_date(&incoming.received);
+                let chat = filer.chat.clone();
+                let message = incoming.content.clone();
+                let r = typing_while(m, tokio::task::spawn_blocking(move || crate::calendar::finish(chat.as_ref(), &cal, &message, &today)))
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r);
+                let text = match r {
+                    Ok(crate::calendar::Finish::NoMatch) => {
+                        eprintln!("discord-inbox: calendar for {id}: no match, chatting");
+                        None
+                    }
+                    Ok(crate::calendar::Finish::Done(t) | crate::calendar::Finish::Ask(t)) => Some(t),
+                    Err(e) => {
+                        eprintln!("discord-inbox: calendar for {id} failed: {e}");
+                        Some("I couldn't reach your calendar just now 😿 Your message is saved in your Inbox.".to_string())
+                    }
+                };
+                if let Some(text) = text {
+                    match m.reply(&reply_text(&text, None)).await {
+                        Ok(()) => clear(m).await,
+                        Err(e) => {
+                            eprintln!("discord-inbox: reply on {id} failed: {e}");
+                            mark(m, SAVED_MARK).await;
+                        }
+                    }
+                    return Outcome::Saved;
+                }
+            }
+        }
+    }
     // Aged against the incoming message's own stamp, so a replayed DM sees the turns around it.
     let now = chrono::DateTime::parse_from_rfc3339(&incoming.received)
         .map(|d| d.with_timezone(&chrono::Utc))
