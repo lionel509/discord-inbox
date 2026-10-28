@@ -268,6 +268,14 @@ fn b6_concurrent_checkin_logs_all_succeed() {
         .collect();
     let errs: Vec<String> = handles.into_iter().flat_map(|h| h.join().unwrap()).collect();
     assert!(errs.is_empty(), "{} of 240 check-in logs failed, first: {:?}", errs.len(), errs.first());
+    // Each write must also be in the log: a write that lost a race returns Ok and is gone.
+    let log = fs::read_to_string(dir.join(todo::CHECKIN_LOG)).unwrap();
+    assert_eq!(log.lines().filter(|l| l.starts_with("## ")).count(), 240, "check-in log entries lost under concurrent writes");
+    for t in 0..8 {
+        for i in 0..30 {
+            assert!(log.lines().any(|l| l == format!("reply {t}-{i}")), "reply {t}-{i} missing from the log");
+        }
+    }
 }
 
 // BREAK 7: a message received days before the night DM (catch-up replay) is treated as the reply.
