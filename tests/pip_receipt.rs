@@ -204,6 +204,8 @@ async fn non_receipt_photos_are_unchanged_from_no_ocr() {
         Some("GRILLED SALMON BOWL"),
         Some("Nutrition Facts\nCalories 250\nTotal Fat 8g 10%\nTotal Carbohydrate 30g"),
         Some("Nutrition Facts\nServing Size 1.50 cup\nCalories 250\nTotal Fat 8g\nTotal Carbohydrate 30g"),
+        Some("Nutrition Facts\nTotal Fat 3.50 g"),
+        Some("Nutrition Facts\nTotal Fat 8g\nSaturated Fat 1.50 g"),
         None,
     ];
     let (dir0, _root0) = world("plain-off");

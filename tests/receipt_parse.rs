@@ -159,3 +159,25 @@ fn nutrition_label_with_a_decimal_is_not_a_receipt() {
 fn price_on_the_line_after_total_still_counts() {
     assert!(is_receipt("CAMPUS DINING\nTotal\n$ 11.45"));
 }
+
+#[test]
+fn nutrition_labels_with_decimal_grams_are_not_receipts() {
+    assert!(!is_receipt("Nutrition Facts\nTotal Fat 3.50 g"));
+    assert!(!is_receipt("Nutrition Facts\nTotal Carbohydrate 12.00 g"));
+    assert!(!is_receipt("Nutrition Facts\nTotal Sugars 2.50 g"));
+    assert!(!is_receipt("Nutrition Facts\nTotal Fat 8g\nSaturated Fat 1.50 g"));
+}
+
+#[test]
+fn glued_spaced_and_next_line_totals_still_count() {
+    assert!(is_receipt("TOTAL$11.45"));
+    assert!(is_receipt("Total  $ 11.45"));
+    assert!(is_receipt("Total\n$ 11.45"));
+    assert!(is_receipt("CAMPUS DINING\nTotal\n$ 11.45"));
+}
+
+#[test]
+fn pm_with_periods_reads_as_evening() {
+    let r = read("CAMPUS\n10/26/2026 10:53 P.M.\nTotal $ 5.00");
+    assert!(format!("{r:?}").contains("22:53"), "{r:?}");
+}

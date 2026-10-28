@@ -47,7 +47,9 @@ const FIXES: &[(&str, &str)] = &[
 pub fn is_receipt(ocr: &str) -> bool {
     let lines: Vec<&str> = ocr.lines().collect();
     lines.iter().enumerate().any(|(i, l)| {
-        is_total_line(l) && (has_price(l) || lines.get(i + 1).is_some_and(|next| has_price(next)))
+        is_total_line(l)
+            && (l.split_whitespace().last().is_some_and(is_price_token)
+                || lines.get(i + 1).is_some_and(|next| price_only(next)))
     })
 }
 
@@ -133,6 +135,19 @@ fn is_price_token(tok: &str) -> bool {
         && a.bytes().all(|c| c.is_ascii_digit())
         && b.len() == 2
         && b.bytes().all(|c| c.is_ascii_digit())
+}
+
+/// Every token is `$` or a price, and at least one is a price.
+fn price_only(line: &str) -> bool {
+    let mut any = false;
+    for t in line.split_whitespace() {
+        if is_price_token(t) {
+            any = true;
+        } else if t != "$" {
+            return false;
+        }
+    }
+    any
 }
 
 fn has_price(line: &str) -> bool {
@@ -243,7 +258,7 @@ fn find_date(tok: &str) -> Option<String> {
 /// `H:MM` or `H:MM:SS`, with an optional `AM`/`PM` glued on or as the next token. Returns 24-hour `(h, m)`.
 fn find_time(toks: &[&str]) -> Option<(u32, u32)> {
     for (i, t) in toks.iter().enumerate() {
-        let raw = t.to_ascii_lowercase();
+        let raw = t.to_ascii_lowercase().replace('.', "");
         let (core, mer) = if let Some(c) = raw.strip_suffix("am") {
             (c.to_string(), Some(false))
         } else if let Some(c) = raw.strip_suffix("pm") {
@@ -275,7 +290,7 @@ fn find_time(toks: &[&str]) -> Option<(u32, u32)> {
 }
 
 fn meridiem(tok: &str) -> Option<bool> {
-    match tok.to_ascii_lowercase().as_str() {
+    match tok.to_ascii_lowercase().replace('.', "").as_str() {
         "am" => Some(false),
         "pm" => Some(true),
         _ => None,
