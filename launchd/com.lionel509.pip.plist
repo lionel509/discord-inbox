@@ -18,6 +18,10 @@
         <string>__RECIPES_DIR__</string>
         <key>PIP_KCAL_TARGET</key>
         <string>2400</string>
+        <key>PIP_MODEL</key>
+        <string>__HOME__/.local/bin/pip-model.sh</string>
+        <key>PIP_MODEL_TIMEOUT</key>
+        <string>90</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>

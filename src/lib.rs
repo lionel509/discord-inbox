@@ -18,6 +18,7 @@ pub mod recipes;
 pub mod daylog;
 pub mod checkin;
 pub mod pip;
+pub mod pip_model;
 pub mod png;
 pub mod charts;
 pub mod rich;

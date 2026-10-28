@@ -341,16 +341,90 @@ fn is_digit(c: char) -> bool {
     c.is_ascii_digit() || ('\u{ff10}'..='\u{ff19}').contains(&c)
 }
 
-/// Masks each run of 12 or more digits except its last four. A run can bridge a gap of 1 to 16 characters
-/// that are any Unicode whitespace (spaces, NBSP, thin space, line breaks, tabs) or a `-`, en dash or em dash
-/// between groups. Full-width digits count. A wide gap can join two table columns, and a line break can
-/// bridge digits on neighbouring lines, so a 12+ digit total across either is masked too: a false mask is
-/// the cheaper error next to a card number that reaches a model.
+/// Format characters (Unicode general category Cf, 15.1): soft hyphen, bidi and zero-width controls, BOM.
+const FORMAT_CHARS: [(char, char); 21] = [
+    ('\u{00AD}', '\u{00AD}'),
+    ('\u{0600}', '\u{0605}'),
+    ('\u{061C}', '\u{061C}'),
+    ('\u{06DD}', '\u{06DD}'),
+    ('\u{070F}', '\u{070F}'),
+    ('\u{0890}', '\u{0891}'),
+    ('\u{08E2}', '\u{08E2}'),
+    ('\u{180E}', '\u{180E}'),
+    ('\u{200B}', '\u{200F}'),
+    ('\u{202A}', '\u{202E}'),
+    ('\u{2060}', '\u{2064}'),
+    ('\u{2066}', '\u{206F}'),
+    ('\u{FEFF}', '\u{FEFF}'),
+    ('\u{FFF9}', '\u{FFFB}'),
+    ('\u{110BD}', '\u{110BD}'),
+    ('\u{110CD}', '\u{110CD}'),
+    ('\u{13430}', '\u{1343F}'),
+    ('\u{1BCA0}', '\u{1BCA3}'),
+    ('\u{1D173}', '\u{1D17A}'),
+    ('\u{E0001}', '\u{E0001}'),
+    ('\u{E0020}', '\u{E007F}'),
+];
+
+/// Combining-mark and filler blocks that show nothing between two digits. The Hangul fillers are here too:
+/// `char::is_alphanumeric` is true for them, so a plain "not alphanumeric" test would miss them.
+const MARKS: [(char, char); 13] = [
+    ('\u{0300}', '\u{036F}'),
+    ('\u{115F}', '\u{1160}'),
+    ('\u{17B4}', '\u{17B5}'),
+    ('\u{180B}', '\u{180D}'),
+    ('\u{180F}', '\u{180F}'),
+    ('\u{1AB0}', '\u{1AFF}'),
+    ('\u{1DC0}', '\u{1DFF}'),
+    ('\u{20D0}', '\u{20FF}'),
+    ('\u{3164}', '\u{3164}'),
+    ('\u{FE00}', '\u{FE0F}'),
+    ('\u{FE20}', '\u{FE2F}'),
+    ('\u{FFA0}', '\u{FFA0}'),
+    ('\u{E0100}', '\u{E01EF}'),
+];
+
+/// The longest gap of characters that pass 1 bridges between two digits, or pass 2 between two digit groups.
+const MAX_GAP: usize = 16;
+
+/// Digit-group layouts that are a card as they stand.
+const ANY_LAYOUT: &[&[usize]] = &[&[4, 4, 4, 4]];
+
+/// Digit-group layouts that are a card only when the digits also pass Luhn.
+const LUHN_LAYOUTS: &[&[usize]] = &[
+    &[4, 4, 4, 1],
+    &[4, 4, 4, 2],
+    &[4, 4, 4, 3],
+    &[4, 4, 5],
+    &[4, 6, 4],
+    &[4, 6, 5],
+    &[4, 4, 4, 4, 1],
+    &[4, 4, 4, 4, 2],
+    &[4, 4, 4, 4, 3],
+];
+
+fn is_format(c: char) -> bool {
+    FORMAT_CHARS.iter().any(|&(lo, hi)| (lo..=hi).contains(&c))
+}
+
+fn is_mark(c: char) -> bool {
+    MARKS.iter().any(|&(lo, hi)| (lo..=hi).contains(&c))
+}
+
+/// A gap that pass 1 bridges between two digits: whitespace, `-`, en dash, em dash, a format character or a mark.
+fn is_gap(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '-' | '\u{2013}' | '\u{2014}') || is_format(c) || is_mark(c)
+}
+
+/// Masks card numbers in two passes. Pass 1 masks each run of 12 or more digits except its last four. A run can
+/// bridge 1 to 16 gap characters (whitespace, dashes, format characters, marks). Full-width digits count. A wide gap
+/// can join two table columns, and a line break can bridge digits on neighbouring lines, so a 12+ digit total across
+/// either is masked too: a false mask is the cheaper error next to a card number that reaches a model. Pass 2
+/// (`card_layout_stars`) stars a card layout across punctuation as well, so `4111/1111/1111/1111` is masked, while
+/// `12.99 4.50`, dotted dates and `10:30, 11:45` are not.
 pub fn mask_cards(text: &str) -> String {
-    const MAX_GAP: usize = 16;
-    let is_gap = |c: char| c.is_whitespace() || matches!(c, '-' | '\u{2013}' | '\u{2014}');
     let chars: Vec<char> = text.chars().collect();
-    let mut out = String::with_capacity(text.len());
+    let mut out: Vec<char> = Vec::with_capacity(chars.len());
     let mut i = 0;
     while i < chars.len() {
         if !is_digit(chars[i]) {
@@ -377,24 +451,81 @@ pub fn mask_cards(text: &str) -> String {
                 break;
             }
         }
-        let span = &chars[i..j];
-        let digits = span.iter().filter(|&&c| is_digit(c)).count();
-        if digits >= 12 {
-            let mut seen = 0;
-            for &c in span {
-                if is_digit(c) {
-                    seen += 1;
-                    out.push(if seen + 4 <= digits { '*' } else { c });
-                } else {
-                    out.push(c);
-                }
-            }
-        } else {
-            out.extend(span);
-        }
+        push_masked(&mut out, &chars[i..j]);
         i = j;
     }
-    out
+    for (x, star) in card_layout_stars(&chars).into_iter().enumerate() {
+        if star {
+            out[x] = '*';
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// Pass 2: the flags of the digits to star. Every window of 1 to 5 digit groups that are joined (`joins`) and
+/// has a card layout stars all its digits but the last four. A window of `LUHN_LAYOUTS` must also pass Luhn.
+/// Returns one flag per char of `chars`.
+fn card_layout_stars(chars: &[char]) -> Vec<bool> {
+    let mut star = vec![false; chars.len()];
+    // Each maximal run of digits, as (start, end) indices into `chars`; `end` is exclusive.
+    let mut groups: Vec<(usize, usize)> = Vec::new();
+    let mut k = 0;
+    while k < chars.len() {
+        if is_digit(chars[k]) {
+            let start = k;
+            while k < chars.len() && is_digit(chars[k]) {
+                k += 1;
+            }
+            groups.push((start, k));
+        } else {
+            k += 1;
+        }
+    }
+    for a in 0..groups.len() {
+        for b in a..groups.len().min(a + 5) {
+            if b > a && !joins(&chars[groups[b - 1].1..groups[b].0]) {
+                break;
+            }
+            let layout: Vec<usize> = groups[a..=b].iter().map(|&(s, e)| e - s).collect();
+            let idx: Vec<usize> = groups[a..=b].iter().flat_map(|&(s, e)| s..e).collect();
+            let card = ANY_LAYOUT.contains(&layout.as_slice())
+                || (LUHN_LAYOUTS.contains(&layout.as_slice()) && {
+                    let values: Vec<u32> = idx.iter().map(|&x| crate::redact::digit_value(chars[x])).collect();
+                    crate::redact::luhn_ok(&values)
+                });
+            if card {
+                // Every layout has at least 13 digits, so this slice is never empty of the digits it keeps.
+                for &x in &idx[..idx.len() - 4] {
+                    star[x] = true;
+                }
+            }
+        }
+    }
+    star
+}
+
+/// Two digit groups belong to one card when the text between them is 1 to 16 characters, none of them a letter or
+/// digit: gaps such as spaces and marks, and punctuation such as `.`, `/`, `:`, `,`, `|` and `_`.
+fn joins(between: &[char]) -> bool {
+    (1..=MAX_GAP).contains(&between.len()) && between.iter().all(|&c| is_gap(c) || !c.is_alphanumeric())
+}
+
+/// Pushes `span` with all but the last four digits masked when it holds 12 or more digits.
+fn push_masked(out: &mut Vec<char>, span: &[char]) {
+    let digits = span.iter().filter(|&&c| is_digit(c)).count();
+    if digits >= 12 {
+        let mut seen = 0;
+        for &c in span {
+            if is_digit(c) {
+                seen += 1;
+                out.push(if seen + 4 <= digits { '*' } else { c });
+            } else {
+                out.push(c);
+            }
+        }
+    } else {
+        out.extend(span);
+    }
 }
 
 /// `$` then digits, with optional `,` thousands and `.dd`. Returns cents and the byte index after the token.

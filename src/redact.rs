@@ -2,6 +2,7 @@
 //! card numbers, US SSNs, labelled bank and routing numbers, and secrets. No model, std only. Card digits go
 //! through `insight::mask_cards`. A false mask is the cheaper error, but a few labels mark a number as a store
 //! reference (order, station, and so on), so those digit runs are left alone unless they pass Luhn at card length.
+//! A run grouped like a card (4-4-4-4) is masked even when Luhn fails.
 
 use crate::insight::mask_cards;
 
@@ -64,7 +65,7 @@ fn digit(c: char) -> bool {
     c.is_ascii_digit() || ('\u{ff10}'..='\u{ff19}').contains(&c)
 }
 
-fn digit_value(c: char) -> u32 {
+pub(crate) fn digit_value(c: char) -> u32 {
     if c.is_ascii_digit() {
         c as u32 - '0' as u32
     } else {
@@ -146,7 +147,7 @@ fn run_end(c: &[char], q: usize) -> (usize, Vec<u32>) {
     (end, digits)
 }
 
-fn luhn_ok(digits: &[u32]) -> bool {
+pub(crate) fn luhn_ok(digits: &[u32]) -> bool {
     let sum: u32 = digits
         .iter()
         .rev()
@@ -164,13 +165,18 @@ fn luhn_ok(digits: &[u32]) -> bool {
 }
 
 /// Keeps the digit run at `q` as a reference when it is 12 to 19 digits and not a Luhn-valid card of 13 to 19.
-/// A run over 19 digits, or one that passes Luhn, is left for `mask_cards`.
+/// A run grouped like a card (4-4-4-4) is never kept. A run over 19 digits, or one that passes Luhn, is left for `mask_cards`.
 fn keep_span(c: &[char], q: usize, spans: &mut Vec<(usize, usize)>) {
     if q >= c.len() || !digit(c[q]) {
         return;
     }
     let (end, digits) = run_end(c, q);
     let count = digits.len();
+    // A run grouped like a card (four 4-digit groups in a row) is never a store reference, even when Luhn fails (#39).
+    let groups: Vec<usize> = c[q..end].split(|&x| !digit(x)).map(<[char]>::len).collect();
+    if groups.windows(4).any(|w| w == [4, 4, 4, 4]) {
+        return;
+    }
     if !(12..=19).contains(&count) || (count >= 13 && luhn_ok(&digits)) {
         return;
     }

@@ -224,7 +224,7 @@ pub const TYPING_EVERY: std::time::Duration = std::time::Duration::from_secs(8);
 pub const TYPING_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Runs `work`, re-sending the typing indicator every `TYPING_EVERY` until it finishes. Live DMs only: catch-up never types (#45).
-async fn typing_while<M: Inbound, F: std::future::Future>(m: &M, work: F) -> F::Output {
+pub(crate) async fn typing_while<M: Inbound, F: std::future::Future>(m: &M, work: F) -> F::Output {
     if !m.live() {
         return work.await;
     }
