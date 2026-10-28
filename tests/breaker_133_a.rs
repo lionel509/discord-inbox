@@ -1,6 +1,6 @@
 //! Breaker round 1, unit A (src/pip_model.rs) against PR #133 head b1ed25e.
 //! Only the tests the review (#133, fix list) must see green; the tolerance and cross-food cases were dropped.
-#![allow(unused_imports)]
+#![allow(dead_code, unused_imports)]
 use discord_inbox::pip_model::{self, Reading, Source};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;

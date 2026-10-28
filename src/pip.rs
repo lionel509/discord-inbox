@@ -5,7 +5,7 @@
 //! (`nutrition`); recipes are read, never written (`recipes`).
 use crate::allowlist::Allowlist;
 use crate::daylog::{self, Meal, NoteMsg, Totals, Written};
-use crate::ingest::{Handle, Inbound, Outcome, FAILED_MARK, SAVED_MARK};
+use crate::ingest::{typing_while, Handle, Inbound, Outcome, FAILED_MARK, SAVED_MARK};
 use crate::nutrition::{self, Parsed};
 use crate::pip_model::{self, Reading};
 use crate::recipes::{self, Recipe, Scaled};
@@ -317,18 +317,30 @@ async fn log_message<M: Inbound>(
                 Ok(paths) => paths,
                 Err(out) => return out,
             };
-            let read = |t: &str| -> Option<Parsed> {
-                // Nothing to read (a recipe name with no typed rest, and no photo): no model call.
-                if t.trim().is_empty() && paths.is_empty() {
-                    return Some(Parsed::default());
-                }
-                match pip_model::read(cmd, t, &paths, cfg.model_timeout) {
-                    Reading::Read(p) => Some(p),
-                    Reading::Down => None,
+            // The reader blocks for up to the model timeout, so the analysis runs off the async workers, with typing shown.
+            let (cmd, timeout, reads) = (cmd.to_path_buf(), cfg.model_timeout, paths.clone());
+            let (subject_run, recipes_run) = (subject.clone(), recipe_list.clone());
+            let work = tokio::task::spawn_blocking(move || {
+                let read = |t: &str| -> Option<Parsed> {
+                    // Nothing to read (a recipe name with no typed rest, and no photo): no model call.
+                    if t.trim().is_empty() && reads.is_empty() {
+                        return Some(Parsed::default());
+                    }
+                    match pip_model::read(&cmd, t, &reads, timeout) {
+                        Reading::Read(p) => Some(p),
+                        Reading::Down => None,
+                    }
+                };
+                let read_dyn: &dyn Fn(&str) -> Option<Parsed> = &read;
+                analyze(&subject_run, &recipes_run, Some(read_dyn))
+            });
+            let an = match typing_while(m, work).await {
+                Ok(an) => an,
+                Err(e) => {
+                    eprintln!("pip: meal analysis failed for {msg_id}: {e}");
+                    return Outcome::Failed;
                 }
             };
-            let read_dyn: &dyn Fn(&str) -> Option<Parsed> = &read;
-            let an = analyze(&subject, &recipe_list, Some(read_dyn));
             if fix_rest.is_some() && !an.is_meal {
                 return fix_usage(cfg, m, msg_id).await;
             }

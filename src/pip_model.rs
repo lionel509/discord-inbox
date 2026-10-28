@@ -1,4 +1,4 @@
-//! #130 unit A: the meal reader. The model's JSON becomes items only through `enforce`, so a typed weight is never replaced and an impossible number never reaches the log. The helper is injected through `PIP_MODEL` (see pip.rs); this file never names a model or a network endpoint.
+//! #130 unit A: the meal reader. The model's JSON becomes items only through `enforce`, so an impossible number never reaches the log. A weight he typed, or a scale photo showed, is logged as given; a weight the reader changes or guesses is logged as its own number and marked `(estimated)`. The helper is injected through `PIP_MODEL` (see pip.rs); this file never names a model or a network endpoint.
 use crate::nutrition::{self, Food, Item, Parsed, Unit, Unknown};
 use crate::{ocr, redact};
 use serde_json::Value;
@@ -12,6 +12,7 @@ const MAX_UNREADABLE: usize = 10;
 const MAX_UNREADABLE_CHARS: usize = 80;
 const IMPOSSIBLE: &str = "the reader gave an impossible number";
 const UNPLACED: &str = "the reader could not place it";
+const PAST_LIMIT: &str = "past the 20-item limit; not counted";
 
 /// What the helper gave back: a parsed reading, or nothing usable (helper failed, timed out, or printed non-JSON).
 pub enum Reading {
@@ -56,6 +57,7 @@ pub fn read(cmd: &Path, text: &str, photos: &[PathBuf], timeout: Duration) -> Re
         return Reading::Down;
     };
     match parse(text, &out) {
+        Some(p) if photos.is_empty() => Reading::Read(without_photo_scales(p)),
         Some(p) => Reading::Read(p),
         None => {
             eprintln!("pip: model output was not the JSON shape");
@@ -64,30 +66,71 @@ pub fn read(cmd: &Path, text: &str, photos: &[PathBuf], timeout: Duration) -> Re
     }
 }
 
+/// With no photo sent, nothing was measured: a `scale` label is only the reader's word, so the line becomes an
+/// estimate. A weight over the 3 kg text cap is reported as impossible, not logged.
+fn without_photo_scales(mut p: Parsed) -> Parsed {
+    let mut items = Vec::with_capacity(p.items.len());
+    for mut item in std::mem::take(&mut p.items) {
+        if !item.scale {
+            items.push(item);
+        } else if item.grams > 3000.0 {
+            p.unknown.push(Unknown { text: model_text(&format!("{} {} g", item.food.name, item.grams)), hint: IMPOSSIBLE.to_string() });
+        } else {
+            item.scale = false;
+            item.estimated = true;
+            items.push(item);
+        }
+    }
+    p.items = items;
+    p
+}
+
 /// Finds the JSON object in the reply (prose and code fences are skipped) and checks every item.
 /// `None` when there is no object with an `items` array.
 pub fn parse(text: &str, out: &str) -> Option<Parsed> {
-    let start = out.find('{')?;
-    let end = out.rfind('}')?;
-    if end < start {
-        return None;
-    }
-    let v: Value = serde_json::from_str(&out[start..=end]).ok()?;
+    let v = reply_object(out)?;
     let items = v.get("items")?.as_array()?;
 
     let mut parsed = Parsed::default();
-    for raw in items.iter().take(MAX_ITEMS) {
+    for (at, raw) in items.iter().enumerate() {
+        if at >= MAX_ITEMS {
+            // Past the cap: each of the next few is named as unknown, then one line counts the rest. Never silent.
+            if at < MAX_ITEMS + MAX_UNREADABLE {
+                let name = raw.get("name").and_then(Value::as_str).unwrap_or("(unnamed item)");
+                parsed.unknown.push(Unknown { text: model_text(name), hint: PAST_LIMIT.to_string() });
+            }
+            continue;
+        }
         match item_from(text, raw) {
             Ok(item) => parsed.items.push(item),
             Err(u) => parsed.unknown.push(u),
         }
     }
+    let rest = items.len().saturating_sub(MAX_ITEMS + MAX_UNREADABLE);
+    if rest > 0 {
+        parsed.unknown.push(Unknown { text: format!("and {rest} more not counted"), hint: PAST_LIMIT.to_string() });
+    }
     if let Some(list) = v.get("unreadable").and_then(Value::as_array) {
         for s in list.iter().filter_map(Value::as_str).take(MAX_UNREADABLE) {
-            parsed.unknown.push(Unknown { text: unreadable_text(s), hint: UNPLACED.to_string() });
+            parsed.unknown.push(Unknown { text: model_text(s), hint: UNPLACED.to_string() });
         }
     }
     Some(parsed)
+}
+
+/// The reply's JSON object that holds an `items` array. Prose and fences around it are skipped; the model may echo
+/// the prompt's example object before its answer, so the last such object wins.
+fn reply_object(out: &str) -> Option<Value> {
+    let mut found = None;
+    for (at, _) in out.match_indices('{') {
+        let mut objects = serde_json::Deserializer::from_str(&out[at..]).into_iter::<Value>();
+        if let Some(Ok(v)) = objects.next() {
+            if v.get("items").is_some_and(Value::is_array) {
+                found = Some(v);
+            }
+        }
+    }
+    found
 }
 
 /// One item object from the reply. Missing `typed`/`veg` are false; missing macros are 0.
@@ -123,14 +166,16 @@ const MAX_SCALE_G: f64 = 5000.0;
 /// Checks one reader item and builds it. A name that is exactly a table name or alias uses the table's numbers.
 /// A `Text` weight stays typed only when his text has that mass amount; otherwise the line is `estimated`.
 /// A `Scale` weight is measured: not `estimated`, tagged ` (scale)`, bounded at 5 kg.
+/// A non-table food with no calories is unknown, not a 0 kcal meal.
 #[allow(clippy::too_many_arguments)]
 pub fn enforce(text: &str, name: &str, grams: f64, source: Source, kcal_100: f64, p: f64, c: f64, f: f64, veg: bool) -> Result<Item, Unknown> {
-    let name = name.trim();
-    if name.is_empty() || name.chars().count() > 60 || name.contains(['\n', '\r']) {
-        return Err(Unknown { text: name.to_string(), hint: "the reader gave no usable name".to_string() });
+    // The name is the model's text: redacted and flattened to one line before anything else sees it.
+    let name = model_text(name);
+    if name.is_empty() || name.chars().count() > 60 {
+        return Err(Unknown { text: name, hint: "the reader gave no usable name".to_string() });
     }
     // The model's numbers are checked even when a table name will override them. Limit 1000 kcal/100 g (pure fat is ~900).
-    let table = nutrition::table_food(name);
+    let table = nutrition::table_food(&name);
     let cap = if source == Source::Scale { MAX_SCALE_G } else { 3000.0 };
     let in_range = (1.0..=cap).contains(&grams)
         && (0.0..=1000.0).contains(&kcal_100)
@@ -138,11 +183,14 @@ pub fn enforce(text: &str, name: &str, grams: f64, source: Source, kcal_100: f64
         && (0.0..=100.0).contains(&c)
         && (0.0..=100.0).contains(&f);
     if !in_range {
-        return Err(Unknown { text: format!("{name} {grams} g"), hint: IMPOSSIBLE.to_string() });
+        return Err(Unknown { text: model_text(&format!("{name} {grams} g")), hint: IMPOSSIBLE.to_string() });
     }
     let food: &'static Food = match table {
         Some(food) => food,
-        None => Food::model(name, kcal_100, p, c, f, veg),
+        None if kcal_100 < 1.0 => {
+            return Err(Unknown { text: name, hint: "the reader gave no calories".to_string() });
+        }
+        None => Food::model(&name, kcal_100, p, c, f, veg),
     };
     let (estimated, scale) = match source {
         Source::Text => {
@@ -156,7 +204,8 @@ pub fn enforce(text: &str, name: &str, grams: f64, source: Source, kcal_100: f64
 }
 
 /// Redacts first, then flattens to one line and caps the length, so a card number is never cut into a visible half.
-fn unreadable_text(s: &str) -> String {
+/// Every string the model supplies (names, unreadable reasons, impossible-number texts) goes through here.
+fn model_text(s: &str) -> String {
     let clean = redact::sensitive(s).split_whitespace().collect::<Vec<_>>().join(" ");
     clean.chars().take(MAX_UNREADABLE_CHARS).collect()
 }
