@@ -156,6 +156,10 @@ pub fn parse(text: &str, out: &str) -> Option<Parsed> {
         for s in list.iter().filter_map(Value::as_str).take(MAX_UNREADABLE) {
             parsed.unknown.push(Unknown { text: model_text(s), hint: UNPLACED.to_string() });
         }
+        let extra = list.iter().filter(|s| s.is_string()).count().saturating_sub(MAX_UNREADABLE);
+        if extra > 0 {
+            parsed.unknown.push(Unknown { text: format!("and {extra} more unreadable"), hint: UNPLACED.to_string() });
+        }
     }
     Some(parsed)
 }

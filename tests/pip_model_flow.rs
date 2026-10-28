@@ -406,10 +406,21 @@ fn scale_reading_is_bounded_at_5kg() {
 }
 
 #[test]
-fn text_weight_not_in_the_message_is_downgraded_to_estimate() {
+fn typed_weight_wins_over_the_model_text_weight() {
     use discord_inbox::pip_model::{self, Source};
+    // Typed-first (amendment 1): his 150 g beside salmon is logged as typed, whatever the model says.
     let i = pip_model::enforce("salmon 150g", "salmon", 120.0, Source::Text, 208.0, 20.0, 0.0, 13.0, false).unwrap();
-    assert!(i.estimated && !i.scale, "120 g is not in the text, so it is an estimate");
+    assert!(!i.estimated && !i.scale, "150 g is typed");
+    assert_eq!(i.grams, 150.0, "the model's 120 g never shows");
     let t = pip_model::enforce("salmon 150g", "salmon", 150.0, Source::Text, 208.0, 20.0, 0.0, 13.0, false).unwrap();
-    assert!(!t.estimated && !t.scale, "150 g is typed");
+    assert!(!t.estimated && !t.scale && t.grams == 150.0, "150 g typed and given");
+}
+
+#[test]
+fn text_weight_with_no_typed_weight_is_an_estimate() {
+    use discord_inbox::pip_model::{self, Source};
+    // No weight in the message: the model's 120 g from text is only its estimate.
+    let i = pip_model::enforce("salmon", "salmon", 120.0, Source::Text, 208.0, 20.0, 0.0, 13.0, false).unwrap();
+    assert!(i.estimated && !i.scale, "120 g is not typed, so it is an estimate");
+    assert_eq!(i.grams, 120.0);
 }

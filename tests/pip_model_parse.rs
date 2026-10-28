@@ -103,10 +103,21 @@ fn unreadable_is_redacted_and_capped() {
     let p = pip_model::parse("noodles", &reply(&[], &[long.as_str()])).unwrap();
     assert!(p.unknown[0].text.chars().count() <= 80, "{}", p.unknown[0].text.len());
 
+    // 15 unreadable strings: at most 10 named, and one count line covers the rest (named + N == 15).
     let many: Vec<String> = (0..15).map(|i| format!("thing {i}")).collect();
     let many: Vec<&str> = many.iter().map(|s| s.as_str()).collect();
     let p = pip_model::parse("noodles", &reply(&[], &many)).unwrap();
-    assert_eq!(p.unknown.len(), 10);
+    let named: Vec<&str> = p.unknown.iter().filter(|u| !u.text.starts_with("and ")).map(|u| u.text.as_str()).collect();
+    assert!(named.len() <= 10, "at most 10 named: {:?}", p.unknown);
+    let counted: usize = p
+        .unknown
+        .iter()
+        .find(|u| u.text.starts_with("and ") && u.text.ends_with(" more unreadable"))
+        .and_then(|u| u.text.split_whitespace().nth(1))
+        .and_then(|n| n.parse().ok())
+        .expect("a count line for the rest");
+    assert_eq!(named.len() + counted, 15, "every string is named or counted: {:?}", p.unknown);
+    assert!(p.unknown.iter().all(|u| !u.text.is_empty()));
 
     let items: Vec<String> = (0..30).map(|_| item_json("salmon", 100.0, false, 208.0)).collect();
     let p = pip_model::parse("salmon", &reply(&items, &[])).unwrap();
