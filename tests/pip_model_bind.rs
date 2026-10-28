@@ -442,12 +442,13 @@ fn breaker_r3_bound_item_failing_no_calories_keeps_typed_weight_listed() {
 }
 
 #[test]
-fn bound_item_with_no_reader_grams_names_the_typed_weight() {
+fn bound_item_with_no_reader_grams_logs_the_typed_weight() {
     let reply_text = r#"{"items":[{"name":"chicken","kcal_100":165,"source":"text"}],"unreadable":[]}"#;
     let p = pip_model::parse("100g chicken", reply_text).expect("object with items");
-    assert!(p.items.is_empty(), "items {}", p.items.len());
-    let texts: Vec<String> = p.unknown.iter().map(|u| u.text.clone()).collect();
-    assert!(texts.iter().any(|t| t.contains("100 g")), "typed weight not named; unknown = {texts:?}");
+    assert_eq!(p.items.len(), 1, "items {}", p.items.len());
+    assert!(p.items[0].grams == 100.0, "grams {}", p.items[0].grams);
+    assert!(!p.items[0].estimated);
+    assert!(p.unknown.is_empty(), "unknown = {:?}", p.unknown);
 }
 
 #[test]
@@ -457,4 +458,37 @@ fn bound_item_with_a_long_name_names_the_typed_weight() {
     assert!(p.items.is_empty(), "items {}", p.items.len());
     let texts: Vec<String> = p.unknown.iter().map(|u| u.text.clone()).collect();
     assert!(texts.iter().any(|t| t.starts_with("100 g ")), "typed weight not first; unknown = {texts:?}");
+}
+
+#[test]
+fn rejected_name_containing_typed_number_still_names_weight() {
+    let p = run("50g pasta", &[it("pasta 150 g", 150.0, "text", 0.0)]);
+    assert!(p.items.is_empty(), "items {}", p.items.len());
+    assert_eq!(p.unknown, vec![unknown("50 g pasta 150 g", "the reader gave no calories")]);
+}
+
+#[test]
+fn typed_weight_cap_is_5_kg() {
+    let p = run("5000g chicken", &[it("chicken breast", 600.0, "text", 165.0)]);
+    assert_eq!(p.items.len(), 1, "items {}", p.items.len());
+    assert!(p.items[0].grams == 5000.0 && !p.items[0].estimated, "grams {}", p.items[0].grams);
+    let p = run("5001g chicken", &[it("chicken breast", 600.0, "text", 165.0)]);
+    assert!(p.items.is_empty(), "items {}", p.items.len());
+    assert_eq!(p.unknown, vec![unknown("chicken breast 5001 g", TYPED_RANGE)]);
+}
+
+#[test]
+fn unbound_item_without_grams_says_no_weight() {
+    let reply_text = r#"{"items":[{"name":"rice","source":"estimate","kcal_100":130}],"unreadable":[]}"#;
+    let p = pip_model::parse("rice for lunch", reply_text).expect("object with items");
+    assert!(p.items.is_empty(), "items {}", p.items.len());
+    assert_eq!(p.unknown, vec![unknown("rice", "the reader gave no weight")]);
+}
+
+#[test]
+fn nameless_item_without_grams_says_no_usable_name() {
+    let reply_text = r#"{"items":[{"source":"estimate","kcal_100":130}],"unreadable":[]}"#;
+    let p = pip_model::parse("rice for lunch", reply_text).expect("object with items");
+    assert!(p.items.is_empty(), "items {}", p.items.len());
+    assert_eq!(p.unknown, vec![unknown("(unnamed item)", "the reader gave no usable name")]);
 }
