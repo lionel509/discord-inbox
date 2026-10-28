@@ -17,6 +17,10 @@ pub const DEFAULT_MORNING: &str = "08:00";
 pub const DEFAULT_NIGHT: &str = "22:30";
 pub const AHEAD_DAYS: i64 = 3;
 pub const MAX_CHARS: usize = 1900;
+pub const GAP_FROM: &str = "08:00";
+pub const GAP_TO: &str = "22:00";
+/// The first line of a DM whose calendar read failed, so the DM never claims an empty calendar.
+pub const CAL_FAIL: &str = "⚠️ Calendar didn't load, so classes and deadlines are missing from this message.";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Slot {
@@ -143,9 +147,42 @@ pub fn answered(inbox: &Path, day: &str) -> Result<(), String> {
     mark(&marker_path(inbox, Slot::Night, day), "answered")
 }
 
-/// Any open event that is not a lecture or office hour counts as a deadline.
+/// Any open event that is not a lecture, office hour or study block counts as a deadline. A timed Career meeting does not, unless its summary says due.
 pub fn is_deadline(ev: &Event) -> bool {
-    !ev.done() && !ev.calendar.ends_with("Lectures") && !ev.calendar.ends_with("Office Hours")
+    !ev.done()
+        && !ev.calendar.ends_with("Lectures")
+        && !ev.calendar.ends_with("Office Hours")
+        && ev.calendar != "Study"
+        && !(ev.calendar == "Career" && ev.time.is_some() && !due_word(ev))
+}
+
+// "due", "deadline", "closes" or "submit" as a whole word in the summary.
+fn due_word(e: &Event) -> bool {
+    e.summary.to_lowercase().split(|c: char| !c.is_alphanumeric()).any(|w| matches!(w, "due" | "deadline" | "closes" | "submit"))
+}
+
+// Minutes since midnight for "HH:MM" or "HH:MM-HH:MM". An end at or before the start is past midnight; no end counts as one minute.
+fn span_min(time: &str) -> Option<(u32, u32)> {
+    let (s, e) = match time.split_once('-') {
+        Some((s, e)) => (s, Some(e)),
+        None => (time, None),
+    };
+    let m = |t: &str| NaiveTime::parse_from_str(t.trim(), "%H:%M").ok().map(|t| t.hour() * 60 + t.minute());
+    let s = m(s)?;
+    let e = e.and_then(m).map(|e| if e <= s { e + 1440 } else { e }).unwrap_or(s + 1);
+    Some((s, e))
+}
+
+// Last day of the all-day run of e.uid that covers `today` (consecutive dates with the same uid).
+fn last_day(events: &[Event], e: &Event, today: NaiveDate) -> NaiveDate {
+    let mut d = today;
+    while let Some(n) = d.checked_add_days(Days::new(1)) {
+        if !events.iter().any(|x| x.uid == e.uid && x.time.is_none() && x.date == ymd(n)) {
+            break;
+        }
+        d = n;
+    }
+    d
 }
 
 /// An exam calendar, or an exam word as a whole word in the summary ("Example" is not "exam").
@@ -173,8 +210,8 @@ fn event_line(e: &Event) -> String {
     }
 }
 
-// Deadlines due 1 to AHEAD_DAYS after today.
-fn due_soon(events: &[Event], today: NaiveDate) -> Vec<String> {
+// Deadlines due 1 to AHEAD_DAYS after today, nearest first. An all-day span that is already running today is in the background line, not here.
+fn due_soon_events<'a>(events: &'a [Event], today: NaiveDate) -> Vec<&'a Event> {
     let mut v: Vec<(NaiveDate, &Event)> = events
         .iter()
         .filter(|e| is_deadline(e))
@@ -183,9 +220,17 @@ fn due_soon(events: &[Event], today: NaiveDate) -> Vec<String> {
             let gap = (*d - today).num_days();
             gap >= 1 && gap <= AHEAD_DAYS
         })
+        .filter(|(_, e)| !(e.time.is_none() && events.iter().any(|x| x.uid == e.uid && x.time.is_none() && x.date == ymd(today))))
         .collect();
     v.sort_by_key(|(d, _)| *d);
-    v.into_iter().map(|(_, e)| format!("- {} ({}), {}", e.summary, e.calendar, e.date)).collect()
+    // A multi-day span or a series is listed once, at its nearest date.
+    let mut seen = std::collections::HashSet::new();
+    v.retain(|(_, e)| seen.insert((e.uid.clone(), e.calendar.clone(), e.summary.clone())));
+    v.into_iter().map(|(_, e)| e).collect()
+}
+
+fn due_soon(events: &[Event], today: NaiveDate) -> Vec<String> {
+    due_soon_events(events, today).into_iter().map(|e| format!("- {} ({}), {}", e.summary, e.calendar, e.date)).collect()
 }
 
 // Today's open list: the day file first, then the standing notes.
@@ -225,20 +270,85 @@ pub fn morning_facts(todo_dir: &Path, events: &[Event], weather: Option<&Weather
     let exam_today = events.iter().any(|e| is_exam(e) && e.date == d && !e.done());
     out.push(if exam_today { "Bring: calculator (exam today)".to_string() } else { "Bring: nothing extra".to_string() });
 
-    let mut today_lines: Vec<String> = day_sorted(events, &d).into_iter().map(event_line).collect();
-    today_lines.extend(todo::day_items(todo_dir, today).iter().map(|it| format!("- (todo) {}", it.text)));
-    today_lines.extend(todo::note_items(todo_dir).iter().map(|it| format!("- (open) {}", it.text)));
-    if today_lines.is_empty() {
+    let todays = day_sorted(events, &d);
+    // Due today: an all-day item whose run ends today, or a timed item whose summary says it is due.
+    let due: Vec<&Event> = todays
+        .iter()
+        .copied()
+        .filter(|e| (e.time.is_none() && last_day(events, e, today) == today) || (e.time.is_some() && due_word(e)))
+        .collect();
+    let background: Vec<&Event> = todays.iter().copied().filter(|e| e.time.is_none() && last_day(events, e, today) > today).collect();
+    let timeline: Vec<&Event> = todays.iter().copied().filter(|e| e.time.is_some() && !due_word(e)).collect();
+    let mut todo_lines: Vec<String> = todo::day_items(todo_dir, today).iter().map(|it| format!("- (todo) {}", it.text)).collect();
+    todo_lines.extend(todo::note_items(todo_dir).iter().map(|it| format!("- (open) {}", it.text)));
+
+    if !due.is_empty() {
+        out.push("Due today:".to_string());
+        out.extend(due.iter().map(|e| format!("{}{}", event_line(e), if e.done() { " (done)" } else { "" })));
+    }
+    if !timeline.is_empty() {
+        out.push("Timeline:".to_string());
+        for (i, e) in timeline.iter().enumerate() {
+            let mut line = event_line(e);
+            if let Some((s, en)) = e.time.as_deref().and_then(span_min) {
+                let other = timeline
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| *j != i)
+                    .map(|(_, o)| o)
+                    .find(|o| o.time.as_deref().and_then(span_min).is_some_and(|(os, oe)| s < oe && os < en));
+                if let Some(o) = other {
+                    line += &format!(", overlaps {}", o.summary);
+                }
+            }
+            out.push(line);
+        }
+    }
+    if !todo_lines.is_empty() {
+        out.push("To-do:".to_string());
+        out.extend(todo_lines.iter().cloned());
+    }
+    if due.is_empty() && timeline.is_empty() && todo_lines.is_empty() {
         out.push("Today: nothing on the list".to_string());
-    } else {
-        out.push("Today:".to_string());
-        out.extend(today_lines);
+    }
+    if !background.is_empty() {
+        let items: Vec<String> = background.iter().map(|e| format!("{} ({}) through {}", e.summary, e.calendar, ymd(last_day(events, e, today)))).collect();
+        out.push(format!("Running in the background: {}", items.join("; ")));
     }
     let soon = due_soon(events, today);
     if !soon.is_empty() {
         out.push("Due soon:".to_string());
         out.extend(soon);
     }
+
+    // The closing line: what must not slip, and the longest free stretch of the day between GAP_FROM and GAP_TO.
+    let mut must: Vec<String> = due.iter().filter(|e| !e.done()).map(|e| e.summary.clone()).collect();
+    must.extend(timeline.iter().filter(|e| is_exam(e) && !e.done()).map(|e| e.summary.clone()));
+    must.extend(due_soon_events(events, today).iter().map(|e| e.summary.clone()));
+    must.dedup();
+    must.truncate(2);
+    let clock = |t: &str| span_min(t).map_or(0, |s| s.0);
+    let end = clock(GAP_TO);
+    let mut spans: Vec<(u32, u32)> = timeline.iter().filter_map(|e| e.time.as_deref().and_then(span_min)).collect();
+    spans.sort();
+    let mut cur = clock(GAP_FROM);
+    let mut best = (cur, cur);
+    for (s, e) in spans {
+        if s > cur && s.min(end) - cur > best.1 - best.0 {
+            best = (cur, s.min(end));
+        }
+        cur = cur.max(e);
+        if cur >= end {
+            break;
+        }
+    }
+    if end > cur && end - cur > best.1 - best.0 {
+        best = (cur, end);
+    }
+    let hm = |m: u32| format!("{:02}:{:02}", m / 60, m % 60);
+    let gap = format!("{}-{}", hm(best.0), hm(best.1));
+    let names = if must.is_empty() { "nothing due".to_string() } else { must.join(", ") };
+    out.push(format!("Can't slip: {names}. Biggest free gap: {gap}."));
     out.join("\n")
 }
 
@@ -272,7 +382,7 @@ pub fn night_facts(todo_dir: &Path, events: &[Event], today: NaiveDate) -> Strin
 /// Stormy's wording of the facts. The facts stand when the model is silent or sends a stub.
 pub fn voice(chat: &dyn Chat, slot: Slot, facts: &str) -> String {
     let job = match slot {
-        Slot::Morning => "Write Lionel's morning brief as a short Discord DM. Keep every fact line with its numbers and names. Add nothing that is not in the facts. Do not mention umbrellas, rain gear or the chance of rain. No markdown headings. Under 1500 characters.",
+        Slot::Morning => "Write Lionel's morning brief as a short Discord DM. Keep every fact line with its numbers and names. Add nothing that is not in the facts. Do not mention umbrellas, rain gear or the chance of rain. No markdown headings. Under 1500 characters. Keep the facts in their order, keep every \"overlaps\" note, and end with the \"Can't slip\" line word for word. No preamble, plain tone.",
         Slot::Night => "Write Lionel's night check-in as a short Discord DM. Keep every fact line. End by asking which numbered items he finished and what should carry to tomorrow. No markdown headings. Under 1500 characters.",
     };
     let system = format!("{PERSONA}\n\n{job}");
@@ -284,22 +394,37 @@ pub fn voice(chat: &dyn Chat, slot: Slot, facts: &str) -> String {
             let long = t.chars().count() > 1500;
             let (lower, lower_facts) = (t.to_lowercase(), facts.to_lowercase());
             let rain = ["umbrella", "rain", "poncho", "\u{2614}", "\u{1f302}"].iter().any(|w| lower.matches(w).count() > lower_facts.matches(w).count());
-            // Every numbered fact line ("N. text") must appear verbatim, or "done N" in the reply points at an item he did not see.
-            let lost = facts.lines().map(str::trim).filter(|l| l.split_once(". ").is_some_and(|(n, _)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))).any(|l| !t.contains(l));
+            // Every numbered fact line ("N. text") must appear on a line of its own in the reply, or "done N" in the reply points at an item he did not see.
+            let lost = facts.lines().map(str::trim).filter(|l| l.split_once(". ").is_some_and(|(n, _)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))).any(|l| !t.lines().any(|r| bare(r) == l));
             if short || long || rain || lost { facts.to_string() } else { text }
         }
         Err(_) => facts.to_string(),
     }
 }
 
+// A reply line counts only as a whole line, after trimming spaces and markdown bullets or emphasis, so "1. rent" is not found inside "11. rent check".
+fn bare(r: &str) -> &str {
+    r.trim()
+        .trim_start_matches(|c: char| matches!(c, '*' | '_' | '-' | '•' | '>') || c.is_whitespace())
+        .trim_end_matches(|c: char| matches!(c, '*' | '_') || c.is_whitespace())
+}
+
+/// The calendar read for one DM: the events, or the CAL_FAIL line when the read failed. No calendar configured gives no events and no line.
+pub fn read_events(cal: Option<&Cal>) -> (Vec<Event>, Option<&'static str>) {
+    match cal {
+        None => (Vec::new(), None),
+        Some(cal) => match calendar::list(cal) {
+            Ok(evs) => (evs, None),
+            Err(e) => {
+                eprintln!("stormy: calendar list failed: {e}");
+                (Vec::new(), Some(CAL_FAIL))
+            }
+        },
+    }
+}
+
 pub fn compose(deps: &Deps, slot: Slot, today: NaiveDate) -> String {
-    let events = match deps.cal.as_ref() {
-        Some(cal) => calendar::list(cal).unwrap_or_else(|e| {
-            eprintln!("stormy: calendar list failed: {e}");
-            Vec::new()
-        }),
-        None => Vec::new(),
-    };
+    let (events, warn) = read_events(deps.cal.as_ref());
     let facts = match slot {
         Slot::Morning => {
             let w = weather::fetch();
@@ -308,6 +433,11 @@ pub fn compose(deps: &Deps, slot: Slot, today: NaiveDate) -> String {
         Slot::Night => night_facts(&deps.todo_dir, &events, today),
     };
     let text = voice(deps.chat.as_ref(), slot, &facts);
+    // The warning goes on after the model, so the model cannot drop it.
+    let text = match warn {
+        Some(w) => format!("{w}\n{}", text.trim()),
+        None => text,
+    };
     redact::sensitive(text.trim()).chars().take(MAX_CHARS).collect()
 }
 

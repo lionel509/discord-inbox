@@ -1,7 +1,7 @@
 // Dry run for the daily brief (#135). Never opens Discord, never takes Inbox/.lock, never sends a DM.
 // Usage: stormy-daily morning | night | reply "<text>"
 use chrono::Local;
-use discord_inbox::calendar::{self, Cal};
+use discord_inbox::calendar::Cal;
 use discord_inbox::chat::{self, Chat, NoChat, OpenRouter};
 use discord_inbox::daily::{self, Deps, Slot};
 use discord_inbox::redact;
@@ -45,17 +45,13 @@ fn main() -> ExitCode {
         chat,
     };
     let now = Local::now().naive_local();
-    let today = now.date();
+    // DISCORD_INBOX_TODAY pins the date for dry runs; the bot does not read it.
+    let today = std::env::var("DISCORD_INBOX_TODAY").ok().and_then(|s| chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok()).unwrap_or(now.date());
 
     match args.first().map(String::as_str) {
         Some(which @ ("morning" | "night")) => {
             let slot = if which == "morning" { Slot::Morning } else { Slot::Night };
-            let events = deps
-                .cal
-                .as_ref()
-                .map(calendar::list)
-                .and_then(Result::ok)
-                .unwrap_or_default();
+            let (events, warn) = daily::read_events(deps.cal.as_ref());
             let facts = match slot {
                 Slot::Morning => {
                     let w = weather::fetch();
@@ -64,6 +60,10 @@ fn main() -> ExitCode {
                 Slot::Night => daily::night_facts(&deps.todo_dir, &events, today),
             };
             let dm = redact::sensitive(&daily::voice(deps.chat.as_ref(), slot, &facts));
+            let dm = match warn {
+                Some(w) => format!("{w}\n{dm}"),
+                None => dm,
+            };
             let dm: String = dm.chars().take(daily::MAX_CHARS).collect();
             println!("FACTS:\n{facts}\n");
             println!("DM:\n{dm}");
