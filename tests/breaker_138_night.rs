@@ -76,7 +76,8 @@ fn filer(root: &Path, chat: Arc<dyn Chat>) -> Filer {
 struct Msg {
     id: u64,
     text: String,
-    received: String,
+    // None: the DM arrives now (after the night marker). Some: a fixed stamp, for a message from before it.
+    received: Option<String>,
     replies: Arc<Mutex<Vec<String>>>,
 }
 
@@ -91,7 +92,7 @@ impl Inbound for Msg {
         CH
     }
     fn received(&self) -> String {
-        self.received.clone()
+        self.received.clone().unwrap_or_else(|| discord_inbox::when::local_stamp(chrono::Utc::now()))
     }
     fn content(&self) -> String {
         self.text.clone()
@@ -117,9 +118,9 @@ impl Inbound for Msg {
     }
 }
 
-async fn say(inbox: &Path, root: &Path, chat: Arc<dyn Chat>, id: u64, text: &str, received: &str) -> (Outcome, Vec<String>) {
+async fn say(inbox: &Path, root: &Path, chat: Arc<dyn Chat>, id: u64, text: &str, received: Option<&str>) -> (Outcome, Vec<String>) {
     let replies = Arc::new(Mutex::new(Vec::new()));
-    let m = Msg { id, text: text.to_string(), received: received.to_string(), replies: replies.clone() };
+    let m = Msg { id, text: text.to_string(), received: received.map(str::to_string), replies: replies.clone() };
     let out = ingest_with(&allow(), inbox, &m, &filer(root, chat)).await;
     let all = replies.lock().unwrap().clone();
     (out, all)
@@ -148,7 +149,7 @@ fn deps(dir: &Path, chat: Arc<dyn Chat>) -> Deps {
     Deps { todo_dir: dir.to_path_buf(), cal: None, chat }
 }
 
-const RECEIVED: &str = "2026-10-02T15:00:00Z";
+const RECEIVED: &str = "2026-10-02T15:00:00Z"; // a message from before the night DM
 
 // BREAK 1: a normal note sent during the awaiting window is swallowed when the model call fails.
 #[tokio::test]
@@ -158,7 +159,7 @@ async fn b1_normal_note_filed_when_model_is_down() {
     let day = ymd(today());
     write_day(&root, today(), "- finish lab report\n");
     daily::stage(&inbox, Slot::Night, &day).unwrap();
-    let (out, replies) = say(&inbox, &root, Arc::new(Down), 11, "remind me to email the bursar tomorrow", RECEIVED).await;
+    let (out, replies) = say(&inbox, &root, Arc::new(Down), 11, "remind me to email the bursar tomorrow", None).await;
     assert!(has_note(&inbox), "normal note must reach Inbox; outcome {out:?}, replies {replies:?}");
 }
 
@@ -171,7 +172,7 @@ async fn b1b_normal_note_filed_when_model_reply_is_not_json() {
     write_day(&root, today(), "- finish lab report\n");
     daily::stage(&inbox, Slot::Night, &day).unwrap();
     let chat = Seq::new(&["Sure, happy to help!", "ok", "ok"]);
-    let (out, replies) = say(&inbox, &root, chat, 12, "remind me to email the bursar tomorrow", RECEIVED).await;
+    let (out, replies) = say(&inbox, &root, chat, 12, "remind me to email the bursar tomorrow", None).await;
     assert!(has_note(&inbox), "normal note must reach Inbox; outcome {out:?}, replies {replies:?}");
 }
 
@@ -184,7 +185,7 @@ async fn b2_empty_reply_does_not_strike_a_todo() {
     let dir = write_day(&root, day, "- finish lab report\n");
     daily::stage(&inbox, Slot::Night, &ymd(day)).unwrap();
     let chat = Seq::new(&[r#"{"checkin":true,"done":[1],"tomorrow":[]}"#, "ok", "ok"]);
-    let (out, replies) = say(&inbox, &root, chat, 13, "", RECEIVED).await;
+    let (out, replies) = say(&inbox, &root, chat, 13, "", None).await;
     let body = fs::read_to_string(todo::day_file(&dir, day)).unwrap();
     assert!(!body.contains("~~"), "an empty DM must not strike a to-do; outcome {out:?}, replies {replies:?}, file {body:?}");
 }
@@ -278,7 +279,7 @@ async fn b7_message_from_before_the_night_dm_is_not_a_reply() {
     let dir = write_day(&root, day, "- finish lab report\n");
     daily::stage(&inbox, Slot::Night, &ymd(day)).unwrap();
     let chat = Seq::new(&[r#"{"checkin":true,"done":[1],"tomorrow":[]}"#, "ok", "ok"]);
-    let (out, replies) = say(&inbox, &root, chat, 17, "lab report draft is in my notes", RECEIVED).await;
+    let (out, replies) = say(&inbox, &root, chat, 17, "lab report draft is in my notes", Some(RECEIVED)).await;
     let body = fs::read_to_string(todo::day_file(&dir, day)).unwrap();
     assert!(!body.contains("~~"), "a message from before the night DM struck a to-do; outcome {out:?}, replies {replies:?}");
 }
@@ -332,7 +333,7 @@ async fn p2_second_reply_after_answer_files_normally() {
     write_day(&root, day, "- finish lab report\n");
     daily::stage(&inbox, Slot::Night, &ymd(day)).unwrap();
     let chat = Seq::new(&[r#"{"checkin":true,"done":[],"tomorrow":[]}"#, "ok", "ok"]);
-    let _ = say(&inbox, &root, chat.clone(), 21, "nothing done", RECEIVED).await;
-    let (out, _) = say(&inbox, &root, chat, 22, "also here is a receipt note", RECEIVED).await;
+    let _ = say(&inbox, &root, chat.clone(), 21, "nothing done", None).await;
+    let (out, _) = say(&inbox, &root, chat, 22, "also here is a receipt note", None).await;
     assert!(has_note(&inbox), "second reply must file; outcome {out:?}");
 }
