@@ -155,3 +155,19 @@ fn pip_model_runs_claude_from_the_photo_dir_or_tmp() {
     let got = helper_pwd(&[], "none");
     assert!(got == "/tmp" || got == "/private/tmp", "without a photo claude must run from /tmp, got {got:?}");
 }
+
+#[test]
+fn dotted_card_beside_other_numbers_is_masked() {
+    for s in [
+        "4111.1111.1111.1111 5",
+        "12.99 4111.1111.1111.1111",
+        "4111.1111.1111.1111 12.99",
+        "4111-1111.1111-1111 12.99",
+        "4111\u{200B}1111.1111\u{200B}1111 12.99",
+        "4111\u{200E}1111\u{200E}1111\u{200E}1111 chicken",
+    ] {
+        let o = redact::sensitive(s);
+        assert!(!o.contains("4111"), "{s:?} leaked: {o:?}");
+        assert_eq!(o.chars().count(), s.chars().count(), "{s:?} -> {o:?}");
+    }
+}

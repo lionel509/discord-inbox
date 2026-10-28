@@ -408,3 +408,53 @@ fn property_each_typed_weight_binds_to_its_food() {
         }
     }
 }
+
+// #130 rework round 4: fix items 1-3 (breaker u1r/u2r round 3, review 5679195866).
+
+#[test]
+fn card_in_model_name_with_price_never_survives() {
+    let got = pip_model::enforce("100g chicken", "4111.1111.1111.1111 12.99", 100.0, pip_model::Source::Text, 165.0, 1.0, 1.0, 1.0, false);
+    let leaked = match &got {
+        Ok(item) => item.food.name.contains("4111"),
+        Err(u) => u.text.contains("4111"),
+    };
+    assert!(!leaked, "a card survived in the model name");
+}
+
+#[test]
+fn breaker_r3_trailing_weight_does_not_drop_leading_span() {
+    let p = run("100g chicken 50g", &[it("chicken", 150.0, "estimate", 165.0)]);
+    let c = named(&p, "chicken");
+    assert!(c.len() == 1 && (c[0].grams - 100.0).abs() < 0.1 && !c[0].estimated, "chicken rows {:?}", p.items.iter().map(|i| (i.grams, i.estimated)).collect::<Vec<_>>());
+}
+
+#[test]
+fn trailing_bare_weight_makes_no_span() {
+    assert_eq!(nutrition::typed_spans("100g chicken 50g"), vec![span(100.0, &["chicken"])]);
+}
+
+#[test]
+fn breaker_r3_bound_item_failing_no_calories_keeps_typed_weight_listed() {
+    let p = run("100g chicken", &[it("chicken", 150.0, "text", 0.0)]);
+    assert!(p.items.is_empty(), "items {}", p.items.len());
+    let texts: Vec<String> = p.unknown.iter().map(|u| u.text.clone()).collect();
+    assert!(texts.iter().any(|t| t.contains("100 g chicken")), "typed 100 g chicken vanished; unknown = {texts:?}");
+}
+
+#[test]
+fn bound_item_with_no_reader_grams_names_the_typed_weight() {
+    let reply_text = r#"{"items":[{"name":"chicken","kcal_100":165,"source":"text"}],"unreadable":[]}"#;
+    let p = pip_model::parse("100g chicken", reply_text).expect("object with items");
+    assert!(p.items.is_empty(), "items {}", p.items.len());
+    let texts: Vec<String> = p.unknown.iter().map(|u| u.text.clone()).collect();
+    assert!(texts.iter().any(|t| t.contains("100 g")), "typed weight not named; unknown = {texts:?}");
+}
+
+#[test]
+fn bound_item_with_a_long_name_names_the_typed_weight() {
+    let long = format!("chicken {}", "x".repeat(70));
+    let p = run("100g chicken", &[it(&long, 150.0, "text", 165.0)]);
+    assert!(p.items.is_empty(), "items {}", p.items.len());
+    let texts: Vec<String> = p.unknown.iter().map(|u| u.text.clone()).collect();
+    assert!(texts.iter().any(|t| t.starts_with("100 g ")), "typed weight not first; unknown = {texts:?}");
+}
