@@ -26,8 +26,12 @@ fn stub() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/calendar_stub.sh")
 }
 
+fn fixture() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/calendar.sqlitedb")
+}
+
 fn cal(names: &[&str]) -> Cal {
-    Cal { osascript: stub(), calendars: names.iter().map(|s| s.to_string()).collect() }
+    Cal { osascript: stub(), calendars: names.iter().map(|s| s.to_string()).collect(), db: fixture() }
 }
 
 fn both() -> Cal {
@@ -194,7 +198,7 @@ fn finish_many_asks_without_writing() {
 #[test]
 fn finish_stub_failure_is_err() {
     let _g = guard();
-    let broken = Cal { osascript: PathBuf::from("/nonexistent/osascript"), calendars: vec!["MATH 101 - Work".into()] };
+    let broken = Cal { osascript: PathBuf::from("/nonexistent/osascript"), calendars: vec!["MATH 101 - Work".into()], db: fixture() };
     assert!(calendar::finish(&Fixed("#1".into()), &broken, "math hw 3", "2026-10-19").is_err());
 }
 
@@ -218,7 +222,7 @@ fn only_configured_calendars_ever_reach_osascript() {
         }
         // A tag no other test uses, so this iteration's lines are identifiable.
         names.push(format!("Cal-{i}"));
-        let c = Cal { osascript: stub(), calendars: names.clone() };
+        let c = Cal { osascript: stub(), calendars: names.clone(), db: fixture() };
         let n_words = 1 + next(3);
         let task: Vec<&str> = (0..n_words).map(|_| words[next(words.len() as u64) as usize]).collect();
         let answer = answers[next(3) as usize];

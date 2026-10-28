@@ -84,25 +84,33 @@ fn b4_lecture_calendar_is_not_a_deadline() {
 #[ignore = "follow-up: Due soon cut by MAX_CHARS, see review"]
 fn b5_huge_day_keeps_the_deadline_heads_up() {
     let dir = tmp("b5");
-    let stub = dir.join("cal.sh");
-    let mut script = String::from("#!/bin/sh\ncat >/dev/null\nprintf 'ok\\n'\n");
+    // A made-up calendar database: 40 lecture blocks on 2026-10-20 and one deadline on 2026-10-22.
+    let db = dir.join("Calendar.sqlitedb");
+    let mut sql = include_str!("fixtures/calendar_schema.sql").to_string();
+    sql += "INSERT INTO Calendar (ROWID, title) VALUES (1,'SBU - Lectures'),(2,'SBU - Math');\n";
     for i in 1..=40 {
-        script += &format!(
-            "printf 'uid{i}\\tSBU - Lectures\\t2026-10-20\\t{:02}:{:02}\\tLecture block {i} with a long descriptive title for the day\\n'\n",
-            8 + i / 6,
-            (i % 6) * 10
+        let h = 8 + i / 6;
+        let m = (i % 6) * 10;
+        let od = 814161600 + h * 3600 + m * 60;
+        sql += &format!(
+            "INSERT INTO CalendarItem (ROWID, summary, start_date, start_tz, all_day, calendar_id, has_recurrences, UUID) VALUES ({i}, 'Lecture block {i} with a long descriptive title for the day', {od}, 'America/New_York', 0, 1, 0, 'uid{i}');\n"
         );
+        sql += &format!("INSERT INTO OccurrenceCache (day, event_id, calendar_id, store_id, occurrence_date) VALUES (814161600, {i}, 1, 1, {od});\n");
     }
-    script += "printf 'uidHW\\tSBU - Math\\t2026-10-22\\t23:00\\tHW 4 due Friday\\n'\n";
-    fs::write(&stub, script).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+    sql += "INSERT INTO CalendarItem (ROWID, summary, start_date, start_tz, all_day, calendar_id, has_recurrences, UUID) VALUES (41, 'HW 4 due Friday', 814417200, 'America/New_York', 0, 2, 0, 'uidHW');\n";
+    sql += "INSERT INTO OccurrenceCache (day, event_id, calendar_id, store_id, occurrence_date) VALUES (814334400, 41, 2, 1, 814417200);\n";
+    let _ = fs::remove_file(&db);
+    let mut child = std::process::Command::new("/usr/bin/sqlite3").arg(&db).stdin(std::process::Stdio::piped()).spawn().unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    std::io::Write::write_all(&mut stdin, sql.as_bytes()).unwrap();
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
     let wx = dir.join("weather.json");
     fs::write(&wx, include_str!("../examples/weather_sample.json")).unwrap();
     std::env::set_var("DISCORD_INBOX_WEATHER_FILE", &wx);
     let deps = Deps {
         todo_dir: dir.join("! Todo"),
-        cal: Some(Cal { osascript: stub, calendars: vec!["SBU - Lectures".into(), "SBU - Math".into()] }),
+        cal: Some(Cal { osascript: PathBuf::from("/nonexistent/osascript"), calendars: vec!["SBU - Lectures".into(), "SBU - Math".into()], db }),
         chat: Arc::new(Down),
     };
     let dm = daily::compose(&deps, Slot::Morning, day());

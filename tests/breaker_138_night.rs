@@ -26,6 +26,7 @@ fn guard() -> MutexGuard<'static, ()> {
         fs::write(&calendars, "MATH 101 - Work\n").unwrap();
         std::env::set_var("DISCORD_INBOX_CALENDARS_FILE", &calendars);
         std::env::set_var("DISCORD_INBOX_OSASCRIPT", PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/calendar_stub.sh"));
+        std::env::set_var("DISCORD_INBOX_CALENDAR_DB", PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/calendar.sqlitedb"));
         std::env::set_var("DISCORD_INBOX_CALENDAR_LOG", tmp.join("stub.log"));
     });
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
