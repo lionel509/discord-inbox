@@ -224,12 +224,14 @@ pub fn log_checkin(dir: &Path, day: NaiveDate, reply: &str, done: &[String], car
     if !body.ends_with('\n') {
         body.push('\n');
     }
+    // One line per item: a model item with a newline must not start a fake heading in the log.
+    let one_line = |v: &[String]| v.iter().map(|s| s.replace(['\r', '\n'], " ")).collect::<Vec<_>>().join(", ");
     let entry = format!(
         "## {}\n{}\nDone: {}\nCarried: {}\n\n",
         day.format("%Y-%m-%d"),
         crate::redact::sensitive(reply),
-        done.join(", "),
-        carried.join(", ")
+        one_line(done),
+        one_line(carried)
     );
     body.push_str(&entry);
     fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
