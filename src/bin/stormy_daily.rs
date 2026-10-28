@@ -74,7 +74,7 @@ fn main() -> ExitCode {
                 return usage();
             };
             let before = snapshot(&deps.todo_dir);
-            match daily::answer(&deps, today, text) {
+            match daily::answer(&deps, today, text, None) {
                 Ok(Some(reply)) => println!("REPLY:\n{reply}\n"),
                 Ok(None) => println!("REPLY:\n(no check-in: the message would be filed as usual)\n"),
                 Err(e) => {

@@ -237,7 +237,7 @@ fn parse_answer_drops_out_of_range_numbers() {
 fn answer_checks_off_and_carries_the_rest() {
     let dir = todo_fixture("answer");
     let chat = Arc::new(Fake(r#"{"checkin":true,"done":[1],"tomorrow":["study for the quiz"]}"#.into()));
-    let got = daily::answer(&deps(&dir, chat), day(), "did the email, tomorrow i need to study for the quiz").unwrap();
+    let got = daily::answer(&deps(&dir, chat), day(), "did the email, tomorrow i need to study for the quiz", None).unwrap();
     let text = got.expect("a check-in reply");
     assert!(text.contains("email the TA"), "{text}");
     assert!(text.contains("study for the quiz"), "{text}");
@@ -255,7 +255,7 @@ fn answer_that_is_not_a_checkin_writes_nothing() {
     let dir = todo_fixture("answer-off");
     let before = snapshot(&dir);
     let chat = Arc::new(Fake(r#"{"checkin":false,"done":[],"tomorrow":[]}"#.into()));
-    let got = daily::answer(&deps(&dir, chat), day(), "what's the weather like").unwrap();
+    let got = daily::answer(&deps(&dir, chat), day(), "what's the weather like", None).unwrap();
     assert_eq!(got, None);
     assert_eq!(snapshot(&dir), before);
 }
@@ -264,7 +264,37 @@ fn answer_that_is_not_a_checkin_writes_nothing() {
 fn answer_without_a_model_writes_nothing() {
     let dir = todo_fixture("answer-nochat");
     let before = snapshot(&dir);
-    let got = daily::answer(&deps(&dir, Arc::new(NoChat)), day(), "finished the email");
+    let got = daily::answer(&deps(&dir, Arc::new(NoChat)), day(), "finished the email", None);
     assert!(got.is_err());
     assert_eq!(snapshot(&dir), before);
+}
+
+#[test]
+fn answer_numbers_follow_the_list_as_sent() {
+    let dir = tmp("sent-list");
+    fs::write(dir.join("2026-10-20.md"), "- alpha\n- beta\n- gamma\n").unwrap();
+    fs::write(dir.join("Zzz.md"), "a loose note\n").unwrap();
+    // The list as the night DM showed it: alpha, beta, gamma, Zzz.
+    let sent: Vec<String> = todo::day_items(&dir, day()).into_iter().chain(todo::note_items(&dir)).map(|i| i.text).collect();
+    assert_eq!(sent, ["alpha", "beta", "gamma", "Zzz"].map(String::from));
+    // A note filed after the DM sorts before Zzz, so the live list has Zzz at 5.
+    fs::write(dir.join("Aaa.md"), "- aaa\n").unwrap();
+    let chat = Arc::new(Fake(r#"{"checkin":true,"done":[4],"tomorrow":[]}"#.into()));
+    daily::answer(&deps(&dir, chat), day(), "did the loose note", Some(sent)).unwrap();
+    let zzz = fs::read_to_string(dir.join("Zzz.md")).unwrap();
+    assert!(zzz.contains("done:"), "number 4 must strike Zzz, the note it was sent for: {zzz}");
+    let aaa = fs::read_to_string(dir.join("Aaa.md")).unwrap();
+    assert!(!aaa.contains("done:"), "number 4 struck the note filed after the DM: {aaa}");
+
+    // Three items were sent: a 4 is out of range and strikes nothing.
+    let dir = tmp("sent-three");
+    fs::write(dir.join("2026-10-20.md"), "- alpha\n- beta\n- gamma\n").unwrap();
+    let sent: Vec<String> = todo::day_items(&dir, day()).into_iter().map(|i| i.text).collect();
+    fs::write(dir.join("Zzz.md"), "a loose note\n").unwrap();
+    let chat = Arc::new(Fake(r#"{"checkin":true,"done":[4],"tomorrow":[]}"#.into()));
+    daily::answer(&deps(&dir, chat), day(), "did the loose note", Some(sent)).unwrap();
+    let body = fs::read_to_string(dir.join("2026-10-20.md")).unwrap();
+    assert!(!body.contains("~~"), "a number outside the sent list struck an item: {body}");
+    let zzz = fs::read_to_string(dir.join("Zzz.md")).unwrap();
+    assert!(!zzz.contains("done:"), "a number outside the sent list struck a note: {zzz}");
 }

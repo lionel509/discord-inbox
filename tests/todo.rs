@@ -163,3 +163,16 @@ fn mark_done_changes_only_the_one_line_on_random_files() {
         assert_eq!(todo::day_items(&dir, day).len(), items.len() - 1, "{day}");
     }
 }
+
+#[test]
+fn carry_refuses_a_symlinked_day_file() {
+    let dir = tmp("symlink-carry");
+    let outside = dir.join("outside.md");
+    fs::write(&outside, "outside text\n").unwrap();
+    let todo_dir = dir.join("todo");
+    fs::create_dir_all(&todo_dir).unwrap();
+    std::os::unix::fs::symlink(&outside, todo::day_file(&todo_dir, d(29))).unwrap();
+    let r = todo::carry(&todo_dir, d(29), &["call the bank".to_string()]);
+    assert!(r.is_err(), "carry replaced a symlinked day file: {r:?}");
+    assert_eq!(fs::read_to_string(&outside).unwrap(), "outside text\n");
+}

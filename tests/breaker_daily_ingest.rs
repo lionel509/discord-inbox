@@ -40,7 +40,8 @@ impl Inbound for Msg {
         CH
     }
     fn received(&self) -> String {
-        "2026-10-02T15:00:00Z".to_string()
+        // The DM arrives now, so it is after the night marker staged just above.
+        discord_inbox::when::local_stamp(chrono::Utc::now())
     }
     fn content(&self) -> String {
         self.text.clone()
@@ -88,6 +89,9 @@ async fn b9_night_window_note_is_filed_when_model_is_down() {
         window: Default::default(),
     };
     let out = ingest_with(&allow(), &inbox, &m, &filer).await;
+    // One reply only: the filer says the note is saved. The check-in path must not add its own apology.
+    let n = replies.lock().unwrap().len();
+    assert_eq!(n, 1, "a note got {n} replies when the model is down: {:?}", replies.lock().unwrap());
     // Filing also returns Saved, so the outcome cannot tell the paths apart: check the reply text and the Inbox.
     assert!(replies.lock().unwrap().iter().all(|r| !r.contains("Logged your reply")), "a non-check-in note was swallowed by the check-in path: {:?}", replies.lock().unwrap());
     assert!(has_note(&inbox), "the note was not filed to Inbox; replies sent: {:?} outcome: {out:?}", replies.lock().unwrap());

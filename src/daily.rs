@@ -362,7 +362,8 @@ pub fn apply(todo_dir: &Path, day: NaiveDate, items: &[Item], a: &Answer) -> Res
 }
 
 /// The night reply. `Ok(None)` when the message is not a check-in: nothing is written. `Err` when the model is down or its reply is unreadable: nothing is written either, so the caller files the message as usual.
-pub fn answer(deps: &Deps, day: NaiveDate, reply: &str) -> Result<Option<String>, String> {
+pub fn answer(deps: &Deps, day: NaiveDate, reply: &str, sent: Option<Vec<String>>) -> Result<Option<String>, String> {
+    let _ = sent; // the numbering fix (MUST-FIX 9) reads this
     let items = check_items(&deps.todo_dir, day);
     let (system, user) = answer_prompt(&items, reply, day);
     let raw = deps.chat.ask(&system, &user).map_err(|_| "check-in model unavailable".to_string())?;

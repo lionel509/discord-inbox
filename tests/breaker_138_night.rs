@@ -208,7 +208,7 @@ fn b3b_checked_box_is_not_carried() {
     let day = today();
     let dir = write_day(&root, day, "- [x] shipped the lab\n- [ ] write essay\n");
     let chat = Seq::new(&[r#"{"checkin":true,"done":[],"tomorrow":[]}"#]);
-    let reply = daily::answer(&deps(&dir, chat), day, "nothing else done yet").unwrap().unwrap();
+    let reply = daily::answer(&deps(&dir, chat), day, "nothing else done yet", None).unwrap().unwrap();
     let next = day.succ_opt().unwrap();
     let tomorrow = fs::read_to_string(todo::day_file(&dir, next)).unwrap_or_default();
     assert!(!tomorrow.contains("shipped the lab"), "finished item carried to tomorrow; reply {reply:?}, tomorrow file {tomorrow:?}");
@@ -222,7 +222,7 @@ fn b4_reworded_carry_duplicates_a_todo() {
     let day = today();
     let dir = write_day(&root, day, "- finish lab report\n");
     let chat = Seq::new(&[r#"{"checkin":true,"done":[],"tomorrow":["Finish lab report"]}"#]);
-    daily::answer(&deps(&dir, chat), day, "lab is not done").unwrap();
+    daily::answer(&deps(&dir, chat), day, "lab is not done", None).unwrap();
     let body = fs::read_to_string(todo::day_file(&dir, day.succ_opt().unwrap())).unwrap();
     let n = body.lines().filter(|l| l.to_lowercase().contains("finish lab report")).count();
     assert_eq!(n, 1, "one to-do must appear once tomorrow, file: {body:?}");

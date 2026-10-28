@@ -439,7 +439,7 @@ pub async fn ingest_with<M: Inbound>(
                     chat: filer.chat.clone(),
                 };
                 let message = incoming.content.clone();
-                let r = typing_while(m, tokio::task::spawn_blocking(move || crate::daily::answer(&deps, day_date, &message)))
+                let r = typing_while(m, tokio::task::spawn_blocking(move || crate::daily::answer(&deps, day_date, &message, None)))
                     .await
                     .map_err(|e| e.to_string())
                     .and_then(|r| r);
