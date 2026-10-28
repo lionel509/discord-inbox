@@ -262,10 +262,13 @@ pub fn voice(chat: &dyn Chat, slot: Slot, facts: &str) -> String {
     let system = format!("{PERSONA}\n\n{job}");
     match chat.ask(&system, facts) {
         Ok(text) => {
-            // The facts stand when the reply is a third of the facts or less, or brings in an umbrella the facts do not have.
-            let short = text.trim().chars().count() < facts.chars().count() / 3;
-            let umbrella = text.to_lowercase().contains("umbrella") && !facts.to_lowercase().contains("umbrella");
-            if short || umbrella { facts.to_string() } else { text }
+            // The prompt's limits are enforced here: the facts stand when the reply is under a third of the facts, over 1500 characters, or names rain gear the facts do not (a word counted more often in the reply than in the facts).
+            let t = text.trim();
+            let short = t.chars().count() < facts.chars().count() / 3;
+            let long = t.chars().count() > 1500;
+            let (lower, lower_facts) = (t.to_lowercase(), facts.to_lowercase());
+            let rain = ["umbrella", "rain", "poncho", "\u{2614}", "\u{1f302}"].iter().any(|w| lower.matches(w).count() > lower_facts.matches(w).count());
+            if short || long || rain { facts.to_string() } else { text }
         }
         Err(_) => facts.to_string(),
     }

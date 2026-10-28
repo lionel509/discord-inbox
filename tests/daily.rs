@@ -298,3 +298,38 @@ fn answer_numbers_follow_the_list_as_sent() {
     let zzz = fs::read_to_string(dir.join("Zzz.md")).unwrap();
     assert!(!zzz.contains("done:"), "a number outside the sent list struck a note: {zzz}");
 }
+
+// Records the system prompt the voice pass was sent.
+struct Record {
+    reply: String,
+    system: std::sync::Mutex<String>,
+}
+impl Chat for Record {
+    fn ask(&self, system: &str, _user: &str) -> Result<String, String> {
+        *self.system.lock().unwrap() = system.to_string();
+        Ok(self.reply.clone())
+    }
+}
+
+#[test]
+fn voice_threshold_is_a_third_of_the_facts() {
+    let facts = "a".repeat(300);
+    // 60 characters is under a third of 300: the facts go out.
+    assert_eq!(daily::voice(&Fake("b".repeat(60)), Slot::Night, &facts), facts);
+    // 120 is over a third: the reply goes out.
+    let reply = "b".repeat(120);
+    assert_eq!(daily::voice(&Fake(reply.clone()), Slot::Night, &facts), reply);
+}
+
+#[test]
+fn prompts_carry_the_guard_rails() {
+    let rec = Record { reply: "ok".into(), system: std::sync::Mutex::new(String::new()) };
+    daily::voice(&rec, Slot::Morning, "Weather line");
+    let morning = rec.system.lock().unwrap().clone();
+    assert!(morning.contains("Under 1500 characters") && morning.contains("umbrellas"), "{morning}");
+    daily::voice(&rec, Slot::Night, "Weather line");
+    let night = rec.system.lock().unwrap().clone();
+    assert!(night.contains("Under 1500 characters"), "{night}");
+    let (system, _) = daily::answer_prompt(&[], "x", day());
+    assert!(system.contains("not already in the list"), "{system}");
+}
