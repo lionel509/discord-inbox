@@ -1,9 +1,12 @@
-//! Stormy's morning brief and night check-in (#135). Stub: signatures only until the daily unit lands.
-use crate::calendar::{Cal, Event};
+//! Stormy's morning brief and night check-in (#135): the slot clock, the facts, the voice pass, and the check-in answer. Facts are built in code; the model only words them and reads the night reply.
+use crate::calendar::{self, Cal, Event};
 use crate::chat::Chat;
-use crate::todo::Item;
-use crate::weather::Weather;
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use crate::redact;
+use crate::todo::{self, Item};
+use crate::vaults::PERSONA;
+use crate::weather::{self, Weather};
+use chrono::{Days, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -40,70 +43,313 @@ pub struct Answer {
     pub tomorrow: Vec<String>,
 }
 
-pub fn parse_time(_s: &str) -> Option<NaiveTime> {
-    todo!("daily::parse_time (#135)")
+fn slot_name(slot: Slot) -> &'static str {
+    match slot {
+        Slot::Morning => "morning",
+        Slot::Night => "night",
+    }
+}
+
+fn slot_time(times: &Times, slot: Slot) -> NaiveTime {
+    match slot {
+        Slot::Morning => times.morning,
+        Slot::Night => times.night,
+    }
+}
+
+fn ymd(d: NaiveDate) -> String {
+    d.format("%Y-%m-%d").to_string()
+}
+
+fn minutes(t: NaiveTime) -> i64 {
+    (t.hour() * 60 + t.minute()) as i64
+}
+
+fn answered_path(inbox: &Path, day: &str) -> PathBuf {
+    inbox.join(format!("stormy-answered-{day}.sent"))
+}
+
+// An empty marker file. Written before any DM is sent, so a crash after sending never sends twice.
+fn mark(path: &Path) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    fs::write(path, b"").map_err(|e| format!("{}: {e}", path.display()))
+}
+
+pub fn parse_time(s: &str) -> Option<NaiveTime> {
+    NaiveTime::parse_from_str(s.trim(), "%H:%M").ok()
 }
 
 pub fn times_from_env() -> Times {
-    todo!("daily::times_from_env (#135)")
+    let pick = |var: &str, default: &str| {
+        std::env::var(var)
+            .ok()
+            .and_then(|s| parse_time(&s))
+            .unwrap_or_else(|| parse_time(default).expect("default slot time parses"))
+    };
+    Times {
+        morning: pick("DISCORD_INBOX_MORNING_AT", DEFAULT_MORNING),
+        night: pick("DISCORD_INBOX_NIGHT_AT", DEFAULT_NIGHT),
+    }
 }
 
-pub fn marker_path(_inbox: &Path, _slot: Slot, _day: &str) -> PathBuf {
-    todo!("daily::marker_path (#135)")
+pub fn marker_path(inbox: &Path, slot: Slot, day: &str) -> PathBuf {
+    inbox.join(format!("stormy-{}-{day}.sent", slot_name(slot)))
 }
 
-pub fn due(_inbox: &Path, _times: &Times, _now: NaiveDateTime) -> Option<(Slot, String)> {
-    todo!("daily::due (#135)")
+/// The slot whose window (its time up to GRACE_MIN later) is open now and not yet sent today.
+pub fn due(inbox: &Path, times: &Times, now: NaiveDateTime) -> Option<(Slot, String)> {
+    let day = ymd(now.date());
+    let mins = minutes(now.time());
+    [Slot::Morning, Slot::Night]
+        .into_iter()
+        .find(|&slot| {
+            let start = minutes(slot_time(times, slot));
+            mins >= start && mins < start + GRACE_MIN && !marker_path(inbox, slot, &day).exists()
+        })
+        .map(|slot| (slot, day))
 }
 
-pub fn stage(_inbox: &Path, _slot: Slot, _day: &str) -> Result<(), String> {
-    todo!("daily::stage (#135)")
+pub fn stage(inbox: &Path, slot: Slot, day: &str) -> Result<(), String> {
+    mark(&marker_path(inbox, slot, day))
 }
 
-pub fn awaiting(_inbox: &Path, _now: NaiveDateTime) -> Option<String> {
-    todo!("daily::awaiting (#135)")
+/// Yesterday's night check-in when it was sent and no reply has been answered yet.
+pub fn awaiting(inbox: &Path, now: NaiveDateTime) -> Option<String> {
+    let yesterday = ymd(now.date().checked_sub_days(Days::new(1))?);
+    (marker_path(inbox, Slot::Night, &yesterday).exists() && !answered_path(inbox, &yesterday).exists()).then_some(yesterday)
 }
 
-pub fn answered(_inbox: &Path, _day: &str) -> Result<(), String> {
-    todo!("daily::answered (#135)")
+pub fn answered(inbox: &Path, day: &str) -> Result<(), String> {
+    mark(&answered_path(inbox, day))
 }
 
-pub fn is_deadline(_ev: &Event) -> bool {
-    todo!("daily::is_deadline (#135)")
+pub fn is_deadline(ev: &Event) -> bool {
+    if ev.done() {
+        return false;
+    }
+    let s = ev.summary.to_lowercase();
+    s.split(|c: char| !c.is_alphanumeric()).any(|w| w == "due") || s.contains("deadline")
 }
 
-pub fn is_exam(_ev: &Event) -> bool {
-    todo!("daily::is_exam (#135)")
+pub fn is_exam(ev: &Event) -> bool {
+    let s = ev.summary.to_lowercase();
+    ev.calendar.ends_with("Exams") || s.contains("exam") || s.contains("midterm")
 }
 
-pub fn morning_facts(_todo_dir: &Path, _events: &[Event], _weather: Option<&Weather>, _today: NaiveDate) -> String {
-    todo!("daily::morning_facts (#135)")
+// Events on one day: all-day first, then timed events by clock time.
+fn day_sorted<'a>(events: &'a [Event], day: &str) -> Vec<&'a Event> {
+    let mut v: Vec<&Event> = events.iter().filter(|e| e.date == day).collect();
+    v.sort_by_key(|e| (e.time.is_some(), e.time.clone().unwrap_or_default()));
+    v
 }
 
-pub fn night_facts(_todo_dir: &Path, _events: &[Event], _today: NaiveDate) -> String {
-    todo!("daily::night_facts (#135)")
+fn event_line(e: &Event) -> String {
+    match &e.time {
+        None => format!("- all day: {} ({})", e.summary, e.calendar),
+        Some(t) => format!("- {t} {} ({})", e.summary, e.calendar),
+    }
 }
 
-pub fn voice(_chat: &dyn Chat, _slot: Slot, _facts: &str) -> String {
-    todo!("daily::voice (#135)")
+// Deadlines due 1 to AHEAD_DAYS after today.
+fn due_soon(events: &[Event], today: NaiveDate) -> Vec<String> {
+    let mut v: Vec<(NaiveDate, &Event)> = events
+        .iter()
+        .filter(|e| is_deadline(e))
+        .filter_map(|e| NaiveDate::parse_from_str(&e.date, "%Y-%m-%d").ok().map(|d| (d, e)))
+        .filter(|(d, _)| {
+            let gap = (*d - today).num_days();
+            gap >= 1 && gap <= AHEAD_DAYS
+        })
+        .collect();
+    v.sort_by_key(|(d, _)| *d);
+    v.into_iter().map(|(_, e)| format!("- {} ({}), {}", e.summary, e.calendar, e.date)).collect()
 }
 
-pub fn compose(_deps: &Deps, _slot: Slot, _today: NaiveDate) -> String {
-    todo!("daily::compose (#135)")
+// Today's open list: the day file first, then the standing notes.
+fn check_items(todo_dir: &Path, day: NaiveDate) -> Vec<Item> {
+    let mut v = todo::day_items(todo_dir, day);
+    v.extend(todo::note_items(todo_dir));
+    v
 }
 
-pub fn answer_prompt(_items: &[Item], _reply: &str, _day: NaiveDate) -> (String, String) {
-    todo!("daily::answer_prompt (#135)")
+pub fn morning_facts(todo_dir: &Path, events: &[Event], weather: Option<&Weather>, today: NaiveDate) -> String {
+    let d = ymd(today);
+    let mut out = Vec::new();
+    match weather {
+        Some(w) => {
+            out.push(weather::line(w));
+            let wear = weather::wear(w);
+            out.push(if wear.is_empty() { "Wear: no change".to_string() } else { format!("Wear: {}", wear.join(", ")) });
+        }
+        None => out.push("Weather: unavailable".to_string()),
+    }
+    let exam_today = events.iter().any(|e| is_exam(e) && e.date == d && !e.done());
+    out.push(if exam_today { "Bring: calculator (exam today)".to_string() } else { "Bring: nothing extra".to_string() });
+
+    let mut today_lines: Vec<String> = day_sorted(events, &d).into_iter().map(event_line).collect();
+    today_lines.extend(todo::day_items(todo_dir, today).iter().map(|it| format!("- (todo) {}", it.text)));
+    if today_lines.is_empty() {
+        out.push("Today: nothing on the list".to_string());
+    } else {
+        out.push("Today:".to_string());
+        out.extend(today_lines);
+    }
+    let soon = due_soon(events, today);
+    if !soon.is_empty() {
+        out.push("Due soon:".to_string());
+        out.extend(soon);
+    }
+    out.join("\n")
 }
 
-pub fn parse_answer(_text: &str, _n: usize) -> Option<Answer> {
-    todo!("daily::parse_answer (#135)")
+pub fn night_facts(todo_dir: &Path, events: &[Event], today: NaiveDate) -> String {
+    let tomorrow = today.checked_add_days(Days::new(1)).unwrap_or(today);
+    let mut out = Vec::new();
+    let tm = day_sorted(events, &ymd(tomorrow));
+    // The first thing tomorrow is the earliest timed event; an all-day one only when nothing is timed.
+    let first = tm
+        .iter()
+        .find(|e| e.time.is_some())
+        .or(tm.first())
+        .map(|e| event_line(e).trim_start_matches("- ").to_string())
+        .unwrap_or_else(|| "nothing on the calendar".to_string());
+    out.push(format!("Tomorrow first: {first}"));
+    let soon = due_soon(events, today);
+    if !soon.is_empty() {
+        out.push("Due soon:".to_string());
+        out.extend(soon);
+    }
+    let items = check_items(todo_dir, today);
+    if items.is_empty() {
+        out.push("Todo: nothing open".to_string());
+    } else {
+        out.push("Todo, numbered:".to_string());
+        out.extend(items.iter().enumerate().map(|(i, it)| format!("{}. {}", i + 1, it.text)));
+    }
+    out.join("\n")
 }
 
-pub fn apply(_todo_dir: &Path, _day: NaiveDate, _items: &[Item], _a: &Answer) -> Result<(Vec<String>, Vec<String>), String> {
-    todo!("daily::apply (#135)")
+/// Stormy's wording of the facts. The facts stand when the model is silent or sends a stub.
+pub fn voice(chat: &dyn Chat, slot: Slot, facts: &str) -> String {
+    let job = match slot {
+        Slot::Morning => "Write Lionel's morning brief as a short Discord DM. Keep every fact line with its numbers and names. Add nothing that is not in the facts.",
+        Slot::Night => "Write Lionel's night check-in as a short Discord DM. Keep every fact line. End by asking which numbered items he finished and what should carry to tomorrow.",
+    };
+    let system = format!("{PERSONA}\n\n{job}");
+    match chat.ask(&system, facts) {
+        Ok(text) if text.trim().chars().count() >= 40 => text,
+        _ => facts.to_string(),
+    }
 }
 
-pub fn answer(_deps: &Deps, _day: NaiveDate, _reply: &str) -> Result<Option<String>, String> {
-    todo!("daily::answer (#135)")
+pub fn compose(deps: &Deps, slot: Slot, today: NaiveDate) -> String {
+    let events = match deps.cal.as_ref() {
+        Some(cal) => calendar::list(cal).unwrap_or_else(|e| {
+            eprintln!("stormy: calendar list failed: {e}");
+            Vec::new()
+        }),
+        None => Vec::new(),
+    };
+    let facts = match slot {
+        Slot::Morning => {
+            let w = weather::fetch();
+            morning_facts(&deps.todo_dir, &events, w.as_ref(), today)
+        }
+        Slot::Night => night_facts(&deps.todo_dir, &events, today),
+    };
+    let text = voice(deps.chat.as_ref(), slot, &facts);
+    redact::sensitive(text.trim()).chars().take(MAX_CHARS).collect()
+}
+
+pub fn answer_prompt(items: &[Item], reply: &str, day: NaiveDate) -> (String, String) {
+    let system = "You read Lionel's reply to his night check-in. Reply with only a JSON object: {\"checkin\": true or false, \"done\": [numbers of the listed items he finished], \"tomorrow\": [short task texts to carry to tomorrow]}. Set checkin to false when the message is not a check-in. Use only numbers from the list. Do not invent tasks.".to_string();
+    let list = if items.is_empty() {
+        "(no open items)".to_string()
+    } else {
+        items.iter().enumerate().map(|(i, it)| format!("{}. {}", i + 1, it.text)).collect::<Vec<_>>().join("\n")
+    };
+    let user = format!("Date: {}\nOpen items:\n{list}\n\nReply:\n{reply}", ymd(day));
+    (system, user)
+}
+
+/// The model's JSON, with `done` limited to listed numbers 1..=n.
+pub fn parse_answer(text: &str, n: usize) -> Option<Answer> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    if end < start {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(&text[start..=end]).ok()?;
+    let checkin = v.get("checkin")?.as_bool()?;
+    let mut done: Vec<usize> = v
+        .get("done")
+        .and_then(|d| d.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_u64())
+                .filter(|&x| x >= 1 && x <= n as u64)
+                .map(|x| x as usize)
+                .collect()
+        })
+        .unwrap_or_default();
+    done.sort();
+    done.dedup();
+    let tomorrow: Vec<String> = v
+        .get("tomorrow")
+        .and_then(|t| t.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .take(20)
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(Answer { checkin, done, tomorrow })
+}
+
+/// Strikes the listed items the model marked done and carries the rest to tomorrow's file.
+pub fn apply(todo_dir: &Path, day: NaiveDate, items: &[Item], a: &Answer) -> Result<(Vec<String>, Vec<String>), String> {
+    let mut done = Vec::new();
+    for &n in &a.done {
+        let Some(item) = n.checked_sub(1).and_then(|i| items.get(i)) else { continue };
+        todo::mark_done(item, day)?;
+        done.push(item.text.clone());
+    }
+    let next = day.checked_add_days(Days::new(1)).ok_or_else(|| "no next day".to_string())?;
+    let carried = if a.tomorrow.is_empty() {
+        Vec::new()
+    } else {
+        todo::carry(todo_dir, next, &a.tomorrow)?;
+        a.tomorrow.clone()
+    };
+    Ok((done, carried))
+}
+
+fn log_only(deps: &Deps, day: NaiveDate, reply: &str) -> Result<Option<String>, String> {
+    todo::log_checkin(&deps.todo_dir, day, reply, &[], &[])?;
+    Ok(Some("Logged your reply in Stormy Check-ins, but I couldn't update the list just now.".to_string()))
+}
+
+/// The night reply. `Ok(None)` when the message is not a check-in: nothing is written.
+pub fn answer(deps: &Deps, day: NaiveDate, reply: &str) -> Result<Option<String>, String> {
+    let items = check_items(&deps.todo_dir, day);
+    let (system, user) = answer_prompt(&items, reply, day);
+    let raw = match deps.chat.ask(&system, &user) {
+        Ok(raw) => raw,
+        Err(_) => return log_only(deps, day, reply),
+    };
+    let Some(a) = parse_answer(&raw, items.len()) else {
+        return log_only(deps, day, reply);
+    };
+    if !a.checkin {
+        return Ok(None);
+    }
+    let (done, carried) = apply(&deps.todo_dir, day, &items, &a)?;
+    todo::log_checkin(&deps.todo_dir, day, reply, &done, &carried)?;
+    let list = |v: &[String]| if v.is_empty() { "nothing".to_string() } else { v.join(", ") };
+    Ok(Some(format!("Checked off: {}. Carried to tomorrow: {}.", list(&done), list(&carried))))
 }
