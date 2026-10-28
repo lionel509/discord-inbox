@@ -504,6 +504,47 @@ pub async fn ingest_with<M: Inbound>(
             return Outcome::Saved;
         }
     }
+    // Daily check-in (#135): while the night marker reads `sent`, a text-only DM answers the check-in. Ahead of the calendar hook so "done with the lab" strikes the to-do, not a calendar event.
+    if incoming.attachments.is_empty() {
+        if let Some(day) = crate::daily::awaiting(inbox, chrono::Local::now().naive_local()) {
+            if let Ok(day_date) = chrono::NaiveDate::parse_from_str(&day, "%Y-%m-%d") {
+                let deps = crate::daily::Deps {
+                    todo_dir: filer.vaults.root().join(crate::todo::DIR),
+                    cal: crate::calendar::Cal::from_env(),
+                    chat: filer.chat.clone(),
+                };
+                let message = incoming.content.clone();
+                let r = typing_while(m, tokio::task::spawn_blocking(move || crate::daily::answer(&deps, day_date, &message)))
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r);
+                match r {
+                    Ok(Some(text)) => {
+                        if let Err(e) = crate::daily::answered(inbox, &day) {
+                            eprintln!("discord-inbox: daily check-in marker for {id} not updated: {e}");
+                        }
+                        match m.reply(&reply_text(&text, None)).await {
+                            Ok(()) => clear(m).await,
+                            Err(e) => {
+                                eprintln!("discord-inbox: reply on {id} failed: {e}");
+                                mark(m, SAVED_MARK).await;
+                            }
+                        }
+                        return Outcome::Saved;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        // Said out loud, then the message is filed as usual below.
+                        eprintln!("discord-inbox: daily check-in for {id} failed: {e}");
+                        let text = "I couldn't sort your check-in just now 😿 Your message is saved in your Inbox.";
+                        if let Err(e) = m.reply(&reply_text(text, None)).await {
+                            eprintln!("discord-inbox: reply on {id} failed: {e}");
+                        }
+                    }
+                }
+            }
+        }
+    }
     // School-calendar check-off (#95): "done with <task>" marks the matching event. Answered before any chat call; no match falls through to chat.
     if incoming.attachments.is_empty() {
         if crate::calendar::wanted(&incoming.content).is_some() {
