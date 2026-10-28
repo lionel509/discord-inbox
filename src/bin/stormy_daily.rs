@@ -60,7 +60,9 @@ fn main() -> ExitCode {
                 Slot::Night => daily::night_facts(&deps.todo_dir, &events, today),
             };
             let facts = if warn.is_some() { daily::unread(&facts) } else { facts };
-            let dm = redact::sensitive(&daily::voice(deps.chat.as_ref(), slot, &facts));
+            // A failed read sends the unread facts as they are: the model is not asked about a calendar it never saw (#138 MF-E).
+            let voiced = if warn.is_some() { facts.clone() } else { daily::voice(deps.chat.as_ref(), slot, &facts) };
+            let dm = redact::sensitive(&voiced);
             let dm = match warn {
                 Some(w) => format!("{w}\n{dm}"),
                 None => dm,

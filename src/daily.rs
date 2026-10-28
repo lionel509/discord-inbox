@@ -472,7 +472,8 @@ pub fn compose(deps: &Deps, slot: Slot, today: NaiveDate) -> String {
         Slot::Night => night_facts(&deps.todo_dir, &events, today),
     };
     let facts = if warn.is_some() { unread(&facts) } else { facts };
-    let text = voice(deps.chat.as_ref(), slot, &facts);
+    // A failed read sends the unread facts as they are: the model is not asked about a calendar it never saw (#138 MF-E).
+    let text = if warn.is_some() { facts.clone() } else { voice(deps.chat.as_ref(), slot, &facts) };
     // The warning goes on after the model, so the model cannot drop it.
     let text = match warn {
         Some(w) => format!("{w}\n{}", text.trim()),
