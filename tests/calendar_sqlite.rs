@@ -464,3 +464,14 @@ fn zero_length_event_shows_one_time() {
     assert_eq!(evs.len(), 1, "{evs:?}");
     assert_eq!(evs[0].time, Some("23:30".into()));
 }
+
+// A failed read makes no calendar claims in the facts (#138 MF5).
+#[test]
+fn unread_morning_makes_no_calendar_claims() {
+    let _g = lock();
+    let facts = daily::unread(&daily::morning_facts(&empty_dir("mf5"), &[], None, d(2026, 10, 28)));
+    assert!(facts.starts_with("Weather"), "{facts}");
+    for bad in ["Can't slip", "Bring:", "nothing on the list", "08:00-22:00"] {
+        assert!(!facts.contains(bad), "{bad} in {facts}");
+    }
+}

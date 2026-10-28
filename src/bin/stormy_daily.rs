@@ -59,6 +59,7 @@ fn main() -> ExitCode {
                 }
                 Slot::Night => daily::night_facts(&deps.todo_dir, &events, today),
             };
+            let facts = if warn.is_some() { daily::unread(&facts) } else { facts };
             let dm = redact::sensitive(&daily::voice(deps.chat.as_ref(), slot, &facts));
             let dm = match warn {
                 Some(w) => format!("{w}\n{dm}"),

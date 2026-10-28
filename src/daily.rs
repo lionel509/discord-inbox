@@ -435,6 +435,19 @@ pub fn read_events(cal: Option<&Cal>) -> (Vec<Event>, Option<&'static str>) {
     }
 }
 
+/// The facts for a DM whose calendar read failed: no calendar claims. "Bring" and the closing line are dropped; the empty-calendar lines say the calendar did not load.
+pub fn unread(facts: &str) -> String {
+    facts
+        .lines()
+        .filter(|l| !l.starts_with("Bring:") && !l.starts_with("Can't slip:"))
+        .map(|l| {
+            l.replace("Tomorrow first: nothing on the calendar", "Tomorrow first: unknown, the calendar didn't load")
+                .replace("Today: nothing on the list", "Today: unknown, the calendar didn't load")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub fn compose(deps: &Deps, slot: Slot, today: NaiveDate) -> String {
     let (events, warn) = read_events(deps.cal.as_ref());
     let facts = match slot {
@@ -444,6 +457,7 @@ pub fn compose(deps: &Deps, slot: Slot, today: NaiveDate) -> String {
         }
         Slot::Night => night_facts(&deps.todo_dir, &events, today),
     };
+    let facts = if warn.is_some() { unread(&facts) } else { facts };
     let text = voice(deps.chat.as_ref(), slot, &facts);
     // The warning goes on after the model, so the model cannot drop it.
     let text = match warn {
