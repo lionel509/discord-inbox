@@ -489,3 +489,36 @@ fn voice_keeps_a_reply_that_keeps_closing_and_overlaps() {
     let reply = format!("Morning Lionel.\n{facts}");
     assert_eq!(daily::voice(&Fixed(reply.clone()), Slot::Morning, &facts), reply);
 }
+
+// A timed series is listed once in Due soon, at its nearest date (#138 MF8a).
+#[test]
+fn due_soon_lists_a_timed_series_once() {
+    let _g = lock();
+    let mk = |date: &str| Event {
+        uid: "u-rq".into(),
+        calendar: "CHEM 103 - Exams".into(),
+        date: date.into(),
+        time: Some("23:59".into()),
+        summary: "Reading quiz closes".into(),
+    };
+    let evs = vec![mk("2026-10-29"), mk("2026-10-30")];
+    let facts = daily::night_facts(&empty_dir("mf8a"), &evs, d(2026, 10, 27));
+    assert_eq!(facts.matches("Reading quiz closes").count(), 1, "{facts}");
+}
+
+// The calendar read pins its own zone: the process zone does not move a timed event (#138 MF8b).
+#[test]
+fn tz_pin_ignores_the_process_zone() {
+    let _g = lock();
+    let saved = std::env::var_os("TZ");
+    std::env::set_var("TZ", "UTC");
+    let got = calendar::list(&cal(&["CHEM 103 - Exams"]));
+    match &saved {
+        Some(v) => std::env::set_var("TZ", v),
+        None => std::env::remove_var("TZ"),
+    }
+    let evs = got.unwrap();
+    let q = evs.iter().find(|e| e.summary == "Quiz 3 closes").expect("Quiz 3 closes present");
+    assert_eq!(q.date, "2026-10-28");
+    assert_eq!(q.time, Some("23:30".into()));
+}
