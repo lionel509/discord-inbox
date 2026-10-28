@@ -122,6 +122,8 @@ pub struct Event {
     pub calendar: String,
     /// YYYY-MM-DD
     pub date: String,
+    /// "HH:MM" local, None for all-day
+    pub time: Option<String>,
     pub summary: String,
 }
 
@@ -186,6 +188,7 @@ pub fn parse_events(out: &str) -> Vec<Event> {
                 uid: f[0].to_string(),
                 calendar: f[1].to_string(),
                 date: f[2].to_string(),
+                time: None,
                 summary: f[3].to_string(),
             })
         })

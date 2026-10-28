@@ -91,19 +91,28 @@ fn scripts_never_delete_move_or_create() {
 }
 
 #[test]
-fn parse_events_four_fields() {
-    let out = "u1\tMATH 101 - Work\t2026-10-20\tHW\tpart two\nbad line\nu2\tPHYS 102 - Exams\t2026-10-21\tMidterm 1\n";
+fn parse_events_five_fields() {
+    let out = "u1\tMATH 101 - Work\t2026-10-20\tallday\tHW\tpart two\nbad line\nu2\tPHYS 102 - Exams\t2026-10-21\t09:30\tMidterm 1\nu3\tX\t2026-10-22\tfour fields only\n";
     let evs = calendar::parse_events(out);
     assert_eq!(evs.len(), 2, "{evs:?}");
     assert_eq!(evs[0].summary, "HW\tpart two");
+    assert_eq!(evs[0].time, None);
     assert_eq!(evs[1].uid, "u2");
     assert_eq!(evs[1].calendar, "PHYS 102 - Exams");
     assert_eq!(evs[1].date, "2026-10-21");
+    assert_eq!(evs[1].time, Some("09:30".to_string()));
+    assert_eq!(evs[1].summary, "Midterm 1");
+}
+
+#[test]
+fn list_script_emits_time() {
+    assert!(calendar::LIST_SCRIPT.contains("time of d"), "{}", calendar::LIST_SCRIPT);
+    assert!(calendar::LIST_SCRIPT.contains("allday event of ev"), "{}", calendar::LIST_SCRIPT);
 }
 
 #[test]
 fn done_is_the_check_mark_prefix() {
-    let ev = |s: &str| Event { uid: "u".into(), calendar: "c".into(), date: "2026-10-20".into(), summary: s.into() };
+    let ev = |s: &str| Event { uid: "u".into(), calendar: "c".into(), date: "2026-10-20".into(), time: None, summary: s.into() };
     assert!(ev("✅ HW 2 due").done());
     assert!(ev("✅HW 2").done());
     assert!(!ev("HW 3 due").done());
@@ -120,7 +129,7 @@ fn candidates_drops_done_and_sorts_by_distance() {
 
 #[test]
 fn pick_prompt_says_none_when_unsure() {
-    let open = vec![Event { uid: "u-math-hw3".into(), calendar: "MATH 101 - Work".into(), date: "2026-10-20".into(), summary: "HW 3 due".into() }];
+    let open = vec![Event { uid: "u-math-hw3".into(), calendar: "MATH 101 - Work".into(), date: "2026-10-20".into(), time: None, summary: "HW 3 due".into() }];
     let (system, user) = calendar::pick_prompt("math hw 3", "2026-10-19", &open);
     assert!(system.contains("NONE"), "{system}");
     assert!(user.contains("#1") && user.contains("HW 3 due"), "{user}");
@@ -140,7 +149,7 @@ fn parse_pick_cases() {
 #[test]
 fn check_off_marks_once_and_returns_the_summary() {
     let _g = guard();
-    let ev = Event { uid: "u-math-hw3".into(), calendar: "MATH 101 - Work".into(), date: "2026-10-20".into(), summary: "HW 3 due".into() };
+    let ev = Event { uid: "u-math-hw3".into(), calendar: "MATH 101 - Work".into(), date: "2026-10-20".into(), time: None, summary: "HW 3 due".into() };
     assert_eq!(calendar::check_off(&both(), &ev).as_deref(), Ok("✅ HW 3 due"));
     assert!(log_lines().iter().any(|l| l == "check\tMATH 101 - Work\tu-math-hw3"));
 }
@@ -148,7 +157,7 @@ fn check_off_marks_once_and_returns_the_summary() {
 #[test]
 fn check_off_requires_confirmation() {
     let _g = guard();
-    let ev = Event { uid: "u-nope".into(), calendar: "MATH 101 - Work".into(), date: "2026-10-20".into(), summary: "x".into() };
+    let ev = Event { uid: "u-nope".into(), calendar: "MATH 101 - Work".into(), date: "2026-10-20".into(), time: None, summary: "x".into() };
     assert!(calendar::check_off(&both(), &ev).is_err());
 }
 
