@@ -363,3 +363,53 @@ async fn property_no_meal_block_without_items() {
     assert!(!n.contains("<!-- pip:meal"), "a meal block was written with no items");
     assert_eq!(n.matches("<!-- pip:note ").count(), n_dms as usize);
 }
+
+#[tokio::test]
+async fn scale_photos_weigh_the_food_and_veg_counts() {
+    // The amendment on #130: a scale photo is a weight he measured. Cabbage is the later reading minus the empty bowl.
+    let (dir, root) = world("scale");
+    let c = cfg(&dir, Some(stub(&root, false, 0)), 5);
+    let cabbage = r#"{"name":"cabbage","grams":87,"source":"scale","kcal_100":25,"protein_100":1.3,"carbs_100":5.8,"fat_100":0.1,"veg":true}"#;
+    let items = format!(
+        "{},{},{},{}",
+        item("cooked egg noodles", 100.0, true, 138.0),
+        item("chicken breast", 100.0, true, 120.0),
+        cabbage,
+        item("onion", 60.0, false, 40.0)
+    );
+    set_reply(&root, &reply_json(&items, ""));
+    let (m, _) = msg(3014, "2026-10-27T19:00:00-04:00", "100 grnas of noodle 100 grams of chicken", &["dish.jpg", "bowl-empty.jpg", "onion.jpg", "bowl-cabbage.jpg"]);
+    assert_eq!(run(&c, &m).await, Outcome::Saved);
+    let n = note(&dir, "2026-10-27");
+    assert!(n.contains("<!-- pip:meal 3014 -->"), "{n}");
+    assert!(n.contains("87 g cabbage (scale)"), "{n}");
+    assert!(!n.contains("cabbage (estimated)"), "a scale reading is measured: {n}");
+    assert!(n.contains("100 g cooked egg noodles · 138 kcal"), "{n}");
+    assert!(n.contains("100 g chicken breast · 120 kcal"), "{n}");
+    assert!(n.contains("60 g onion (estimated)"), "{n}");
+    assert!(n.contains("veg yes"), "{n}");
+    let rows = daylog::meals(&dir, "2026-10-27");
+    assert!(rows.iter().any(|r| r.msg_id == 3014 && r.kcal > 0.0), "no kcal logged");
+    assert!(stdin_of(&root).contains("Photos: 4 attached"), "{}", stdin_of(&root));
+    assert!(stdin_of(&root).contains("\"source\": \"scale\""), "{}", stdin_of(&root));
+}
+
+#[test]
+fn scale_reading_is_bounded_at_5kg() {
+    use discord_inbox::pip_model::{self, Source};
+    let ok = pip_model::enforce("bowl photo", "cabbage", 4999.0, Source::Scale, 25.0, 1.0, 5.0, 0.1, true);
+    assert!(ok.as_ref().is_ok_and(|i| i.scale && !i.estimated), "{ok:?}");
+    let zero = pip_model::enforce("bowl photo", "cabbage", 0.0, Source::Scale, 25.0, 1.0, 5.0, 0.1, true);
+    assert!(zero.is_err(), "0 g scale reading must be rejected");
+    let heavy = pip_model::enforce("bowl photo", "cabbage", 6000.0, Source::Scale, 25.0, 1.0, 5.0, 0.1, true);
+    assert_eq!(heavy.err().map(|u| u.hint), Some("the reader gave an impossible number".to_string()));
+}
+
+#[test]
+fn text_weight_not_in_the_message_is_downgraded_to_estimate() {
+    use discord_inbox::pip_model::{self, Source};
+    let i = pip_model::enforce("salmon 150g", "salmon", 120.0, Source::Text, 208.0, 20.0, 0.0, 13.0, false).unwrap();
+    assert!(i.estimated && !i.scale, "120 g is not in the text, so it is an estimate");
+    let t = pip_model::enforce("salmon 150g", "salmon", 150.0, Source::Text, 208.0, 20.0, 0.0, 13.0, false).unwrap();
+    assert!(!t.estimated && !t.scale, "150 g is typed");
+}

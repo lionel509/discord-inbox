@@ -143,6 +143,8 @@ pub struct Item {
     pub qty: f64,
     pub assumed: bool,
     pub estimated: bool,
+    /// A weight read off a kitchen scale in a photo (#130): measured, so not `estimated`, tagged ` (scale)`.
+    pub scale: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -774,7 +776,7 @@ pub fn parse_line(piece: &str) -> Result<Item, Unknown> {
     if !grams.is_finite() || grams > 10_000.0 {
         return Err(Unknown { text: food_text, hint: "over 10 kg; check the amount".to_string() });
     }
-    Ok(Item { food, grams, unit, qty, assumed, estimated: false })
+    Ok(Item { food, grams, unit, qty, assumed, estimated: false, scale: false })
 }
 
 pub fn parse_meal(text: &str) -> Parsed {
@@ -843,6 +845,8 @@ pub fn item_line(item: &Item) -> String {
     let kcal = (item.grams / 100.0 * item.food.kcal).round() as i64;
     let tail = if item.estimated {
         " (estimated)".to_string()
+    } else if item.scale {
+        " (scale)".to_string()
     } else if item.assumed {
         format!(" (default {g} g)")
     } else if item.unit == Unit::G {

@@ -38,11 +38,12 @@ pub fn prompt(text: &str, photos: &[PathBuf]) -> String {
         photo_line,
         "Rules:".to_string(),
         "- List every food eaten as one item: fix typos, split foods written together, name unfamiliar foods plainly (e.g. \"cooked egg noodles\").".to_string(),
-        "- If the message gives a weight for a food (g, grams, kg, oz, lb), use exactly that weight and set \"typed\": true. Otherwise estimate grams from the photo or a normal portion and set \"typed\": false. Never change a typed weight.".to_string(),
+        "- If the message gives a weight for a food (g, grams, kg, oz, lb), use exactly that weight and set \"source\": \"text\". Otherwise estimate grams from the photo or a normal portion and set \"source\": \"estimate\". Never change a typed weight.".to_string(),
+        "- A photo of a kitchen scale display is a weight he measured: use the number shown and set \"source\": \"scale\". If one photo shows an empty container and a later one shows the same container with food, the food weighs the difference (subtract the empty reading). Name which food each scale photo is weighing from what is in the container.".to_string(),
         "- A receipt photo: list the food items bought as the meal at their printed quantities; skip non-food lines; never copy card numbers, totals or addresses.".to_string(),
         "- Per-100 g values are for the food as eaten (cooked), USDA-style.".to_string(),
         "- Anything you cannot turn into an item goes in \"unreadable\" with a short reason. No food at all: both lists empty.".to_string(),
-        "{\"items\":[{\"name\":\"cooked egg noodles\",\"grams\":100,\"typed\":true,\"kcal_100\":138,\"protein_100\":4.5,\"carbs_100\":25,\"fat_100\":2.1,\"veg\":false}],\"unreadable\":[]}".to_string(),
+        "{\"items\":[{\"name\":\"cooked egg noodles\",\"grams\":100,\"source\":\"text\",\"kcal_100\":138,\"protein_100\":4.5,\"carbs_100\":25,\"fat_100\":2.1,\"veg\":false}],\"unreadable\":[]}".to_string(),
     ];
     lines.join("\n")
 }
@@ -95,23 +96,43 @@ fn item_from(text: &str, raw: &Value) -> Result<Item, Unknown> {
     let name = raw.get("name").and_then(Value::as_str).ok_or_else(no_name)?;
     let grams = raw.get("grams").and_then(Value::as_f64).ok_or_else(no_name)?;
     let kcal = raw.get("kcal_100").and_then(Value::as_f64).ok_or_else(no_name)?;
-    let typed = raw.get("typed").and_then(Value::as_bool).unwrap_or(false);
     let veg = raw.get("veg").and_then(Value::as_bool).unwrap_or(false);
     let macro_of = |key: &str| raw.get(key).and_then(Value::as_f64).unwrap_or(0.0);
-    enforce(text, name, grams, typed, kcal, macro_of("protein_100"), macro_of("carbs_100"), macro_of("fat_100"), veg)
+    let source = match raw.get("source").and_then(Value::as_str) {
+        Some("text") => Source::Text,
+        Some("scale") => Source::Scale,
+        Some(_) => Source::Estimate,
+        // Older replies carry only the `typed` flag.
+        None if raw.get("typed").and_then(Value::as_bool).unwrap_or(false) => Source::Text,
+        None => Source::Estimate,
+    };
+    enforce(text, name, grams, source, kcal, macro_of("protein_100"), macro_of("carbs_100"), macro_of("fat_100"), veg)
 }
 
+/// Where the reader says a weight came from: his typed text, a kitchen scale in a photo, or its own estimate.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Source {
+    Text,
+    Scale,
+    Estimate,
+}
+
+/// Largest weight a scale reading may give (grams). Text and estimates keep the 3 kg cap.
+const MAX_SCALE_G: f64 = 5000.0;
+
 /// Checks one reader item and builds it. A name that is exactly a table name or alias uses the table's numbers.
-/// A typed weight stays typed only when his text has that mass amount; otherwise the line is `estimated`.
+/// A `Text` weight stays typed only when his text has that mass amount; otherwise the line is `estimated`.
+/// A `Scale` weight is measured: not `estimated`, tagged ` (scale)`, bounded at 5 kg.
 #[allow(clippy::too_many_arguments)]
-pub fn enforce(text: &str, name: &str, grams: f64, typed: bool, kcal_100: f64, p: f64, c: f64, f: f64, veg: bool) -> Result<Item, Unknown> {
+pub fn enforce(text: &str, name: &str, grams: f64, source: Source, kcal_100: f64, p: f64, c: f64, f: f64, veg: bool) -> Result<Item, Unknown> {
     let name = name.trim();
     if name.is_empty() || name.chars().count() > 60 || name.contains(['\n', '\r']) {
         return Err(Unknown { text: name.to_string(), hint: "the reader gave no usable name".to_string() });
     }
     // The model's numbers are checked even when a table name will override them. Limit 1000 kcal/100 g (pure fat is ~900).
     let table = nutrition::table_food(name);
-    let in_range = (1.0..=3000.0).contains(&grams)
+    let cap = if source == Source::Scale { MAX_SCALE_G } else { 3000.0 };
+    let in_range = (1.0..=cap).contains(&grams)
         && (0.0..=1000.0).contains(&kcal_100)
         && (0.0..=100.0).contains(&p)
         && (0.0..=100.0).contains(&c)
@@ -123,9 +144,15 @@ pub fn enforce(text: &str, name: &str, grams: f64, typed: bool, kcal_100: f64, p
         Some(food) => food,
         None => Food::model(name, kcal_100, p, c, f, veg),
     };
-    let matches_typed = nutrition::typed_grams(text).iter().any(|t| (grams - t).abs() <= 0.5 + 0.01 * t);
-    let estimated = !(typed && matches_typed);
-    Ok(Item { food, grams, unit: Unit::G, qty: grams, assumed: false, estimated })
+    let (estimated, scale) = match source {
+        Source::Text => {
+            let matches_typed = nutrition::typed_grams(text).iter().any(|t| (grams - t).abs() <= 0.5 + 0.01 * t);
+            (!matches_typed, false)
+        }
+        Source::Scale => (false, true),
+        Source::Estimate => (true, false),
+    };
+    Ok(Item { food, grams, unit: Unit::G, qty: grams, assumed: false, estimated, scale })
 }
 
 /// Redacts first, then flattens to one line and caps the length, so a card number is never cut into a visible half.

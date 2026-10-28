@@ -1,20 +1,32 @@
 //! Pip's handler (U6): one DM in, one day-note block out, one card back. Commands (`today`, `week`, `undo`,
 //! `fix`, `help`) are read before any meal parsing and sit behind the same allowlist as meals. A message
 //! that is not food is a note, never a meal, so the 21:00 check-in still fires.
-//! Nutrition comes from the local table only (`nutrition`); recipes are read, never written (`recipes`).
+//! Nutrition comes from the meal reader when `PIP_MODEL` is set (`pip_model`), else from the local table only
+//! (`nutrition`); recipes are read, never written (`recipes`).
 use crate::allowlist::Allowlist;
 use crate::daylog::{self, Meal, NoteMsg, Totals, Written};
 use crate::ingest::{Handle, Inbound, Outcome, FAILED_MARK, SAVED_MARK};
 use crate::nutrition::{self, Parsed};
+use crate::pip_model::{self, Reading};
 use crate::recipes::{self, Recipe, Scaled};
 use crate::rich::Rich;
 use crate::summary;
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// Pip's public presence: persona only, nothing about food or health.
 pub const PRESENCE: &str = "curled up on a warm laptop 🐈";
 /// Used when `PIP_KCAL_TARGET` is unset or unparsable. A placeholder until he sets his own.
 pub const DEFAULT_KCAL_TARGET: u32 = 2400;
+/// Used when `PIP_MODEL_TIMEOUT` is unset: seconds the meal reader gets before it counts as down.
+pub const DEFAULT_MODEL_TIMEOUT_SECS: u64 = 90;
+
+const DOWN_LINE: &str = "reader down: photos not read, counted from the table only";
+const DOWN_FIELD: &str = "down; photos not read, counted from the table only";
+const DOWN_REPLY: &str = "Pip's reader is down and nothing in that matched the food table, so nothing was logged. Send it again in a bit, or type it as items with weights (cooked rice 180g) to log it now.";
+const UNREADABLE_HEAD: &str = "I couldn't read that as food: ";
+const UNREADABLE_TAIL: &str = ". Nothing logged; send it again with names and weights (cooked rice 180g).";
+const PHOTO_UNREAD_REPLY: &str = "No food I could read in the photo(s), so nothing was logged. Reply with what was in it (salmon 100g, cooked rice 180g).";
 
 pub const HELP: &str = "Send what you ate, one item per line: salmon 100g, cooked rice 180g, cabbage 85g, or a recipe name (add a count like 2 x, or a weight).\nCommands: today (the day's card), week (the last seven days), undo (drop the last meal), fix <meal> (replace the last meal), help.\nA message with no food in it is saved as a note, not a meal.";
 
@@ -26,6 +38,10 @@ pub struct Config {
     pub recipes_dir: Option<PathBuf>,
     pub low_kcal: u32,
     pub kcal_target: u32,
+    /// The meal reader helper (`PIP_MODEL`, absolute path). `None` keeps the table-only behaviour.
+    pub model: Option<PathBuf>,
+    /// How long the reader gets before a meal counts as down (`PIP_MODEL_TIMEOUT`, seconds).
+    pub model_timeout: Duration,
 }
 
 impl Config {
@@ -51,7 +67,31 @@ impl Config {
             .and_then(|v| v.trim().parse::<u32>().ok())
             .filter(|k| *k > 0)
             .unwrap_or(DEFAULT_KCAL_TARGET);
-        Ok(Config { nutrition_dir, recipes_dir, low_kcal: daylog::low_kcal_threshold(), kcal_target })
+        let model = match std::env::var("PIP_MODEL") {
+            Ok(v) if !v.trim().is_empty() => {
+                let p = PathBuf::from(v.trim());
+                if !p.is_absolute() {
+                    return Err(format!("PIP_MODEL must be an absolute path, got {v:?}"));
+                }
+                Some(p)
+            }
+            _ => None,
+        };
+        let model_timeout = match std::env::var("PIP_MODEL_TIMEOUT") {
+            Ok(v) if !v.trim().is_empty() => match v.trim().parse::<u64>() {
+                Ok(s) if s > 0 => Duration::from_secs(s),
+                _ => return Err(format!("PIP_MODEL_TIMEOUT must be whole seconds, got {v:?}")),
+            },
+            _ => Duration::from_secs(DEFAULT_MODEL_TIMEOUT_SECS),
+        };
+        Ok(Config {
+            nutrition_dir,
+            recipes_dir,
+            low_kcal: daylog::low_kcal_threshold(),
+            kcal_target,
+            model,
+            model_timeout,
+        })
     }
 }
 
@@ -94,24 +134,54 @@ struct Analysis {
     skipped: Vec<String>,
     assumed: Vec<String>,
     is_meal: bool,
+    /// The reader was wired and gave nothing usable, so the table answered for the typed text.
+    down: bool,
+}
+
+/// The typed text's items: the reader's when it answers, else the table's. `true` when the reader was down.
+fn typed_of(s: &str, read: Option<&dyn Fn(&str) -> Option<Parsed>>) -> (Parsed, bool) {
+    match read {
+        None => (nutrition::parse_meal(s), false),
+        Some(f) => match f(s) {
+            Some(p) => (p, false),
+            None => (nutrition::parse_meal(s), true),
+        },
+    }
+}
+
+/// The message with its first recipe-name match taken out (ignoring ASCII case). `None` when the name is not in it.
+fn without_name(text: &str, name: &str) -> Option<String> {
+    if name.is_empty() {
+        return None;
+    }
+    let start = text.to_ascii_lowercase().find(&name.to_ascii_lowercase())?;
+    let end = start + name.len();
+    Some(format!("{}{}", &text[..start], &text[end..]))
 }
 
 /// Recipe first (a name match scales it), then the typed lines, then the merge where typed rows win.
-fn analyze(text: &str, recipes: &[Recipe]) -> Analysis {
+/// With a reader wired (`read`), a meal needs at least one item; without one, today's rule applies.
+fn analyze(text: &str, recipes: &[Recipe], read: Option<&dyn Fn(&str) -> Option<Parsed>>) -> Analysis {
     let hit = match recipes::resolve_or_refuse(text, recipes) {
         Ok(hit) => hit,
         Err(r) => {
             // A recipe line the typed text cannot use: the meal is still logged, with the refusal as its unknown.
-            let mut typed = nutrition::parse_meal(&r.rest);
+            let (mut typed, down) = typed_of(&r.rest, read);
             typed.unknown.insert(0, r.unknown);
-            return Analysis { parsed: typed, overridden: Vec::new(), recipe: None, skipped: Vec::new(), assumed: Vec::new(), is_meal: true };
+            let is_meal = read.is_none() || !typed.items.is_empty();
+            return Analysis { parsed: typed, overridden: Vec::new(), recipe: None, skipped: Vec::new(), assumed: Vec::new(), is_meal, down };
         }
     };
     let typed_text = hit.as_ref().map(|h| h.rest.clone()).unwrap_or_else(|| text.to_string());
-    let typed = nutrition::parse_meal(&typed_text);
+    // With a reader, it sees the whole message minus only the recipe name, so typed weights beside the name survive.
+    let model_text = match (&hit, read) {
+        (Some(h), Some(_)) => without_name(text, &h.matched).unwrap_or_else(|| typed_text.clone()),
+        _ => typed_text.clone(),
+    };
+    let (typed, down) = typed_of(&model_text, read);
     let Some(h) = hit else {
-        let is_meal = !typed.items.is_empty() || nutrition::looks_like_food(&typed_text);
-        return Analysis { parsed: typed, overridden: Vec::new(), recipe: None, skipped: Vec::new(), assumed: Vec::new(), is_meal };
+        let is_meal = if read.is_some() { !typed.items.is_empty() } else { !typed.items.is_empty() || nutrition::looks_like_food(&typed_text) };
+        return Analysis { parsed: typed, overridden: Vec::new(), recipe: None, skipped: Vec::new(), assumed: Vec::new(), is_meal, down };
     };
     let name = h.recipe.name.as_str();
     let (servings, how) = recipes::scale(&h, &typed);
@@ -140,7 +210,8 @@ fn analyze(text: &str, recipes: &[Recipe]) -> Analysis {
     if h.fuzzy {
         label.push_str(&format!(" · matched \"{}\"", h.matched));
     }
-    Analysis { parsed, overridden, recipe: Some(label), skipped: h.recipe.skipped.clone(), assumed, is_meal: true }
+    let is_meal = read.is_none() || !parsed.items.is_empty();
+    Analysis { parsed, overridden, recipe: Some(label), skipped: h.recipe.skipped.clone(), assumed, is_meal, down }
 }
 
 /// Today's kcal (rounded) and meal count, for a reply.
@@ -222,34 +293,52 @@ async fn log_message<M: Inbound>(
 ) -> Outcome {
     let recipe_list = cfg.recipes_dir.as_deref().map(recipes::load).unwrap_or_default();
     let subject = fix_rest.clone().unwrap_or_else(|| text.clone());
-    let an = analyze(&subject, &recipe_list);
-    if fix_rest.is_some() && (subject.is_empty() || !an.is_meal) {
-        if let Some(out) = claim(cfg, m, msg_id).await {
-            return out;
+    if fix_rest.is_some() && subject.is_empty() {
+        return fix_usage(cfg, m, msg_id).await;
+    }
+    let (an, paths) = match cfg.model.as_deref() {
+        None => {
+            let an = analyze(&subject, &recipe_list, None);
+            if fix_rest.is_some() && !an.is_meal {
+                return fix_usage(cfg, m, msg_id).await;
+            }
+            if !an.is_meal {
+                // Not a meal, so nothing stays owed for it: a failed photo download below must not block undo or fix.
+                let _ = daylog::paid(&cfg.nutrition_dir, msg_id);
+            }
+            match save_photos(cfg, m, day, &hhmm, msg_id, &files).await {
+                Ok(paths) => (an, paths),
+                Err(out) => return out,
+            }
         }
-        let _ = m.reply(FIX_USAGE).await;
-        let _ = m.react(SAVED_MARK).await;
-        return Outcome::Saved;
-    }
-    if !an.is_meal {
-        // Not a meal, so nothing stays owed for it: a failed photo download below must not block undo or fix.
-        let _ = daylog::paid(&cfg.nutrition_dir, msg_id);
-    }
-
-    let mut photos = Vec::new();
-    for (i, name) in files.iter().enumerate() {
-        let path = daylog::photo_path(&cfg.nutrition_dir, &day, &hhmm, msg_id, i, name);
-        let saved = match m.download(i).await {
-            Ok(bytes) => daylog::save_photo(&path, &bytes).map_err(|e| e.to_string()),
-            Err(e) => Err(e),
-        };
-        if let Err(e) = saved {
-            eprintln!("pip: photo {msg_id}/{i} failed: {e}");
-            let _ = m.react(FAILED_MARK).await;
-            return Outcome::Failed;
+        Some(cmd) => {
+            // The reader reads the saved photos, so they are saved before any analysis.
+            let paths = match save_photos(cfg, m, day, &hhmm, msg_id, &files).await {
+                Ok(paths) => paths,
+                Err(out) => return out,
+            };
+            let read = |t: &str| -> Option<Parsed> {
+                // Nothing to read (a recipe name with no typed rest, and no photo): no model call.
+                if t.trim().is_empty() && paths.is_empty() {
+                    return Some(Parsed::default());
+                }
+                match pip_model::read(cmd, t, &paths, cfg.model_timeout) {
+                    Reading::Read(p) => Some(p),
+                    Reading::Down => None,
+                }
+            };
+            let read_dyn: &dyn Fn(&str) -> Option<Parsed> = &read;
+            let an = analyze(&subject, &recipe_list, Some(read_dyn));
+            if fix_rest.is_some() && !an.is_meal {
+                return fix_usage(cfg, m, msg_id).await;
+            }
+            if !an.is_meal {
+                let _ = daylog::paid(&cfg.nutrition_dir, msg_id);
+            }
+            (an, paths)
         }
-        photos.push(path.file_name().unwrap_or_default().to_string_lossy().into_owned());
-    }
+    };
+    let photos: Vec<String> = paths.iter().map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned()).collect();
 
     if !an.is_meal {
         // Not food: a note block (never counted), so replays skip it and the check-in is still due.
@@ -263,12 +352,7 @@ async fn log_message<M: Inbound>(
                 return Outcome::Failed;
             }
         }
-        let reply = if text.is_empty() {
-            "Photo saved. I don't guess from photos; reply with what was in it (e.g. salmon 100g, cooked rice 180g).".to_string()
-        } else {
-            format!("No food in that, so it isn't logged as a meal: \"{text}\". Send items with weights (cooked rice 180g) or a recipe name; help lists commands.")
-        };
-        if let Err(e) = m.reply(&reply).await {
+        if let Err(e) = m.reply(&note_reply(cfg, &an, &text)).await {
             eprintln!("pip: reply on {msg_id} failed: {e}");
         }
         let _ = m.react(SAVED_MARK).await;
@@ -310,10 +394,14 @@ async fn log_message<M: Inbound>(
         }
     });
     let note = if parsed.items.is_empty() && parsed.unknown.is_empty() { Some(text.clone()) } else { None };
+    let mut lines: Vec<String> = parsed.items.iter().map(nutrition::item_line).collect();
+    if an.down {
+        lines.push(DOWN_LINE.to_string());
+    }
     let meal = Meal {
         msg_id,
         time,
-        lines: parsed.items.iter().map(nutrition::item_line).collect(),
+        lines,
         macros: nutrition::macros(&parsed.items),
         veg: nutrition::has_veg(&parsed.items),
         recipe,
@@ -339,6 +427,59 @@ async fn log_message<M: Inbound>(
     }
     let _ = m.react(SAVED_MARK).await;
     Outcome::Saved
+}
+
+/// The `fix` usage reply, claimed in the ledger first so a re-sent copy is skipped.
+async fn fix_usage<M: Inbound>(cfg: &Config, m: &M, msg_id: u64) -> Outcome {
+    if let Some(out) = claim(cfg, m, msg_id).await {
+        return out;
+    }
+    let _ = m.reply(FIX_USAGE).await;
+    let _ = m.react(SAVED_MARK).await;
+    Outcome::Saved
+}
+
+/// Downloads and saves every photo of the message, in order. A failed save marks the message and returns `Failed`.
+async fn save_photos<M: Inbound>(cfg: &Config, m: &M, day: &str, hhmm: &str, msg_id: u64, files: &[String]) -> Result<Vec<PathBuf>, Outcome> {
+    let mut paths = Vec::new();
+    for (i, name) in files.iter().enumerate() {
+        let path = daylog::photo_path(&cfg.nutrition_dir, day, hhmm, msg_id, i, name);
+        let saved = match m.download(i).await {
+            Ok(bytes) => daylog::save_photo(&path, &bytes).map_err(|e| e.to_string()),
+            Err(e) => Err(e),
+        };
+        if let Err(e) = saved {
+            eprintln!("pip: photo {msg_id}/{i} failed: {e}");
+            let _ = m.react(FAILED_MARK).await;
+            return Err(Outcome::Failed);
+        }
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+/// The reply for a message logged as a note (no meal). Without a reader it is today's wording; with one, it says
+/// what was not read, so he knows what to send again.
+fn note_reply(cfg: &Config, an: &Analysis, text: &str) -> String {
+    if cfg.model.is_none() {
+        return if text.is_empty() {
+            "Photo saved. I don't guess from photos; reply with what was in it (e.g. salmon 100g, cooked rice 180g).".to_string()
+        } else {
+            format!("No food in that, so it isn't logged as a meal: \"{text}\". Send items with weights (cooked rice 180g) or a recipe name; help lists commands.")
+        };
+    }
+    if an.down {
+        return DOWN_REPLY.to_string();
+    }
+    if !an.parsed.unknown.is_empty() {
+        let unread: Vec<String> = an.parsed.unknown.iter().map(|u| u.text.clone()).collect();
+        return format!("{UNREADABLE_HEAD}{}{UNREADABLE_TAIL}", unread.join("; "));
+    }
+    if text.is_empty() {
+        PHOTO_UNREAD_REPLY.to_string()
+    } else {
+        format!("No food in that, so it isn't logged as a meal: \"{text}\". Send items with weights (cooked rice 180g) or a recipe name; help lists commands.")
+    }
 }
 
 /// Claims a command id in the ledger before its action runs. `Some(outcome)` means stop: the id was already
@@ -449,8 +590,13 @@ fn meal_card(an: &Analysis, today: Option<&Totals>, kcal_target: u32) -> Rich {
         let value = format!("{} / {kcal_target} kcal · {} meal(s)", t.macros.kcal.round() as i64, t.meals);
         fields.push(("Today".to_string(), value, false));
     }
+    let mut text = reply_text(p, an.recipe.as_deref(), &an.overridden, &an.skipped, &an.assumed, today);
+    if an.down {
+        fields.push(("Reader".to_string(), DOWN_FIELD.to_string(), false));
+        text.push_str(&format!("\nReader: {DOWN_FIELD}"));
+    }
     Rich {
-        text: reply_text(p, an.recipe.as_deref(), &an.overridden, &an.skipped, &an.assumed, today),
+        text,
         title: format!("{} kcal", m.kcal.round() as i64),
         description: p.items.iter().map(nutrition::item_line).collect::<Vec<_>>().join("\n"),
         fields,

@@ -2,7 +2,7 @@
 use discord_inbox::nutrition::{self, Food, Item, Unit};
 
 fn model_item(grams: f64, estimated: bool) -> Item {
-    Item { food: Food::model("cooked egg noodles", 138.0, 4.5, 25.0, 2.1, false), grams, unit: Unit::G, qty: grams, assumed: false, estimated }
+    Item { food: Food::model("cooked egg noodles", 138.0, 4.5, 25.0, 2.1, false), grams, unit: Unit::G, qty: grams, assumed: false, estimated, scale: false }
 }
 
 #[test]
