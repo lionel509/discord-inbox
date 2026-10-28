@@ -225,7 +225,7 @@ pub fn list_sql(names: &[String]) -> String {
         "SELECT '#cal', title FROM Calendar WHERE title IN ({names});
 SELECT DISTINCT i.UUID, c.title,
   CASE WHEN i.all_day = 1 THEN date(o.day + 978307200, 'unixepoch', 'localtime') ELSE date(o.occurrence_date + 978307200, 'unixepoch', 'localtime') END AS d,
-  CASE WHEN i.all_day = 1 THEN 'allday' ELSE strftime('%H:%M', o.occurrence_date + 978307200, 'unixepoch', 'localtime') || ifnull('-' || strftime('%H:%M', o.occurrence_end_date + 978307200, 'unixepoch', 'localtime'), '') END AS t,
+  CASE WHEN i.all_day = 1 THEN 'allday' ELSE strftime('%H:%M', o.occurrence_date + 978307200, 'unixepoch', 'localtime') || CASE WHEN o.occurrence_end_date > o.occurrence_date THEN '-' || strftime('%H:%M', o.occurrence_end_date + 978307200, 'unixepoch', 'localtime') ELSE '' END END AS t,
   replace(replace(ifnull(i.summary, ''), char(13), ' '), char(10), ' ')
 FROM OccurrenceCache o JOIN CalendarItem i ON i.ROWID = o.event_id JOIN Calendar c ON c.ROWID = i.calendar_id
 WHERE c.title IN ({names}) AND i.UUID IS NOT NULL AND (i.all_day = 1 OR o.occurrence_start_date IS NULL)

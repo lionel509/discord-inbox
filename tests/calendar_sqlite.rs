@@ -449,3 +449,18 @@ fn cant_slip_skips_untitled_items() {
     let facts = daily::morning_facts(&empty_dir("mf3b"), &evs, None, d(2026, 10, 28));
     assert_eq!(facts.lines().last(), Some("Can't slip: HW 7 due. Biggest free gap: 08:00-22:00."), "{facts}");
 }
+
+// A timed item with no end is one instant, not a span running to the next day (#138 MF4). Its time shows as one clock time.
+#[test]
+fn zero_length_event_shows_one_time() {
+    let _g = lock();
+    let db = tmp_file("mf4-zero.sqlitedb");
+    let sql = format!(
+        "{SCHEMA}\nINSERT INTO Calendar (ROWID, title) VALUES (1, 'CHEM 103 - Exams');\nINSERT INTO CalendarItem (ROWID, summary, start_date, start_tz, all_day, calendar_id, has_recurrences, UUID) VALUES (1, 'Quiz 3 closes', 814937400, 'America/New_York', 0, 1, 0, 'u-zero');\nINSERT INTO OccurrenceCache (day, event_id, calendar_id, store_id, occurrence_date, occurrence_start_date, occurrence_end_date) VALUES (814852800, 1, 1, 1, 814937400, NULL, 814937400);\n"
+    );
+    build_db(&db, &sql);
+    let evs = calendar::list(&cal_db(&["CHEM 103 - Exams"], db.clone())).unwrap();
+    let _ = std::fs::remove_file(&db);
+    assert_eq!(evs.len(), 1, "{evs:?}");
+    assert_eq!(evs[0].time, Some("23:30".into()));
+}

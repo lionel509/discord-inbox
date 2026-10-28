@@ -165,7 +165,7 @@ fn due_word(e: &Event) -> bool {
     e.summary.to_lowercase().split(|c: char| !c.is_alphanumeric()).any(|w| matches!(w, "due" | "deadline" | "closes" | "submit"))
 }
 
-// Minutes since midnight for "HH:MM" or "HH:MM-HH:MM". An end at or before the start is past midnight; no end counts as one minute.
+// Minutes since midnight for "HH:MM" or "HH:MM-HH:MM". An end before the start is past midnight; no end, or an end equal to the start, counts as one minute.
 fn span_min(time: &str) -> Option<(u32, u32)> {
     let (s, e) = match time.split_once('-') {
         Some((s, e)) => (s, Some(e)),
@@ -173,8 +173,13 @@ fn span_min(time: &str) -> Option<(u32, u32)> {
     };
     let m = |t: &str| NaiveTime::parse_from_str(t.trim(), "%H:%M").ok().map(|t| t.hour() * 60 + t.minute());
     let s = m(s)?;
-    let e = e.and_then(m).map(|e| if e <= s { e + 1440 } else { e }).unwrap_or(s + 1);
+    let e = e.and_then(m).filter(|&e| e != s).map(|e| if e < s { e + 1440 } else { e }).unwrap_or(s + 1);
     Some((s, e))
+}
+
+// A point in time (no end, or an end equal to the start) blocks no time and overlaps nothing.
+fn busy(time: &str) -> Option<(u32, u32)> {
+    span_min(time).filter(|(s, e)| e - s > 1)
 }
 
 // Last day of the all-day run of e.uid that covers `today` (consecutive dates with the same uid).
@@ -290,13 +295,13 @@ pub fn morning_facts(todo_dir: &Path, events: &[Event], weather: Option<&Weather
         out.push("Timeline:".to_string());
         for (i, e) in timeline.iter().enumerate() {
             let mut line = event_line(e);
-            if let Some((s, en)) = e.time.as_deref().and_then(span_min) {
+            if let Some((s, en)) = e.time.as_deref().and_then(busy) {
                 let other = timeline
                     .iter()
                     .enumerate()
                     .filter(|(j, _)| *j != i)
                     .map(|(_, o)| o)
-                    .find(|o| o.time.as_deref().and_then(span_min).is_some_and(|(os, oe)| s < oe && os < en));
+                    .find(|o| o.time.as_deref().and_then(busy).is_some_and(|(os, oe)| s < oe && os < en));
                 if let Some(o) = other {
                     line += &format!(", overlaps {}", o.summary);
                 }
@@ -336,7 +341,7 @@ pub fn morning_facts(todo_dir: &Path, events: &[Event], weather: Option<&Weather
     must.truncate(2);
     let clock = |t: &str| span_min(t).map_or(0, |s| s.0);
     let end = clock(GAP_TO);
-    let mut spans: Vec<(u32, u32)> = timeline.iter().filter_map(|e| e.time.as_deref().and_then(span_min)).collect();
+    let mut spans: Vec<(u32, u32)> = timeline.iter().filter_map(|e| e.time.as_deref().and_then(busy)).collect();
     spans.sort();
     let mut cur = clock(GAP_FROM);
     let mut best = (cur, cur);
