@@ -53,12 +53,13 @@ const TOKENS: &[Token] = &[
     Token { prefix: "Bearer ", ci: true, min: 20, keep: true, allowed: token_char },
 ];
 
-/// Masks every sensitive value in `text`. Numbers first, then secrets, so each value is masked once.
+/// Masks every sensitive value in `text`. Secrets first, so a token is matched whole before a card rule stars
+/// part of it (#140: a card inside a Bearer token leaked its last four digits). Then numbers, SSNs and accounts.
 pub fn sensitive(text: &str) -> String {
-    let text = mask_numbers(text);
+    let text = mask_secrets(text);
+    let text = mask_numbers(&text);
     let text = mask_ssns(&text);
-    let text = mask_labelled_accounts(&text);
-    mask_secrets(&text)
+    mask_labelled_accounts(&text)
 }
 
 fn digit(c: char) -> bool {
