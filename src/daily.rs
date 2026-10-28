@@ -284,7 +284,9 @@ pub fn voice(chat: &dyn Chat, slot: Slot, facts: &str) -> String {
             let long = t.chars().count() > 1500;
             let (lower, lower_facts) = (t.to_lowercase(), facts.to_lowercase());
             let rain = ["umbrella", "rain", "poncho", "\u{2614}", "\u{1f302}"].iter().any(|w| lower.matches(w).count() > lower_facts.matches(w).count());
-            if short || long || rain { facts.to_string() } else { text }
+            // Every numbered fact line ("N. text") must appear verbatim, or "done N" in the reply points at an item he did not see.
+            let lost = facts.lines().map(str::trim).filter(|l| l.split_once(". ").is_some_and(|(n, _)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))).any(|l| !t.contains(l));
+            if short || long || rain || lost { facts.to_string() } else { text }
         }
         Err(_) => facts.to_string(),
     }
