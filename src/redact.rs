@@ -53,13 +53,14 @@ const TOKENS: &[Token] = &[
     Token { prefix: "Bearer ", ci: true, min: 20, keep: true, allowed: token_char },
 ];
 
-/// Masks every sensitive value in `text`. Secrets first, so a token is matched whole before a card rule stars
-/// part of it (#140: a card inside a Bearer token leaked its last four digits). Then numbers, SSNs and accounts.
+/// Masks every sensitive value in `text`. Numbers first, so every card is starred before the label rules read
+/// their values (a label value stops at whitespace, and a spaced card would leak its later groups: #141). Token
+/// runs cross the stars, so a card inside a token is redacted with the token (#140).
 pub fn sensitive(text: &str) -> String {
-    let text = mask_secrets(text);
-    let text = mask_numbers(&text);
+    let text = mask_numbers(text);
     let text = mask_ssns(&text);
-    mask_labelled_accounts(&text)
+    let text = mask_labelled_accounts(&text);
+    mask_secrets(&text)
 }
 
 fn digit(c: char) -> bool {
@@ -316,7 +317,12 @@ fn secret_at(c: &[char], i: usize) -> Option<(usize, usize)> {
                 if t.ci { a.eq_ignore_ascii_case(&b) } else { *a == b }
             });
         if matched {
-            let run = c[i + n..].iter().take_while(|&&ch| (t.allowed)(ch)).count();
+            // `*` is in the run so a card the number rule already starred stays inside the token. A trailing `*`
+            // is never part of a starred card (it ends in four kept digits), so it is Discord bold, not token.
+            let mut run = c[i + n..].iter().take_while(|&&ch| (t.allowed)(ch) || ch == '*').count();
+            while run > 0 && c[i + n + run - 1] == '*' {
+                run -= 1;
+            }
             if run >= t.min {
                 return Some((if t.keep { i + n } else { i }, i + n + run));
             }
