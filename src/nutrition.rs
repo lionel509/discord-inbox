@@ -49,6 +49,73 @@ pub fn typed_grams(text: &str) -> Vec<f64> {
     scan(text).amounts.iter().filter(|a| a.kind == Kind::Mass).map(|a| a.value).collect()
 }
 
+/// One weight he typed and the food words beside it (#130 rework).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TypedSpan {
+    pub grams: f64,
+    pub words: Vec<String>,
+}
+
+/// Words that never name a food in a typed span: articles, prep words and two-letter function words.
+const STOP: &[&str] = &[
+    "and", "the", "with", "some", "cooked", "raw", "fresh", "plain", "grilled", "fried", "boiled", "steamed", "baked", "roasted", "about", "around", "had", "ate", "for", "of", "in", "on", "an", "or", "at", "to", "my", "it", "is", "as", "by", "up", "so", "me", "we",
+];
+/// Misspellings of "grams" he types in place of `g` (`100 grnas`). A closed list: no fuzzy match, so `2 glass` is never grams.
+const GRAM_TYPOS: &[&str] = &["gm", "gms", "gr", "grs", "grm", "grms", "grma", "grmas", "grnas", "garms", "gramm", "gramms"];
+
+/// The food words of `s`: lowercase words of 2+ characters (or one non-ASCII character, such as 밥), minus digits and STOP.
+pub fn meal_words(s: &str) -> Vec<String> {
+    norm(s).split_whitespace().filter(|w| (w.chars().count() >= 2 || !w.is_ascii()) && !w.chars().all(|c| c.is_ascii_digit()) && !STOP.contains(w)).map(String::from).collect()
+}
+
+/// A misspelt "grams" word, from the closed list.
+fn is_gram_typo(w: &str) -> bool {
+    GRAM_TYPOS.contains(&w)
+}
+
+/// Every typed weight in `text` with the food words beside it, read per piece of `split_pieces`. A weight is a mass
+/// amount (`100g`, `8 oz`) or a gram misspelling after a bare number (`100 grnas`). Counts, volumes and pieces never
+/// make a span, and a weight with no food word beside it makes none.
+pub fn typed_spans(text: &str) -> Vec<TypedSpan> {
+    let mut out = Vec::new();
+    for piece in split_pieces(text) {
+        let sc = scan(&piece);
+        let t = &sc.text;
+        // Every amount of any kind, as a byte span: a food's text stops at the next amount.
+        let mut all: Vec<(usize, usize)> = Vec::new();
+        // The weights in order: (grams, start, end).
+        let mut w: Vec<(f64, usize, usize)> = Vec::new();
+        for a in &sc.amounts {
+            let typo = a.kind == Kind::Bare && is_gram_typo(&a.after);
+            let mut end = a.end;
+            if typo {
+                let rest = &t[a.end..];
+                let lead = rest.len() - rest.trim_start().len();
+                end = a.end + lead + a.after.len();
+            }
+            all.push((a.start, end));
+            if a.kind == Kind::Mass || typo {
+                w.push((a.value, a.start, end));
+            }
+        }
+        if w.is_empty() {
+            continue;
+        }
+        let next_start = |e: usize| all.iter().map(|&(s, _)| s).filter(|&s| s >= e).min().unwrap_or(t.len());
+        let prev_end = |s: usize| all.iter().map(|&(_, e)| e).filter(|&e| e <= s).max().unwrap_or(0);
+        let last_end = w[w.len() - 1].2;
+        let food_first = meal_words(&t[last_end..next_start(last_end)]).is_empty();
+        for &(grams, start, end) in &w {
+            let food = if food_first { &t[prev_end(start)..start] } else { &t[end..next_start(end)] };
+            let words = meal_words(food);
+            if !words.is_empty() {
+                out.push(TypedSpan { grams, words });
+            }
+        }
+    }
+    out
+}
+
 pub const FOODS: &[Food] = &[
     Food { name: "salmon", aliases: &["salmon fillet", "atlantic salmon", "skinless salmon"], kcal: 208.0, protein: 20.4, carbs: 0.0, fat: 13.4, veg: false, cup_g: None, piece_g: Some(150.0), portion_g: 100.0, source: "USDA SR 15236" },
     Food { name: "dry rice", aliases: &["raw rice", "uncooked rice", "white rice dry", "rice dry"], kcal: 365.0, protein: 7.1, carbs: 80.0, fat: 0.7, veg: false, cup_g: Some(185.0), piece_g: None, portion_g: 92.5, source: "USDA SR 20044" },

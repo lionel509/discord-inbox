@@ -603,7 +603,7 @@ fn food_words(f: &nutrition::Food) -> Vec<String> {
     std::iter::once(f.name).chain(f.aliases.iter().copied()).flat_map(words).collect()
 }
 
-fn word_match(a: &str, b: &str) -> bool {
+pub(crate) fn word_match(a: &str, b: &str) -> bool {
     a == b
         || a.strip_suffix('s') == Some(b)
         || b.strip_suffix('s') == Some(a)

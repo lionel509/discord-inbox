@@ -1,5 +1,4 @@
 //! #130 unit A: the model's JSON becomes items only through `enforce`; typed weights are checked against his text.
-use discord_inbox::nutrition;
 use discord_inbox::pip_model::{self, Reading};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
