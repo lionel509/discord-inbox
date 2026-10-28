@@ -522,3 +522,59 @@ fn tz_pin_ignores_the_process_zone() {
     assert_eq!(q.date, "2026-10-28");
     assert_eq!(q.time, Some("23:30".into()));
 }
+
+// Can't slip lists every unchecked item due today before any Due soon item (#138 MF-A).
+#[test]
+fn cant_slip_puts_unchecked_due_today_before_due_soon() {
+    let _g = lock();
+    let evs = vec![
+        all_day("u-lab", "ESE 999 - Exams", "2026-10-28", "Lab 2 (project)"),
+        all_day("u-fund", "Career", "2026-10-30", "DEADLINE: Fund application"),
+    ];
+    let facts = daily::morning_facts(&empty_dir("mfa1"), &evs, None, d(2026, 10, 28));
+    assert_eq!(facts.lines().last(), Some("Can't slip: Lab 2 (project), DEADLINE: Fund application. Biggest free gap: 08:00-22:00."), "{facts}");
+}
+
+// Every unchecked due-today item is named, in its order, with no cap (#138 MF-A).
+#[test]
+fn cant_slip_names_every_unchecked_due_today_item() {
+    let _g = lock();
+    let evs = vec![
+        all_day("u-a", "ESE 999 - Exams", "2026-10-28", "HW 7 due"),
+        all_day("u-b", "ESE 999 - Exams", "2026-10-28", "Lab 3 report"),
+        all_day("u-c", "ESE 999 - Exams", "2026-10-28", "Problem set 4"),
+        all_day("u-d", "ESE 999 - Exams", "2026-10-28", "✅ HW 6 due"),
+    ];
+    let facts = daily::morning_facts(&empty_dir("mfa2"), &evs, None, d(2026, 10, 28));
+    assert_eq!(facts.lines().last(), Some("Can't slip: HW 7 due, Lab 3 report, Problem set 4. Biggest free gap: 08:00-22:00."), "{facts}");
+}
+
+// A due-titled item on a Lectures calendar is in Due soon and in Can't slip (#138 MF-C).
+#[test]
+fn due_soon_lists_a_due_titled_lectures_item() {
+    let _g = lock();
+    let evs = vec![Event {
+        uid: "u-q5".into(),
+        calendar: "CHEM 999 - Lectures".into(),
+        date: "2026-10-29".into(),
+        time: Some("18:00-19:00".into()),
+        summary: "Quiz 5 due".into(),
+    }];
+    let facts = daily::morning_facts(&empty_dir("mfc"), &evs, None, d(2026, 10, 28));
+    assert!(facts.contains("- Quiz 5 due (CHEM 999 - Lectures), 2026-10-29"), "{facts}");
+    assert_eq!(facts.lines().last(), Some("Can't slip: Quiz 5 due. Biggest free gap: 08:00-22:00."), "{facts}");
+}
+
+// A failed read: the model's reply is not sent; the unread facts stand (#138 MF-E).
+#[test]
+fn failed_read_dm_ignores_the_model() {
+    let _g = lock();
+    let deps = Deps {
+        todo_dir: empty_dir("mfe"),
+        cal: Some(cal_db(CHEM, PathBuf::from("/nonexistent/Calendar.sqlitedb"))),
+        chat: Arc::new(Fixed("Tomorrow first: nothing on the calendar.\nTodo: nothing open\nWhich ones did you finish?".into())),
+    };
+    let text = daily::compose(&deps, Slot::Night, d(2026, 10, 28));
+    assert!(text.contains("unknown, the calendar didn't load"), "{text}");
+    assert!(!text.contains("nothing on the calendar"), "{text}");
+}
