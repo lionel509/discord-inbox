@@ -45,6 +45,7 @@ fn body_start(lines: &[&str]) -> (usize, Option<usize>) {
 
 /// Strip a bullet marker from an open line.
 fn bullet_text(trimmed: &str) -> &str {
+    let trimmed = trimmed.trim_start_matches('\u{feff}');
     let t = trimmed
         .strip_prefix("- [ ] ")
         .or_else(|| trimmed.strip_prefix("* [ ] "))
@@ -55,10 +56,12 @@ fn bullet_text(trimmed: &str) -> &str {
 }
 
 fn is_open(trimmed: &str) -> bool {
-    // A ticked box is done, and a rule line (`---`, `***`, `___`) is not an item.
-    let ticked = ["- [x]", "- [X]", "* [x]", "* [X]"].iter().any(|p| trimmed.starts_with(p));
-    let rule = trimmed.chars().count() >= 3 && trimmed.chars().all(|c| matches!(c, '-' | '*' | '_' | ' '));
-    !trimmed.is_empty() && !ticked && !rule && !trimmed.starts_with('#') && !trimmed.starts_with("~~") && !trimmed.starts_with("Hub:") && !trimmed.starts_with('>')
+    let trimmed = trimmed.trim_start_matches('\u{feff}').trim();
+    let t = bullet_text(trimmed);
+    // An item needs some text: a bare box, a rule line (`---`, `***`) or an empty bullet is not one. A ticked box or a struck item is done.
+    let has_text = t.chars().any(|c| c.is_alphanumeric());
+    let done = t.starts_with("[x]") || t.starts_with("[X]") || t.starts_with("~~");
+    !trimmed.is_empty() && has_text && !done && !trimmed.starts_with('#') && !trimmed.starts_with("Hub:") && !trimmed.starts_with('>')
 }
 
 /// Normalised form used for duplicate checks: no bullet, no strike marks, trimmed.
@@ -148,7 +151,7 @@ pub fn mark_done(item: &Item, day: NaiveDate) -> Result<(), String> {
             let mut lines: Vec<String> = body.lines().map(|l| l.to_string()).collect();
             let line = lines.get(*idx).ok_or("line index out of range")?.clone();
             // Already struck (a repeat reply, or two at once): leave it as it is.
-            if line.trim().starts_with("~~") {
+            if bullet_text(line.trim()).starts_with("~~") {
                 return Ok(());
             }
             let text = bullet_text(line.trim());
