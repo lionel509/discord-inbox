@@ -189,10 +189,26 @@ fn due_soon(events: &[Event], today: NaiveDate) -> Vec<String> {
 }
 
 // Today's open list: the day file first, then the standing notes.
-fn check_items(todo_dir: &Path, day: NaiveDate) -> Vec<Item> {
+pub fn check_items(todo_dir: &Path, day: NaiveDate) -> Vec<Item> {
     let mut v = todo::day_items(todo_dir, day);
     v.extend(todo::note_items(todo_dir));
     v
+}
+
+/// Where the night DM's numbered list is kept, one item text per line, so the reply is read against the list as it was sent.
+pub fn list_path(inbox: &Path, day: &str) -> PathBuf {
+    marker_path(inbox, Slot::Night, day).with_extension("list")
+}
+
+pub fn save_list(inbox: &Path, day: &str, items: &[Item]) -> Result<(), String> {
+    let path = list_path(inbox, day);
+    let body: String = items.iter().map(|it| format!("{}\n", it.text.replace(['\r', '\n'], " "))).collect();
+    fs::write(&path, body).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+pub fn load_list(inbox: &Path, day: &str) -> Option<Vec<String>> {
+    let body = fs::read_to_string(list_path(inbox, day)).ok()?;
+    Some(body.lines().map(str::to_string).collect())
 }
 
 pub fn morning_facts(todo_dir: &Path, events: &[Event], weather: Option<&Weather>, today: NaiveDate) -> String {
@@ -293,12 +309,12 @@ pub fn compose(deps: &Deps, slot: Slot, today: NaiveDate) -> String {
     redact::sensitive(text.trim()).chars().take(MAX_CHARS).collect()
 }
 
-pub fn answer_prompt(items: &[Item], reply: &str, day: NaiveDate) -> (String, String) {
+pub fn answer_prompt(texts: &[String], reply: &str, day: NaiveDate) -> (String, String) {
     let system = "You read Lionel's reply to his night check-in. Reply with only a JSON object: {\"checkin\": true or false, \"done\": [numbers of the listed items he finished], \"tomorrow\": [new tasks he names for tomorrow that are not already in the list]}. Set checkin to false when the message is not a check-in. Use only numbers from the list. Do not invent tasks.".to_string();
-    let list = if items.is_empty() {
+    let list = if texts.is_empty() {
         "(no open items)".to_string()
     } else {
-        items.iter().enumerate().map(|(i, it)| format!("{}. {}", i + 1, it.text)).collect::<Vec<_>>().join("\n")
+        texts.iter().enumerate().map(|(i, t)| format!("{}. {t}", i + 1)).collect::<Vec<_>>().join("\n")
     };
     let user = format!("Date: {}\nOpen items:\n{list}\n\nReply:\n{reply}", ymd(day));
     (system, user)
@@ -364,16 +380,35 @@ pub fn apply(todo_dir: &Path, day: NaiveDate, items: &[Item], a: &Answer) -> Res
     Ok((done, carried))
 }
 
-/// The night reply. `Ok(None)` when the message is not a check-in: nothing is written. `Err` when the model is down or its reply is unreadable: nothing is written either, so the caller files the message as usual.
+// The model's numbers name the list as it was sent. Each becomes the first unused item in the live list with the same text, or nothing when that item is gone.
+fn remap_done(done: &[usize], shown: &[String], current: &[String]) -> Vec<usize> {
+    let mut used = vec![false; current.len()];
+    let mut out = Vec::new();
+    for &k in done {
+        let Some(text) = k.checked_sub(1).and_then(|i| shown.get(i)) else {
+            continue;
+        };
+        if let Some(j) = (0..current.len()).find(|&j| !used[j] && current[j] == *text) {
+            used[j] = true;
+            out.push(j + 1);
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The night reply. `sent` is the list the DM numbered (see `load_list`); without it the live list is used. `Ok(None)` when the message is not a check-in: nothing is written. `Err` when the model is down or its reply is unreadable: nothing is written either, so the caller files the message as usual.
 pub fn answer(deps: &Deps, day: NaiveDate, reply: &str, sent: Option<Vec<String>>) -> Result<Option<String>, String> {
-    let _ = sent; // the numbering fix (MUST-FIX 9) reads this
     let items = check_items(&deps.todo_dir, day);
-    let (system, user) = answer_prompt(&items, reply, day);
+    let current: Vec<String> = items.iter().map(|it| it.text.clone()).collect();
+    let shown = sent.unwrap_or_else(|| current.clone());
+    let (system, user) = answer_prompt(&shown, reply, day);
     let raw = deps.chat.ask(&system, &user).map_err(|_| "check-in model unavailable".to_string())?;
-    let a = parse_answer(&raw, items.len()).ok_or_else(|| "check-in model unavailable".to_string())?;
+    let mut a = parse_answer(&raw, shown.len()).ok_or_else(|| "check-in model unavailable".to_string())?;
     if !a.checkin {
         return Ok(None);
     }
+    a.done = remap_done(&a.done, &shown, &current);
     let (done, carried) = apply(&deps.todo_dir, day, &items, &a)?;
     todo::log_checkin(&deps.todo_dir, day, reply, &done, &carried)?;
     let list = |v: &[String]| if v.is_empty() { "nothing".to_string() } else { v.join(", ") };

@@ -333,3 +333,12 @@ fn prompts_carry_the_guard_rails() {
     let (system, _) = daily::answer_prompt(&[], "x", day());
     assert!(system.contains("not already in the list"), "{system}");
 }
+
+#[test]
+fn saved_list_round_trips_for_the_reply() {
+    let inbox = tmp("list-roundtrip");
+    let items = vec![todo::Item { text: "alpha".into(), place: todo::Place::Note { file: inbox.join("Alpha.md") } }];
+    daily::save_list(&inbox, "2026-10-20", &items).unwrap();
+    assert_eq!(daily::load_list(&inbox, "2026-10-20"), Some(vec!["alpha".to_string()]));
+    assert_eq!(daily::load_list(&inbox, "2026-10-21"), None);
+}

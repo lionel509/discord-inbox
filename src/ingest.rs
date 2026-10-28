@@ -434,13 +434,14 @@ pub async fn ingest_with<M: Inbound>(
         let open = crate::daily::awaiting(inbox, chrono::Local::now().naive_local());
         if let Some(day) = open.filter(|d| crate::daily::after_send(inbox, d, &incoming.received)) {
             if let Ok(day_date) = chrono::NaiveDate::parse_from_str(&day, "%Y-%m-%d") {
+                let sent = crate::daily::load_list(inbox, &day);
                 let deps = crate::daily::Deps {
                     todo_dir: filer.vaults.root().join(crate::todo::DIR),
                     cal: crate::calendar::Cal::from_env(),
                     chat: filer.chat.clone(),
                 };
                 let message = incoming.content.clone();
-                let r = typing_while(m, tokio::task::spawn_blocking(move || crate::daily::answer(&deps, day_date, &message, None)))
+                let r = typing_while(m, tokio::task::spawn_blocking(move || crate::daily::answer(&deps, day_date, &message, sent)))
                     .await
                     .map_err(|e| e.to_string())
                     .and_then(|r| r);

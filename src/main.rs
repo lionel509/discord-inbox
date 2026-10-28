@@ -1,6 +1,6 @@
 use discord_inbox::allowlist::{self, Allowlist};
 use discord_inbox::calendar::Cal;
-use discord_inbox::daily::{self, Deps};
+use discord_inbox::daily::{self, Deps, Slot};
 use discord_inbox::dump;
 use discord_inbox::chat::{self, OpenRouter};
 use discord_inbox::ingest::{catch_up_with, ingest_with, Filer};
@@ -142,6 +142,12 @@ impl EventHandler for Handler {
                         continue;
                     }
                 };
+                // The night reply is read against the list this DM numbers, so save it before the DM goes out.
+                if matches!(slot, Slot::Night) {
+                    if let Err(e) = daily::save_list(&inbox, &day, &daily::check_items(&todo_dir, today)) {
+                        eprintln!("discord-inbox: daily night list for {day} not saved: {e}");
+                    }
+                }
                 for uid in &ids {
                     let sent = match UserId::new(*uid).create_dm_channel(&http).await {
                         Ok(dm) => dm.id.say(&http, &text).await.map_err(|e| e.to_string()),
