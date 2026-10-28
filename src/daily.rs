@@ -334,11 +334,21 @@ pub fn morning_facts(todo_dir: &Path, events: &[Event], weather: Option<&Weather
     }
 
     // The closing line: what must not slip, and the longest free stretch of the day between GAP_FROM and GAP_TO.
-    let mut must: Vec<String> = due.iter().filter(|e| !e.done() && due_word(e)).map(|e| e.summary.clone()).collect();
-    must.extend(timeline.iter().filter(|e| is_exam(e) && !e.done()).map(|e| e.summary.clone()));
-    must.extend(due_soon_events(events, today).into_iter().filter(|e| due_word(e) || is_exam(e)).map(|e| e.summary.clone()));
-    must.dedup();
-    must.truncate(2);
+    // Every unchecked item due today, then every unchecked exam from today to three days on (any calendar), then Due soon titles while there are fewer than two names. A name is listed once.
+    let days_from_today = |e: &Event| NaiveDate::parse_from_str(&e.date, "%Y-%m-%d").ok().map(|x| (x - today).num_days());
+    let mut exams: Vec<&Event> = events.iter().filter(|e| !e.done() && is_exam(e) && days_from_today(e).is_some_and(|g| (0..=3).contains(&g))).collect();
+    exams.sort_by(|a, b| (a.date.as_str(), a.time.as_deref()).cmp(&(b.date.as_str(), b.time.as_deref())));
+    let mut must: Vec<String> = due.iter().filter(|e| !e.done()).map(|e| e.summary.clone()).collect();
+    must.extend(exams.iter().map(|e| e.summary.clone()));
+    let mut soon = due_soon_events(events, today).into_iter().filter(|e| due_word(e) || is_exam(e));
+    while must.len() < 2 {
+        match soon.next() {
+            Some(e) => must.push(e.summary.clone()),
+            None => break,
+        }
+    }
+    let mut named = std::collections::HashSet::new();
+    must.retain(|s| named.insert(s.clone()));
     let clock = |t: &str| span_min(t).map_or(0, |s| s.0);
     let end = clock(GAP_TO);
     let mut spans: Vec<(u32, u32)> = timeline.iter().filter_map(|e| e.time.as_deref().and_then(busy)).collect();

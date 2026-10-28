@@ -375,7 +375,7 @@ fn span_is_one_background_line() {
 fn closing_names_what_cant_slip_and_the_gap() {
     let _g = lock();
     let mf = morning_all();
-    assert_eq!(mf.lines().last(), Some("Can't slip: Quiz 3 closes, Lab 5 report due. Biggest free gap: 13:30-22:00."), "{mf}");
+    assert_eq!(mf.lines().last(), Some("Can't slip: Quiz 3 closes, CHEM 103 Midterm. Biggest free gap: 13:30-22:00."), "{mf}");
 }
 
 #[test]
