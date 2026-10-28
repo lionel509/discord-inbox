@@ -24,7 +24,7 @@ pub const DRINK_HINT: &str = "size and regular/diet aren't on the receipt, so no
 
 /// Lines with these words are card, payment and store lines, never food.
 const SKIP: &[&str] = &[
-    "tax", "tip", "balance", "payment", "paid", "tender", "change", "card", "visa", "mastercard", "amex",
+    "tax", "tip", "balance", "payment", "paid", "change", "card", "visa", "mastercard", "amex",
     "discover", "cash", "credit", "debit", "auth", "approval", "approved", "order", "check", "table", "server",
     "cashier", "guest", "receipt", "thank", "store", "tel", "phone", "ref", "transaction", "coupon", "discount",
     "promo", "savings",
@@ -43,8 +43,12 @@ const FIXES: &[(&str, &str)] = &[
 ];
 
 /// Whether the OCR text is a receipt: a total line and a price somewhere. Menus, nutrition labels and food photos fail.
+/// A total line with a price on it or on the line straight after (Vision can split the price onto the next line).
 pub fn is_receipt(ocr: &str) -> bool {
-    ocr.lines().any(is_total_line) && ocr.lines().any(has_price)
+    let lines: Vec<&str> = ocr.lines().collect();
+    lines.iter().enumerate().any(|(i, l)| {
+        is_total_line(l) && (has_price(l) || lines.get(i + 1).is_some_and(|next| has_price(next)))
+    })
 }
 
 /// `YYYY-MM-DD` for the day before `day`, or `None` when `day` isn't a date.
