@@ -181,3 +181,80 @@ fn labels_inside_long_token_run_are_linear() {
     let _ = sensitive(&input);
     assert!(t.elapsed().as_secs_f64() < 1.0, "took {:?}", t.elapsed());
 }
+
+// #141 rework r2 breaker: a label inside a token never reaches past the token; a label ending at the token's end is a stand-alone label.
+#[test]
+fn bold_wrapped_bearer_label_keeps_closing_markup() {
+    let out = sensitive("**Bearer abcdefghijklmnopqrst.password=hunter22**");
+    assert_eq!(out, "**Bearer [redacted]**");
+    assert!(!out.contains("hunter22"));
+}
+
+#[test]
+fn backtick_wrapped_bearer_label_keeps_closing_backtick() {
+    assert_eq!(sensitive("`Bearer abcdefghijklmnopqrst.token=xyz`"), "`Bearer [redacted]`");
+}
+
+#[test]
+fn parenthesised_bearer_label_keeps_closing_paren() {
+    assert_eq!(sensitive("(Bearer abcdefghijklmnopqrst.token=xyz) done"), "(Bearer [redacted]) done");
+}
+
+#[test]
+fn json_bearer_label_keeps_rest_of_line() {
+    assert_eq!(
+        sensitive(r#"{"auth":"Bearer abcdefghijklmnopqrst.token=xyz","n":1}"#),
+        r#"{"auth":"Bearer [redacted]","n":1}"#
+    );
+}
+
+#[test]
+fn url_userinfo_label_keeps_host() {
+    assert_eq!(sensitive("https://user:token=abc@example.com/x"), "https://user:[redacted]@example.com/x");
+}
+
+#[test]
+fn bold_bearer_empty_in_run_value_keeps_markup() {
+    assert_eq!(sensitive("**Bearer abcdefghijklmnopqrst.token=**"), "**Bearer [redacted]**");
+}
+
+#[test]
+fn url_userinfo_password_label_keeps_host() {
+    let out = sensitive("https://user:password:hunter22@example.com/x");
+    assert_eq!(out, "https://user:[redacted]@example.com/x");
+    assert!(!out.contains("hunter22"));
+}
+
+#[test]
+fn two_labels_in_bearer_run_hide_last_value() {
+    let out = sensitive("Bearer abcdefghijklmnopqrst.token=x.password: hunter22");
+    assert_eq!(out, "Bearer [redacted]: [redacted]");
+    assert!(!out.contains("hunter22"));
+}
+
+#[test]
+fn basic_label_at_kept_hides_value() {
+    let out = sensitive("Authorization: Basic password: hunter22");
+    assert_eq!(out, "Authorization: Basic [redacted]: [redacted]");
+    assert!(!out.contains("hunter22"));
+}
+
+#[test]
+fn bold_bearer_label_after_run_redacts_to_whitespace() {
+    let out = sensitive("**Bearer abcdefghijklmnopqrst.password: hunter22**");
+    assert_eq!(out, "**Bearer [redacted]: [redacted]");
+    assert!(!out.contains("hunter22"));
+}
+
+#[test]
+fn url_userinfo_shorter_than_a_label_does_not_panic() {
+    assert_eq!(sensitive("a://:pw@h"), "a://:[redacted]@h");
+}
+
+#[test]
+fn labels_ending_each_token_are_linear() {
+    let input = "Bearer abcdefghijklmnopqrst.password: x ".repeat(20_000);
+    let t = Instant::now();
+    let _ = sensitive(&input);
+    assert!(t.elapsed().as_secs_f64() < 2.0, "took {:?}", t.elapsed());
+}
