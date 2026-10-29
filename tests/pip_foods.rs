@@ -230,6 +230,17 @@ fn a_saved_name_with_with_in_it_is_one_piece() {
 }
 
 #[test]
+fn a_table_food_joined_by_with_to_a_saved_name_is_not_swallowed() {
+    let mut bao = mac_with_cheese();
+    bao.name = "Northwind Bao".to_string();
+    bao.names = vec!["Northwind Bao".to_string()];
+    let t = foods::take("rice with northwind bao", &[bao], true);
+    assert_eq!(t.items.len(), 1);
+    assert_eq!(t.items[0].food.name, "Northwind Bao");
+    assert_eq!(t.rest, "rice");
+}
+
+#[test]
 fn two_long_product_names_that_share_sixty_characters_stay_two_foods() {
     let dir = scratch("long-names");
     let a = foods::from_label(&label("Northwind Family Size Chicken Teriyaki Flavoured Bites Party Pack Original", Some(9.0)), "2026-10-29").unwrap();

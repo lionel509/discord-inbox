@@ -397,6 +397,15 @@ fn fits(words: &[String], f: &SavedFood) -> bool {
     })
 }
 
+/// Whether every food word of a piece is a word of one of the saved food's names (no table lookup), so a piece with
+/// anything else in it is still split on " with ".
+fn whole_name(words: &[String], f: &SavedFood) -> bool {
+    !words.is_empty() && f.names.iter().any(|name| {
+        let nw = name_words(name);
+        words.iter().all(|w| nw.iter().any(|n| same(w, n)))
+    })
+}
+
 fn name_words(name: &str) -> Vec<String> {
     name.split(|c: char| !c.is_alphanumeric() && c != '\'').filter(|w| !w.is_empty()).map(str::to_lowercase).collect()
 }
@@ -429,7 +438,7 @@ pub fn take(text: &str, foods: &[SavedFood], default_portion: bool) -> Taken {
         // A piece that names a saved food whole stays whole, so a saved name with " with " in it (`Northwind Mac with
         // Cheese`) is not split. Only a piece that names no saved food is split on " with ".
         let (_, words) = words_of(&whole);
-        let parts: Vec<String> = if foods.iter().any(|f| fits(&words, f)) {
+        let parts: Vec<String> = if foods.iter().any(|f| whole_name(&words, f)) {
             vec![whole.clone()]
         } else {
             whole.split(" with ").map(str::to_string).collect()
@@ -467,11 +476,12 @@ fn words_of(piece: &str) -> (nutrition::Scan, Vec<String>) {
     (sc, words)
 }
 
-/// Whether a reader's item (`item`, a food name) is a food the saved name covers: every word of the item's name is a
-/// word of the saved name. Used to keep a photo's estimate of food the caption already counted from its label (#146).
+/// Whether a reader's item (`item`, a food name) is the food the saved name is: the item names the saved name's main
+/// food word (its last word, plural-tolerant), so `Pork wontons in broth` covers "Northwind Pork Wontons" but
+/// `cooked rice` does not. Keeps a photo's estimate of food the caption already counted from its label out (#146).
 pub fn covers(item: &str, saved: &str) -> bool {
     let (iw, sw) = (name_words(item), name_words(saved));
-    !iw.is_empty() && iw.iter().all(|i| sw.iter().any(|s| same(i, s)))
+    sw.last().is_some_and(|m| iw.iter().any(|i| same(i, m)))
 }
 
 /// One matched piece: its amount (or the default) worked out against the label, or refused with the reason.

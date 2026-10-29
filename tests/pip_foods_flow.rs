@@ -282,6 +282,22 @@ async fn a_meal_photo_captioned_with_a_saved_count_counts_that_food_once() {
 }
 
 #[tokio::test]
+async fn a_renamed_estimate_of_the_counted_food_is_dropped_but_other_food_stays() {
+    let (dir, foods, root) = world("renamed");
+    let c = cfg(&dir, Some(&foods), Some(stub(&root)));
+    set_reply(&root, LABEL);
+    assert_eq!(run(&c, &msg(4001, "", &["label.jpg"]).0).await, Outcome::Saved);
+    let both = format!("{},{}", item("Pork wontons in broth", 120.0, 200.0), item("cooked rice", 150.0, 130.0));
+    set_reply(&root, &reply_json(&both));
+    let (m, _) = msg(4002, "24 wontons", &["plate.jpg"]);
+    assert_eq!(run(&c, &m).await, Outcome::Saved);
+    let n = note(&dir);
+    assert!(!n.contains("in broth"), "{n}");
+    assert!(n.contains("cooked rice"), "{n}");
+    assert_eq!(n.lines().filter(|l| l.starts_with("- ") && l.to_lowercase().contains("wontons")).count(), 1, "{n}");
+}
+
+#[tokio::test]
 async fn a_recipe_line_naming_a_saved_food_counts_it_from_the_label() {
     let (dir, foods, root) = world("recipe-bridge");
     let recipes = root.join("Recipes");
