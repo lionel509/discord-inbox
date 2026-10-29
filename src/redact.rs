@@ -66,6 +66,7 @@ const TOKENS: &[Token] = &[
 pub fn sensitive(text: &str) -> String {
     let c: Vec<char> = text.chars().collect();
     let masked: Vec<char> = mask_numbers(text).chars().collect();
+    debug_assert_eq!(masked.len(), c.len(), "mask_numbers must keep char count");
     let mut star: Vec<bool> = c.iter().zip(&masked).map(|(a, b)| a != b).collect();
     let mut spans: Vec<(usize, usize, Fill)> = Vec::new();
     ssn_spans(&c, &mut star, &mut spans);
@@ -75,7 +76,7 @@ pub fn sensitive(text: &str) -> String {
     let mut merged: Vec<(usize, usize, Fill)> = Vec::new();
     for (s, e, f) in spans {
         match merged.last_mut() {
-            // A secret wins over an SSN it overlaps: one `[redacted]` over both.
+            // Overlapping spans (a secret over an SSN, or a label inside a token) become one `[redacted]`.
             Some(last) if s < last.1 => {
                 last.1 = last.1.max(e);
                 last.2 = Fill::Redacted;
@@ -356,6 +357,14 @@ fn secret_at(c: &[char], i: usize) -> Option<(usize, usize)> {
             }
         }
     }
+    label_at(c, i)
+}
+
+/// A password or secret label at `i` with its value, as (start of value, end of value), or `None`.
+fn label_at(c: &[char], i: usize) -> Option<(usize, usize)> {
+    if i > 0 && word_char(c[i - 1]) {
+        return None;
+    }
     for label in PASSWORD_LABELS.iter().chain(SECRET_LABELS.iter()) {
         if !word_at(c, i, label) {
             continue;
@@ -384,7 +393,16 @@ fn secret_spans(c: &[char], spans: &mut Vec<(usize, usize, Fill)>) {
         match secret_at(c, i) {
             Some((kept, end)) => {
                 spans.push((kept, end, Fill::Redacted));
-                i = end;
+                // A label inside the token run (`.password:` after a Bearer) keeps its value redacted.
+                let mut next = end;
+                for j in kept..end {
+                    if let Some((v, ve)) = label_at(c, j) {
+                        spans.push((v, ve, Fill::Redacted));
+                        next = end.max(ve);
+                        break;
+                    }
+                }
+                i = next;
             }
             None => i += 1,
         }
