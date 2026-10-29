@@ -72,11 +72,11 @@ fn a_valid_mark_with_his_count_is_priced_from_the_label() {
 #[test]
 fn a_count_he_did_not_type_falls_back_to_his_default() {
     let r = marked("wontons", "Northwind Pork Wontons", Some(8.0));
-    let p = pip_model::parse_saved("24 dumplings", &r, &[w(Some((24.0, Unit::Piece)))]).unwrap();
+    let p = pip_model::parse_saved("24 dumplings", &r, &[w(Some((12.0, Unit::Piece)))]).unwrap();
     assert_eq!(p.items.len(), 1);
     let i = &p.items[0];
     assert!(i.assumed);
-    assert_eq!((i.qty, i.unit), (24.0, Unit::Piece));
+    assert_eq!((i.qty, i.unit), (12.0, Unit::Piece));
     assert!(p.unknown.is_empty());
     let p = pip_model::parse_saved("24 dumplings", &r, &[w(None)]).unwrap();
     let i = &p.items[0];
@@ -158,6 +158,10 @@ fn an_ambiguous_mark_keeps_the_estimate() {
     // Round 8: each typed saved food that no mark priced is also named under Not counted.
     assert_eq!(p.unknown.len(), 3, "{:?}", p.unknown);
     assert!(p.unknown[0].hint.contains("more than one saved food"), "{}", p.unknown[0].hint);
+    for u in &p.unknown[1..] {
+        assert!(u.hint.contains("if a line above is this food, that is the reader's estimate"), "{}", u.hint);
+    }
+    assert!(p.unknown.iter().all(|u| !u.hint.contains("was not matched")), "{:?}", p.unknown);
 }
 
 #[test]
@@ -267,7 +271,8 @@ fn a_typed_saved_food_the_reader_omits_is_named_under_not_counted() {
     let p = pip_model::parse_saved("24 wontons, 2 eggs", &r, &[w(None)]).unwrap();
     assert_eq!(p.items.len(), 1);
     assert_eq!(p.unknown.len(), 1, "{:?}", p.unknown);
-    assert!(p.unknown[0].hint.contains("your saved food Northwind Pork Wontons was not matched to an item"), "{:?}", p.unknown);
+    assert!(p.unknown[0].hint.contains("not priced from your saved label for Northwind Pork Wontons"), "{:?}", p.unknown);
+    assert!(p.unknown[0].hint.contains("if a line above is this food, that is the reader's estimate; if not, it was not counted"), "{:?}", p.unknown);
 }
 
 #[test]
@@ -281,4 +286,75 @@ fn a_saved_food_priced_from_a_mark_is_not_also_named_as_omitted() {
 fn the_prompt_says_to_list_each_saved_food_once_marked() {
     let p = pip_model::prompt_saved("24 wontons", &[], &[w(None)]);
     assert!(p.contains("List each saved food once, marked: never add a second, unmarked item for it, even when the photo shows it or you would name it differently."), "{p}");
+}
+
+// ---- round 9: marks are keyed on the food they resolve to; a count belongs to the food it was typed for ----
+
+fn chicken() -> SavedFood {
+    SavedFood {
+        name: "Northwind Chicken Dumplings".to_string(),
+        names: vec!["Northwind Chicken Dumplings".to_string(), "Chicken Dumplings".to_string()],
+        serving_g: Some(150.0),
+        serving_pc: None,
+        kcal: Some(300.0),
+        protein: Some(0.0),
+        carbs: Some(0.0),
+        fat: Some(0.0),
+        last: None,
+        saved: "2026-10-29".to_string(),
+    }
+}
+
+#[test]
+fn a_refused_saved_food_marked_twice_is_one_estimate() {
+    let r = reply(&[item("wontons", 420.0, 164.0, "estimate", Some(WON), Some(24.0)), item("plate wontons", 420.0, 164.0, "estimate", Some(WON), None)]);
+    let p = pip_model::parse_saved("2-3 wontons", &r, &[w(None)]).unwrap();
+    let lines: Vec<String> = p.items.iter().map(nutrition::item_line).collect();
+    assert_eq!(lines.iter().filter(|l| l.contains("ontons")).count(), 1, "{lines:?}");
+    assert!(lines[0].contains("420 g") && lines[0].contains("689 kcal"), "{lines:?}");
+    assert_eq!(p.unknown.len(), 2, "{:?}", p.unknown);
+    assert_eq!(p.unknown.iter().filter(|u| u.hint.contains("marked twice by the reader; counted once")).count(), 1, "{:?}", p.unknown);
+}
+
+#[test]
+fn a_count_typed_for_one_saved_food_is_not_copied_onto_another() {
+    let r = marked("dumplings", "Northwind Chicken Dumplings", Some(24.0));
+    let p = pip_model::parse_saved("24 wontons", &r, &[w(None), chicken()]).unwrap();
+    assert_eq!(p.items.len(), 1);
+    let l = nutrition::item_line(&p.items[0]);
+    assert!(!l.contains("24 pc"), "{l}");
+    assert!(l.contains("default 1 serving") && l.contains("150 g") && l.contains("300 kcal"), "{l}");
+    assert!(p.unknown.iter().any(|u| u.hint.contains("not priced from your saved label for Northwind Pork Wontons")), "{:?}", p.unknown);
+}
+
+#[test]
+fn a_count_typed_under_an_unsaved_name_is_still_used() {
+    let r = marked("wontons", WON, Some(24.0));
+    let p = pip_model::parse_saved("24 potstickers", &r, &[w(None)]).unwrap();
+    assert_eq!(p.items.len(), 1);
+    assert_eq!(nutrition::item_line(&p.items[0]), "420 g Northwind Pork Wontons (24 pc, label) \u{b7} 690 kcal");
+}
+
+#[test]
+fn a_refused_typed_name_listed_as_estimate_gets_no_omitted_line() {
+    let r = marked("wontons", WON, Some(24.0));
+    let p = pip_model::parse_saved("24 wontons, 8 wontons", &r, &[w(None)]).unwrap();
+    assert!(p.unknown.iter().all(|u| !u.hint.contains("not priced from your saved label") && !u.hint.contains("was not matched")), "{:?}", p.unknown);
+}
+
+#[test]
+fn a_typed_name_listed_unmarked_is_not_called_unmatched() {
+    let r = reply(&[item("pork wontons", 420.0, 164.0, "estimate", None, None)]);
+    let p = pip_model::parse_saved("24 wontons", &r, &[w(None)]).unwrap();
+    let lines: Vec<String> = p.items.iter().map(nutrition::item_line).collect();
+    assert_eq!(lines.iter().filter(|l| l.to_lowercase().contains("wontons") && l.contains("(estimated)")).count(), 1, "{lines:?}");
+    assert!(p.unknown.iter().any(|u| u.hint.contains("if a line above is this food, that is the reader's estimate")), "{:?}", p.unknown);
+    assert!(p.unknown.iter().all(|u| !u.hint.contains("was not matched")), "{:?}", p.unknown);
+}
+
+#[test]
+fn a_refused_typed_saved_food_the_reader_omits_is_named() {
+    let r = reply(&[item("egg", 100.0, 143.0, "estimate", None, None)]);
+    let p = pip_model::parse_saved("2-3 wontons, 2 eggs", &r, &[w(None)]).unwrap();
+    assert!(p.unknown.iter().any(|u| u.text == "2-3 wontons"), "{:?}", p.unknown);
 }
