@@ -203,6 +203,7 @@ pub fn parse_saved(text: &str, out: &str, foods: &[SavedFood]) -> Option<Parsed>
         .collect();
     let mut parsed = Parsed::default();
     let mut seen: Vec<String> = Vec::new();
+    let mut seen_marks: Vec<String> = Vec::new();
     for (at, raw) in items.iter().enumerate() {
         if at >= MAX_ITEMS {
             // Past the cap: each of the next few is named as unknown, then one line counts the rest. Never silent.
@@ -222,12 +223,21 @@ pub fn parse_saved(text: &str, out: &str, foods: &[SavedFood]) -> Option<Parsed>
             },
             Some(m) => {
                 // Each saved food yields at most one line per reply, keyed on the food the mark resolves to.
-                if let Some(f) = foods::marked(&m, foods) {
-                    if seen.iter().any(|n| *n == f.name) {
-                        parsed.unknown.push(Unknown { text: format!("saved food \"{m}\""), hint: "marked twice by the reader; counted once".to_string() });
-                        continue;
+                let dup = match foods::marked(&m, foods) {
+                    Some(f) if seen.contains(&f.name) => true,
+                    Some(f) => {
+                        seen.push(f.name.clone());
+                        false
                     }
-                    seen.push(f.name.clone());
+                    None if seen_marks.contains(&foods::norm(&m)) => true,
+                    None => {
+                        seen_marks.push(foods::norm(&m));
+                        false
+                    }
+                };
+                if dup {
+                    parsed.unknown.push(Unknown { text: format!("saved food \"{m}\""), hint: "marked twice by the reader; counted once".to_string() });
+                    continue;
                 }
                 let count = raw.get("count").and_then(Value::as_f64);
                 let scale = est.as_ref().ok().filter(|i| i.scale).map(|i| i.grams);

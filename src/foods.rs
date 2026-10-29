@@ -528,6 +528,7 @@ fn take_one(f: &SavedFood, piece: &str, sc: &nutrition::Scan, default_portion: b
             Kind::Negative => return refuse(out, "negative amount; say how much you had".to_string()),
             Kind::Unreadable => return refuse(out, "amount not readable; write it as 100, 1/2 or ½".to_string()),
             Kind::Range => return refuse(out, "a range; send one number".to_string()),
+            Kind::Multiplier if a.value == 0.0 || a.value > 12.0 => return refuse(out, format!("x{} is read as servings and only x1 to x12 is taken; for pieces write the number before the name (24 wontons)", a.value)),
             _ => {}
         }
     }
@@ -559,11 +560,6 @@ fn item_for(f: &SavedFood, food: &'static Food, q: f64, u: Unit, assumed: bool) 
     Ok(Item { food, grams, unit: u, qty: q, assumed, estimated: false, scale: false })
 }
 
-/// Prices a reader item the reader marked as one of his saved foods (#146, round 7). The mark must equal one of a
-/// note's names (`norm`). Amount, first that applies: the typed weight bound to the item; the count he typed (the
-/// reader copies it, and it must be one of `typed_counts`); a scale reading; his last count; one label serving.
-/// `Err` is the reason the item must stay the reader's estimate.
-/// Round 8: when `text` names the food by an exact saved name, the text sets the amount (a bare name skips the count).
 /// The one saved food a mark resolves to (its `norm` equals one of the food's names); `None` when none or several do.
 pub fn marked<'a>(mark: &str, foods: &'a [SavedFood]) -> Option<&'a SavedFood> {
     let m = norm(mark);
@@ -574,6 +570,11 @@ pub fn marked<'a>(mark: &str, foods: &'a [SavedFood]) -> Option<&'a SavedFood> {
     }
 }
 
+/// Prices a reader item the reader marked as one of his saved foods (#146, round 7). The mark must equal one of a
+/// note's names (`norm`). Amount, first that applies: the typed weight bound to the item; the count he typed (the
+/// reader copies it, and it must be one of `typed_counts`); a scale reading; his last count; one label serving.
+/// `Err` is the reason the item must stay the reader's estimate.
+/// Round 8: when `text` names the food by an exact saved name, the text sets the amount (a bare name skips the count).
 pub fn price(text: &str, mark: &str, count: Option<f64>, typed: Option<f64>, scale: Option<f64>, typed_counts: &[f64], foods: &[SavedFood]) -> Result<Item, String> {
     let m = norm(mark);
     let hits: Vec<&SavedFood> = foods.iter().filter(|f| f.names.iter().any(|n| norm(n) == m)).collect();
