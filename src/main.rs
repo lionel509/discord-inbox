@@ -1,11 +1,15 @@
 use discord_inbox::allowlist::{self, Allowlist};
+use discord_inbox::calendar::Cal;
+use discord_inbox::daily::{self, Deps, Slot};
 use discord_inbox::dump;
 use discord_inbox::chat::{self, OpenRouter};
 use discord_inbox::ingest::{catch_up_with, ingest_with, Filer};
 use discord_inbox::live::{Live, LiveMsg};
+use discord_inbox::todo;
 use discord_inbox::vaults::Vaults;
 use serenity::all::{
     ActivityData, Client, Context, EventHandler, GatewayIntents, Message, OnlineStatus, Ready,
+    UserId,
 };
 use serenity::async_trait;
 use std::fs;
@@ -14,7 +18,7 @@ use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::task::JoinHandle;
-use tokio::time::{interval_at, Instant, Interval, MissedTickBehavior};
+use tokio::time::{interval, interval_at, Instant, Interval, MissedTickBehavior};
 
 const KEYCHAIN_SERVICE: &str = "discord-inbox";
 const KEYCHAIN_ACCOUNT: &str = "discord-inbox";
@@ -42,6 +46,23 @@ fn install_presence_loop(handle: JoinHandle<()>) {
     if let Some(old) = previous {
         old.abort();
     }
+}
+
+/// The one live daily loop (#135), replaced on each `ready` like the presence loop.
+static DAILY_LOOP: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
+
+fn install_daily_loop(handle: JoinHandle<()>) {
+    let previous = DAILY_LOOP.lock().unwrap().replace(handle);
+    if let Some(old) = previous {
+        old.abort();
+    }
+}
+
+/// Ticks every `daily::TICK`; a late tick runs once, it does not burst.
+fn daily_interval() -> Interval {
+    let mut tick = interval(daily::TICK);
+    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    tick
 }
 
 /// Skip, not Burst: a stalled runtime must not fire every missed tick back to back.
@@ -87,6 +108,55 @@ impl EventHandler for Handler {
                 tick.tick().await;
                 index = next_presence(index);
                 loop_ctx.set_presence(Some(presence_activity(index)), OnlineStatus::DoNotDisturb);
+            }
+        }));
+        // Daily brief (#135): one marker per slot per day, staged before the send, so a failed send is logged and not retried.
+        let ids: Vec<u64> = self.allow.ids().collect();
+        let inbox = self.inbox.clone();
+        let http = ctx.http.clone();
+        let chat = self.filer.chat.clone();
+        let todo_dir = self.filer.vaults.root().join(todo::DIR);
+        let times = daily::times_from_env();
+        install_daily_loop(tokio::spawn(async move {
+            let mut tick = daily_interval();
+            loop {
+                tick.tick().await;
+                let now = chrono::Local::now().naive_local();
+                let Some((slot, day)) = daily::due(&inbox, &times, now) else {
+                    continue;
+                };
+                if let Err(e) = daily::stage(&inbox, slot, &day) {
+                    eprintln!("discord-inbox: daily {slot:?} marker for {day} not written: {e}");
+                    continue;
+                }
+                let deps = Deps {
+                    todo_dir: todo_dir.clone(),
+                    cal: Cal::from_env(),
+                    chat: chat.clone(),
+                };
+                let today = now.date();
+                let text = match tokio::task::spawn_blocking(move || daily::compose(&deps, slot, today)).await {
+                    Ok(text) => text,
+                    Err(e) => {
+                        eprintln!("discord-inbox: daily {slot:?} compose failed: {e}");
+                        continue;
+                    }
+                };
+                // The night reply is read against the list this DM numbers, so save it before the DM goes out.
+                if matches!(slot, Slot::Night) {
+                    if let Err(e) = daily::save_list(&inbox, &day, &daily::check_items(&todo_dir, today)) {
+                        eprintln!("discord-inbox: daily night list for {day} not saved: {e}");
+                    }
+                }
+                for uid in &ids {
+                    let sent = match UserId::new(*uid).create_dm_channel(&http).await {
+                        Ok(dm) => dm.id.say(&http, &text).await.map_err(|e| e.to_string()),
+                        Err(e) => Err(e.to_string()),
+                    };
+                    if let Err(e) = sent {
+                        eprintln!("discord-inbox: daily {slot:?} to {uid} failed: {e}");
+                    }
+                }
             }
         }));
         catch_up_with(

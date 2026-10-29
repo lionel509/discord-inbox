@@ -26,8 +26,12 @@ fn stub() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/calendar_stub.sh")
 }
 
+fn fixture() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/calendar.sqlitedb")
+}
+
 fn cal(names: &[&str]) -> Cal {
-    Cal { osascript: stub(), calendars: names.iter().map(|s| s.to_string()).collect() }
+    Cal { osascript: stub(), calendars: names.iter().map(|s| s.to_string()).collect(), db: fixture() }
 }
 
 fn both() -> Cal {
@@ -82,7 +86,7 @@ fn missing_or_empty_calendars_file_means_feature_off() {
 
 #[test]
 fn scripts_never_delete_move_or_create() {
-    for s in [calendar::LIST_SCRIPT, calendar::CHECK_SCRIPT] {
+    for s in [calendar::CHECK_SCRIPT] {
         let l = s.to_lowercase();
         assert!(!l.contains("delete") && !l.contains("make new") && !l.contains("move "), "{s}");
     }
@@ -91,19 +95,22 @@ fn scripts_never_delete_move_or_create() {
 }
 
 #[test]
-fn parse_events_four_fields() {
-    let out = "u1\tMATH 101 - Work\t2026-10-20\tHW\tpart two\nbad line\nu2\tPHYS 102 - Exams\t2026-10-21\tMidterm 1\n";
+fn parse_events_five_fields() {
+    let out = "u1\tMATH 101 - Work\t2026-10-20\tallday\tHW\tpart two\nbad line\nu2\tPHYS 102 - Exams\t2026-10-21\t09:30\tMidterm 1\nu3\tX\t2026-10-22\tfour fields only\n";
     let evs = calendar::parse_events(out);
     assert_eq!(evs.len(), 2, "{evs:?}");
     assert_eq!(evs[0].summary, "HW\tpart two");
+    assert_eq!(evs[0].time, None);
     assert_eq!(evs[1].uid, "u2");
     assert_eq!(evs[1].calendar, "PHYS 102 - Exams");
     assert_eq!(evs[1].date, "2026-10-21");
+    assert_eq!(evs[1].time, Some("09:30".to_string()));
+    assert_eq!(evs[1].summary, "Midterm 1");
 }
 
 #[test]
 fn done_is_the_check_mark_prefix() {
-    let ev = |s: &str| Event { uid: "u".into(), calendar: "c".into(), date: "2026-10-20".into(), summary: s.into() };
+    let ev = |s: &str| Event { uid: "u".into(), calendar: "c".into(), date: "2026-10-20".into(), time: None, summary: s.into() };
     assert!(ev("✅ HW 2 due").done());
     assert!(ev("✅HW 2").done());
     assert!(!ev("HW 3 due").done());
@@ -120,7 +127,7 @@ fn candidates_drops_done_and_sorts_by_distance() {
 
 #[test]
 fn pick_prompt_says_none_when_unsure() {
-    let open = vec![Event { uid: "u-math-hw3".into(), calendar: "MATH 101 - Work".into(), date: "2026-10-20".into(), summary: "HW 3 due".into() }];
+    let open = vec![Event { uid: "u-math-hw3".into(), calendar: "MATH 101 - Work".into(), date: "2026-10-20".into(), time: None, summary: "HW 3 due".into() }];
     let (system, user) = calendar::pick_prompt("math hw 3", "2026-10-19", &open);
     assert!(system.contains("NONE"), "{system}");
     assert!(user.contains("#1") && user.contains("HW 3 due"), "{user}");
@@ -140,7 +147,7 @@ fn parse_pick_cases() {
 #[test]
 fn check_off_marks_once_and_returns_the_summary() {
     let _g = guard();
-    let ev = Event { uid: "u-math-hw3".into(), calendar: "MATH 101 - Work".into(), date: "2026-10-20".into(), summary: "HW 3 due".into() };
+    let ev = Event { uid: "u-math-hw3".into(), calendar: "MATH 101 - Work".into(), date: "2026-10-20".into(), time: None, summary: "HW 3 due".into() };
     assert_eq!(calendar::check_off(&both(), &ev).as_deref(), Ok("✅ HW 3 due"));
     assert!(log_lines().iter().any(|l| l == "check\tMATH 101 - Work\tu-math-hw3"));
 }
@@ -148,7 +155,7 @@ fn check_off_marks_once_and_returns_the_summary() {
 #[test]
 fn check_off_requires_confirmation() {
     let _g = guard();
-    let ev = Event { uid: "u-nope".into(), calendar: "MATH 101 - Work".into(), date: "2026-10-20".into(), summary: "x".into() };
+    let ev = Event { uid: "u-nope".into(), calendar: "MATH 101 - Work".into(), date: "2026-10-20".into(), time: None, summary: "x".into() };
     assert!(calendar::check_off(&both(), &ev).is_err());
 }
 
@@ -185,7 +192,7 @@ fn finish_many_asks_without_writing() {
 #[test]
 fn finish_stub_failure_is_err() {
     let _g = guard();
-    let broken = Cal { osascript: PathBuf::from("/nonexistent/osascript"), calendars: vec!["MATH 101 - Work".into()] };
+    let broken = Cal { osascript: PathBuf::from("/nonexistent/osascript"), calendars: vec!["MATH 101 - Work".into()], db: fixture() };
     assert!(calendar::finish(&Fixed("#1".into()), &broken, "math hw 3", "2026-10-19").is_err());
 }
 
@@ -209,7 +216,7 @@ fn only_configured_calendars_ever_reach_osascript() {
         }
         // A tag no other test uses, so this iteration's lines are identifiable.
         names.push(format!("Cal-{i}"));
-        let c = Cal { osascript: stub(), calendars: names.clone() };
+        let c = Cal { osascript: stub(), calendars: names.clone(), db: fixture() };
         let n_words = 1 + next(3);
         let task: Vec<&str> = (0..n_words).map(|_| words[next(words.len() as u64) as usize]).collect();
         let answer = answers[next(3) as usize];

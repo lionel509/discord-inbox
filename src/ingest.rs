@@ -427,6 +427,48 @@ pub async fn ingest_with<M: Inbound>(
         attachments,
         ocr,
     };
+    // Daily check-in (#135): while the night marker reads `sent`, a text-only DM answers the check-in. Before the Inbox write, so a check-in reply files no note; ahead of the calendar hook so "done with the lab" strikes the to-do, not a calendar event.
+    // A catch-up replay of a message older than the night DM is not the reply: it files as usual.
+    // A message with no letters or digits (a zero-width space, a lone emoji) is not a reply to read.
+    if incoming.attachments.is_empty() && incoming.content.chars().any(|c| c.is_alphanumeric()) {
+        let open = crate::daily::awaiting(inbox, chrono::Local::now().naive_local());
+        if let Some(day) = open.filter(|d| crate::daily::after_send(inbox, d, &incoming.received)) {
+            if let Ok(day_date) = chrono::NaiveDate::parse_from_str(&day, "%Y-%m-%d") {
+                let sent = crate::daily::load_list(inbox, &day);
+                let deps = crate::daily::Deps {
+                    todo_dir: filer.vaults.root().join(crate::todo::DIR),
+                    cal: crate::calendar::Cal::from_env(),
+                    chat: filer.chat.clone(),
+                };
+                let message = incoming.content.clone();
+                let r = typing_while(m, tokio::task::spawn_blocking(move || crate::daily::answer(&deps, day_date, &message, sent)))
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r);
+                match r {
+                    Ok(Some(text)) => {
+                        if let Err(e) = crate::daily::answered(inbox, &day) {
+                            eprintln!("discord-inbox: daily check-in marker for {id} not updated: {e}");
+                        }
+                        match m.reply(&reply_text(&text, None)).await {
+                            Ok(()) => clear(m).await,
+                            Err(e) => {
+                                eprintln!("discord-inbox: reply on {id} failed: {e}");
+                                mark(m, SAVED_MARK).await;
+                            }
+                        }
+                        return Outcome::Saved;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        // Said out loud, then the message is filed as usual below.
+                        // No reply here: the filer below answers the message, so a model outage gets one reply.
+                        eprintln!("discord-inbox: daily check-in for {id} failed: {e}");
+                    }
+                }
+            }
+        }
+    }
     match dump::accept(allow, inbox, &incoming) {
         Ok(true) => {}
         Ok(false) => return Outcome::Ignored,

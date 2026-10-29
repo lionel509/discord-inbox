@@ -23,3 +23,6 @@ pub mod png;
 pub mod charts;
 pub mod rich;
 pub mod summary;
+pub mod weather;
+pub mod todo;
+pub mod daily;
