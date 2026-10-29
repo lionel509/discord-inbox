@@ -6,12 +6,14 @@
 use crate::allowlist::Allowlist;
 use crate::daylog::{self, Meal, NoteMsg, Totals, Written};
 use crate::ingest::{typing_while, Handle, Inbound, Outcome, FAILED_MARK, SAVED_MARK};
+use crate::foods::{self, SavedFood};
 use crate::nutrition::{self, Parsed};
-use crate::pip_model::{self, Reading};
+use crate::pip_model::{self, Label, Reading};
 use crate::recipes::{self, Recipe, Scaled};
 use crate::rich::Rich;
 use crate::summary;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Pip's public presence: persona only, nothing about food or health.
@@ -28,7 +30,7 @@ const UNREADABLE_HEAD: &str = "I couldn't read that as food: ";
 const UNREADABLE_TAIL: &str = ". Nothing logged; send it again with names and weights (cooked rice 180g).";
 const PHOTO_UNREAD_REPLY: &str = "No food I could read in the photo(s), so nothing was logged. Reply with what was in it (salmon 100g, cooked rice 180g).";
 
-pub const HELP: &str = "Send what you ate, one item per line: salmon 100g, cooked rice 180g, cabbage 85g, or a recipe name (add a count like 2 x, or a weight).\nCommands: today (the day's card), week (the last seven days), undo (drop the last meal), fix <meal> (replace the last meal), help.\nA message with no food in it is saved as a note, not a meal.";
+pub const HELP: &str = "Send what you ate, one item per line: salmon 100g, cooked rice 180g, cabbage 85g, or a recipe name (add a count like 2 x, or a weight).\nCommands: today (the day's card), week (the last seven days), undo (drop the last meal), fix <meal> (replace the last meal), help.\nA message with no food in it is saved as a note, not a meal.\nSend a package's nutrition label as a photo to save that food; then 24 wontons (or wontons for your usual count) logs it from the label.";
 
 const FIX_USAGE: &str = "Send fix with the replacement meal, e.g. fix salmon 120g. It replaces the last meal logged today.";
 
@@ -36,6 +38,8 @@ const FIX_USAGE: &str = "Send fix with the replacement meal, e.g. fix salmon 120
 pub struct Config {
     pub nutrition_dir: PathBuf,
     pub recipes_dir: Option<PathBuf>,
+    /// Saved foods (`PIP_FOODS_DIR`, absolute, #146): one note per packaged food, written from a label photo.
+    pub foods_dir: Option<PathBuf>,
     pub low_kcal: u32,
     pub kcal_target: u32,
     /// The meal reader helper (`PIP_MODEL`, absolute path). `None` keeps the table-only behaviour.
@@ -57,6 +61,16 @@ impl Config {
                 let p = PathBuf::from(&r);
                 if !p.is_absolute() {
                     return Err(format!("PIP_RECIPES_DIR must be an absolute path, got {r:?}"));
+                }
+                Some(p)
+            }
+            _ => None,
+        };
+        let foods_dir = match std::env::var("PIP_FOODS_DIR") {
+            Ok(r) if !r.trim().is_empty() => {
+                let p = PathBuf::from(&r);
+                if !p.is_absolute() {
+                    return Err(format!("PIP_FOODS_DIR must be an absolute path, got {r:?}"));
                 }
                 Some(p)
             }
@@ -87,6 +101,7 @@ impl Config {
         Ok(Config {
             nutrition_dir,
             recipes_dir,
+            foods_dir,
             low_kcal: daylog::low_kcal_threshold(),
             kcal_target,
             model,
@@ -159,9 +174,23 @@ fn without_name(text: &str, name: &str) -> Option<String> {
     Some(format!("{}{}", &text[..start], &text[end..]))
 }
 
+/// Saved foods first (#146): a typed count of a saved food (`24 wontons`) becomes items from its label, and the rest goes
+/// through `analyze_rest` as before. A refused count still makes the message a meal, with the refusal under Not counted.
+fn analyze(text: &str, recipes: &[Recipe], foods: &[SavedFood], read: Option<&dyn Fn(&str) -> Option<Parsed>>) -> Analysis {
+    let t = foods::take(text, foods, true);
+    let mut an = analyze_rest(&t.rest, recipes, foods, read);
+    if t.items.is_empty() && t.unknown.is_empty() {
+        return an;
+    }
+    an.parsed.items.splice(0..0, t.items);
+    an.parsed.unknown.splice(0..0, t.unknown);
+    an.is_meal = true;
+    an
+}
+
 /// Recipe first (a name match scales it), then the typed lines, then the merge where typed rows win.
 /// With a reader wired (`read`), a meal needs at least one item; without one, today's rule applies.
-fn analyze(text: &str, recipes: &[Recipe], read: Option<&dyn Fn(&str) -> Option<Parsed>>) -> Analysis {
+fn analyze_rest(text: &str, recipes: &[Recipe], foods: &[SavedFood], read: Option<&dyn Fn(&str) -> Option<Parsed>>) -> Analysis {
     let hit = match recipes::resolve_or_refuse(text, recipes) {
         Ok(hit) => hit,
         Err(r) => {
@@ -188,7 +217,12 @@ fn analyze(text: &str, recipes: &[Recipe], read: Option<&dyn Fn(&str) -> Option<
     let mut scaled = h.clone();
     scaled.servings = servings;
     let pieces = recipes::ingredient_pieces(&scaled).join(", ");
-    let (parsed, overridden) = nutrition::merge(typed, nutrition::parse_meal(&pieces));
+    // Saved foods first, so a recipe line that names one (`8 pork wontons`) is counted from its label (#146).
+    let tr = foods::take(&pieces, foods, false);
+    let mut recipe_parsed = nutrition::parse_meal(&tr.rest);
+    recipe_parsed.items.extend(tr.items);
+    recipe_parsed.unknown.extend(tr.unknown);
+    let (parsed, overridden) = nutrition::merge(typed, recipe_parsed);
 
     let mut label = format!("{name} ×{}", trim_num(servings));
     let mut assumed = h.recipe.assumed.clone();
@@ -292,13 +326,14 @@ async fn log_message<M: Inbound>(
     fix_rest: Option<String>,
 ) -> Outcome {
     let recipe_list = cfg.recipes_dir.as_deref().map(recipes::load).unwrap_or_default();
+    let food_list = cfg.foods_dir.as_deref().map(foods::load).unwrap_or_default();
     let subject = fix_rest.clone().unwrap_or_else(|| text.clone());
     if fix_rest.is_some() && subject.is_empty() {
         return fix_usage(cfg, m, msg_id).await;
     }
-    let (an, paths) = match cfg.model.as_deref() {
+    let (mut an, paths) = match cfg.model.as_deref() {
         None => {
-            let an = analyze(&subject, &recipe_list, None);
+            let an = analyze(&subject, &recipe_list, &food_list, None);
             if fix_rest.is_some() && !an.is_meal {
                 return fix_usage(cfg, m, msg_id).await;
             }
@@ -319,7 +354,10 @@ async fn log_message<M: Inbound>(
             };
             // The reader blocks for up to the model timeout, so the analysis runs off the async workers, with typing shown.
             let (cmd, timeout, reads) = (cmd.to_path_buf(), cfg.model_timeout, paths.clone());
-            let (subject_run, recipes_run) = (subject.clone(), recipe_list.clone());
+            let (subject_run, recipes_run, foods_run) = (subject.clone(), recipe_list.clone(), food_list.clone());
+            // A printed label is handed back through this slot: it is saved as a food, not counted as a meal (#146).
+            let label_slot: Arc<Mutex<Option<Label>>> = Arc::new(Mutex::new(None));
+            let slot = label_slot.clone();
             let work = tokio::task::spawn_blocking(move || {
                 let read = |t: &str| -> Option<Parsed> {
                     // Nothing to read (a recipe name with no typed rest, and no photo): no model call.
@@ -328,11 +366,15 @@ async fn log_message<M: Inbound>(
                     }
                     match pip_model::read(&cmd, t, &reads, timeout) {
                         Reading::Read(p) => Some(p),
+                        Reading::Label(l) => {
+                            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(l);
+                            Some(Parsed::default())
+                        }
                         Reading::Down => None,
                     }
                 };
                 let read_dyn: &dyn Fn(&str) -> Option<Parsed> = &read;
-                analyze(&subject_run, &recipes_run, Some(read_dyn))
+                analyze(&subject_run, &recipes_run, &foods_run, Some(read_dyn))
             });
             let an = match typing_while(m, work).await {
                 Ok(an) => an,
@@ -341,6 +383,10 @@ async fn log_message<M: Inbound>(
                     return Outcome::Failed;
                 }
             };
+            let label = label_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(l) = label {
+                return save_label(cfg, m, msg_id, day, &l).await;
+            }
             if fix_rest.is_some() && !an.is_meal {
                 return fix_usage(cfg, m, msg_id).await;
             }
@@ -351,6 +397,13 @@ async fn log_message<M: Inbound>(
         }
     };
     let photos: Vec<String> = paths.iter().map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned()).collect();
+    // Typed text only: a photo's estimate is the reader's guess, and the label note says so (#146).
+    if cfg.foods_dir.is_some() && files.is_empty() {
+        let est: Vec<&str> = an.parsed.items.iter().filter(|i| i.estimated).map(|i| i.food.name).collect();
+        if !est.is_empty() {
+            an.assumed.push(format!("Estimated: {}. A photo of its nutrition label makes it exact next time.", est.join(", ")));
+        }
+    }
 
     if !an.is_meal {
         // Not food: a note block (never counted), so replays skip it and the check-in is still due.
@@ -431,6 +484,14 @@ async fn log_message<M: Inbound>(
         }
     }
 
+    // A count of a saved food is the new default for a bare name (`wontons` next time means this count) (#146).
+    if let Some(dir) = cfg.foods_dir.as_deref() {
+        for i in an.parsed.items.iter().filter(|i| i.food.source == "label" && !i.assumed) {
+            if let Err(e) = foods::remember(dir, i.food.name, i.qty, i.unit) {
+                eprintln!("pip: food note for {} failed: {e}", i.food.name);
+            }
+        }
+    }
     // The note is on disk, so a failed reply is not a failed log: a replay sees the note and skips.
     let today = daylog::totals(&cfg.nutrition_dir, &day, cfg.low_kcal);
     let card = meal_card(&an, today.as_ref(), cfg.kcal_target);
@@ -439,6 +500,63 @@ async fn log_message<M: Inbound>(
     }
     let _ = m.react(SAVED_MARK).await;
     Outcome::Saved
+}
+
+/// A printed label (#146): saved as a food note, never logged as a meal. The reply says what was saved and what the
+/// label does not print. The ledger line is written after the note, so a replay saves nothing twice.
+async fn save_label<M: Inbound>(cfg: &Config, m: &M, msg_id: u64, day: &str, l: &Label) -> Outcome {
+    let text = match cfg.foods_dir.as_deref() {
+        None => "That's a nutrition label. Set PIP_FOODS_DIR and I'll save it; nothing was logged.".to_string(),
+        Some(dir) => match foods::from_label(l, day) {
+            Err(why) => format!("Nothing saved: {why}."),
+            Ok(food) => match foods::upsert(dir, &food) {
+                Ok(_) => label_reply(&food),
+                Err(e) => {
+                    eprintln!("pip: saved food {} failed: {e}", food.name);
+                    let _ = m.react(FAILED_MARK).await;
+                    return Outcome::Failed;
+                }
+            },
+        },
+    };
+    if let Err(e) = daylog::record_command(&cfg.nutrition_dir, msg_id) {
+        eprintln!("pip: command ledger on {msg_id} failed: {e}");
+    }
+    if let Err(e) = m.reply(&text).await {
+        eprintln!("pip: reply on {msg_id} failed: {e}");
+    }
+    let _ = m.react(SAVED_MARK).await;
+    Outcome::Saved
+}
+
+/// The saved food's reply: its label values, what it lacks, and the two ways to count it.
+fn label_reply(f: &SavedFood) -> String {
+    let serving = match (f.serving_g, f.serving_pc) {
+        (Some(g), Some(pc)) => format!("{} g ({} pc)", trim_num(g), trim_num(pc)),
+        (Some(g), None) => format!("{} g", trim_num(g)),
+        _ => "? serving".to_string(),
+    };
+    let v = |x: Option<f64>| x.map(trim_num).unwrap_or_else(|| "?".to_string());
+    let mut text = format!(
+        "Saved {} to your foods: {serving} per serving · {} kcal · P {} g · C {} g · F {} g.",
+        f.name,
+        v(f.kcal),
+        v(f.protein),
+        v(f.carbs),
+        v(f.fat)
+    );
+    let miss = foods::missing(f);
+    if !miss.is_empty() {
+        text.push_str(&format!(
+            " Not on the label: {}; those count as 0 until you fill them in on the note or send a clearer photo.",
+            miss.join(", ")
+        ));
+    }
+    match f.serving_pc {
+        Some(pc) => text.push_str(&format!(" Log it as \"{} {}\", or just \"{}\" for your usual count.", trim_num(pc * 3.0), f.name, f.name)),
+        None => text.push_str(&format!(" Log it as \"2 servings {}\", or just \"{}\" for your usual count.", f.name, f.name)),
+    }
+    text
 }
 
 /// The `fix` usage reply, claimed in the ledger first so a re-sent copy is skipped.
@@ -642,7 +760,7 @@ pub fn reply_text(
             .iter()
             .map(|i| {
                 let kcal = i.grams / 100.0 * i.food.kcal;
-                let default = if i.assumed { format!(" (default {} g)", trim_num(i.grams)) } else { String::new() };
+                let default = nutrition::label_tail(i).unwrap_or_else(|| if i.assumed { format!(" (default {} g)", trim_num(i.grams)) } else { String::new() });
                 format!("{} g {} {}{default}", trim_num(i.grams), i.food.name, kcal.round() as i64)
             })
             .collect();

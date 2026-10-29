@@ -57,7 +57,7 @@ pub struct TypedSpan {
 }
 
 /// Words that never name a food in a typed span: articles, prep words and two-letter function words.
-const STOP: &[&str] = &[
+pub(crate) const STOP: &[&str] = &[
     "and", "the", "with", "some", "cooked", "raw", "fresh", "plain", "grilled", "fried", "boiled", "steamed", "baked", "roasted", "about", "around", "had", "ate", "for", "of", "in", "on", "an", "or", "at", "to", "my", "it", "is", "as", "by", "up", "so", "me", "we",
 ];
 /// Misspellings of "grams" he types in place of `g` (`100 grnas`). A closed list: no fuzzy match, so `2 glass` is never grams.
@@ -910,7 +910,9 @@ fn fmt_qty(q: f64) -> String {
 pub fn item_line(item: &Item) -> String {
     let g = fmt_num(item.grams);
     let kcal = (item.grams / 100.0 * item.food.kcal).round() as i64;
-    let tail = if item.estimated {
+    let tail = if let Some(t) = label_tail(item) {
+        t
+    } else if item.estimated {
         " (estimated)".to_string()
     } else if item.scale {
         " (scale)".to_string()
@@ -922,6 +924,22 @@ pub fn item_line(item: &Item) -> String {
         format!(" ({} {})", fmt_qty(item.qty), unit_name(item.unit))
     };
     format!("{g} g {}{tail} · {kcal} kcal", item.food.name)
+}
+
+/// The tail of a label food's line (#146): counted by its pieces, grams or servings, `default` when he named no count.
+/// `None` for every other food, so table and reader lines are unchanged.
+pub fn label_tail(item: &Item) -> Option<String> {
+    if item.food.source != "label" {
+        return None;
+    }
+    let what = match item.unit {
+        Unit::Piece => format!("{} pc", fmt_num(item.qty)),
+        Unit::Portion if item.qty == 1.0 => "1 serving".to_string(),
+        Unit::Portion => format!("{} servings", fmt_num(item.qty)),
+        _ => format!("{} g", fmt_num(item.qty)),
+    };
+    let default = if item.assumed { "default " } else { "" };
+    Some(format!(" ({default}{what}, label)"))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

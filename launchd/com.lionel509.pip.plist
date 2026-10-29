@@ -16,6 +16,8 @@
         <string>__NUTRITION_DIR__</string>
         <key>PIP_RECIPES_DIR</key>
         <string>__RECIPES_DIR__</string>
+        <key>PIP_FOODS_DIR</key>
+        <string>__FOODS_DIR__</string>
         <key>PIP_KCAL_TARGET</key>
         <string>2400</string>
         <key>PIP_MODEL</key>

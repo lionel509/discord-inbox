@@ -33,7 +33,41 @@ const HEIF_BRANDS: &[&[u8]] = &[b"heic", b"heif", b"mif1", b"avif"];
 /// What the helper gave back: a parsed reading, or nothing usable (helper failed, timed out, or printed non-JSON).
 pub enum Reading {
     Read(Parsed),
+    /// A printed Nutrition Facts panel (#146): saved as a food, never a meal.
+    Label(Label),
     Down,
+}
+
+/// A saved food's label as the reader copied it (#146): the panel's per-serving numbers, `None` where it prints nothing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Label {
+    pub name: String,
+    pub serving_g: Option<f64>,
+    pub serving_pc: Option<f64>,
+    pub kcal: Option<f64>,
+    pub protein: Option<f64>,
+    pub carbs: Option<f64>,
+    pub fat: Option<f64>,
+}
+
+/// The label reply: a `label` object with the panel's values. `None` for any other reply, or with no name.
+pub fn parse_label(out: &str) -> Option<Label> {
+    let v = reply_object(out)?;
+    let l = v.get("label")?.as_object()?;
+    let name = model_text(l.get("name")?.as_str()?);
+    if name.is_empty() {
+        return None;
+    }
+    let num = |k: &str| l.get(k).and_then(Value::as_f64);
+    Some(Label {
+        name,
+        serving_g: num("serving_g"),
+        serving_pc: num("serving_pc"),
+        kcal: num("kcal"),
+        protein: num("protein"),
+        carbs: num("carbs"),
+        fat: num("fat"),
+    })
 }
 
 /// The prompt on stdin. Photos are named by path so the helper's Read tool can open them.
@@ -58,6 +92,7 @@ pub fn prompt(text: &str, photos: &[PathBuf]) -> String {
         "- If the message gives a weight for a food (g, grams, kg, oz, lb), use exactly that weight and set \"source\": \"text\". Otherwise estimate grams from the photo or a normal portion and set \"source\": \"estimate\". Never change a typed weight.".to_string(),
         "- A photo of a kitchen scale display is a weight he measured: use the number shown and set \"source\": \"scale\". If one photo shows an empty container and a later one shows the same container with food, the food weighs the difference (subtract the empty reading). Name which food each scale photo is weighing from what is in the container.".to_string(),
         "- A receipt photo: list the food items bought as the meal at their printed quantities; skip non-food lines; never copy card numbers, totals or addresses.".to_string(),
+        r#"- A photo of a packaged food's printed Nutrition Facts panel is a label, not a meal: reply {"label":{"name":"<product name from the package>","serving_g":140,"serving_pc":8,"kcal":230,"protein":9,"carbs":28,"fat":9},"items":[],"unreadable":[]}. Values are per serving, copied from the panel. A field the panel does not print is null; serving_pc is null when the serving is not a count of pieces. Never estimate a label field. A plate, bowl, receipt or scale display is never a label."#.to_string(),
         "- Plain water or sparkling water: name it exactly \"water\" or \"sparkling water\", with kcal_100 0.".to_string(),
         "- Per-100 g values are for the food as eaten (cooked), USDA-style.".to_string(),
         "- Anything you cannot turn into an item goes in \"unreadable\" with a short reason. No food at all: both lists empty.".to_string(),
@@ -73,6 +108,9 @@ pub fn read(cmd: &Path, text: &str, photos: &[PathBuf], timeout: Duration) -> Re
         eprintln!("pip: model helper gave nothing");
         return Reading::Down;
     };
+    if let Some(label) = parse_label(&out) {
+        return Reading::Label(label);
+    }
     match parse(text, &out) {
         Some(p) if !photos.iter().any(|f| is_image(f)) => Reading::Read(without_photo_scales(p)),
         Some(p) => Reading::Read(p),

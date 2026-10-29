@@ -81,6 +81,7 @@ fn scale_claim_without_any_photo_is_not_trusted() {
             let it = p.items.first().expect("no item");
             assert!(!it.scale, "zero-photo reply was logged as a scale reading: {} g (scale)", it.grams);
         }
+        Reading::Label(_) => panic!("a meal reply is not a label"),
         Reading::Down => panic!("helper reply was Down"),
     }
 }

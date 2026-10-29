@@ -111,7 +111,8 @@ fn a_hand_made_note_keeps_its_lines_and_gets_the_block_added() {
 fn a_written_note_carries_no_path_no_photo_and_no_folder_name() {
     let dir = scratch("privacy");
     let path = foods::upsert(&dir, &wontons(None)).unwrap();
-    let text = fs::read_to_string(&path).unwrap();
+    // The close marker is `<!-- /pip:food -->`; its slash is not a path.
+    let text = fs::read_to_string(&path).unwrap().replace("<!-- /pip:food -->", "");
     for bad in [".jpg", ".png", "/", "Nutrition"] {
         assert!(!text.contains(bad), "{bad} in {text}");
     }
