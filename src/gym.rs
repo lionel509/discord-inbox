@@ -128,7 +128,8 @@ fn is_heading(line: &str) -> bool {
     if bullet {
         return false;
     }
-    !t.is_empty() && t.chars().count() <= 60 && t.chars().any(|c| c.is_alphabetic()) && !t.chars().any(|c| c.is_ascii_lowercase())
+    // Two letters at least, so a bare sets line like `3 X 15` is not a heading.
+    !t.is_empty() && t.chars().count() <= 60 && t.chars().filter(|c| c.is_alphabetic()).count() >= 2 && !t.chars().any(|c| c.is_ascii_lowercase())
 }
 
 fn heading_text(line: &str) -> String {
@@ -390,9 +391,50 @@ pub enum Reply {
     Unreadable,
 }
 
+/// Sanity caps on a typed `NxM`: a fat-fingered count must not allocate gigabytes.
+const MAX_SETS: u32 = 20;
+const MAX_REPS: u32 = 200;
+
+/// Joins sets notation split by spaces (`3 x 15`, `3x 15`, `3 x15`) into one `3x15` token.
+fn join_sets(raw: &[&str]) -> Vec<String> {
+    let digits = |t: &str| !t.is_empty() && t.chars().all(|c| c.is_ascii_digit());
+    let xs = |c: char| matches!(c, 'x' | 'X' | '×');
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < raw.len() {
+        if digits(raw[i]) {
+            if let Some(rest) = raw.get(i + 1).and_then(|t| t.strip_prefix(xs)) {
+                if rest.is_empty() {
+                    if let Some(r) = raw.get(i + 2).filter(|t| digits(t)) {
+                        out.push(format!("{}x{r}", raw[i]));
+                        i += 3;
+                        continue;
+                    }
+                } else if digits(rest) {
+                    out.push(format!("{}x{rest}", raw[i]));
+                    i += 2;
+                    continue;
+                }
+            }
+        }
+        if let Some(sets) = raw[i].strip_suffix(xs) {
+            if let Some(r) = raw.get(i + 1).filter(|t| digits(t)) {
+                if digits(sets) {
+                    out.push(format!("{sets}x{r}"));
+                    i += 2;
+                    continue;
+                }
+            }
+        }
+        out.push(raw[i].to_string());
+        i += 1;
+    }
+    out
+}
+
 /// Reads a reply to an exercise prompt: `[what you did] reps...`, `skip`, `stop`.
 pub fn parse_reply(text: &str, options: &[String]) -> Reply {
-    let body = text.trim().trim_start_matches(['/', '!']).trim();
+    let body = text.trim().trim_start_matches(['/', '!']).trim().trim_end_matches(['.', '!']).trim();
     let lower = body.to_lowercase();
     match lower.as_str() {
         "stop" | "done" | "end" | "quit" => return Reply::Stop,
@@ -400,19 +442,7 @@ pub fn parse_reply(text: &str, options: &[String]) -> Reply {
         _ => {}
     }
     let raw: Vec<&str> = body.split(|c: char| c.is_whitespace() || c == ',').filter(|t| !t.is_empty()).collect();
-    // Join a spaced `3 x 15` into `3x15`.
-    let mut joined: Vec<String> = Vec::new();
-    let mut i = 0;
-    while i < raw.len() {
-        let is_x = |t: &str| matches!(t, "x" | "X" | "×");
-        if i + 2 < raw.len() + 0 && raw[i].chars().all(|c| c.is_ascii_digit()) && is_x(raw[i + 1]) && raw[i + 2].chars().all(|c| c.is_ascii_digit()) {
-            joined.push(format!("{}x{}", raw[i], raw[i + 2]));
-            i += 3;
-        } else {
-            joined.push(raw[i].to_string());
-            i += 1;
-        }
-    }
+    let joined = join_sets(&raw);
     let tokens: Vec<&str> = joined.iter().map(|s| s.as_str()).collect();
     let is_num = |t: &str| !t.is_empty() && t.chars().all(|c| c.is_ascii_digit());
     let split_nxm = |t: &str| -> Option<(u32, u32)> {
@@ -429,10 +459,14 @@ pub fn parse_reply(text: &str, options: &[String]) -> Reply {
     let mut reps: Vec<u32> = Vec::new();
     for t in &tokens[first_num..] {
         if let Some((n, m)) = split_nxm(t) {
+            if n > MAX_SETS || m > MAX_REPS {
+                return Reply::Unreadable;
+            }
             reps.extend(std::iter::repeat(m).take(n as usize));
         } else if is_num(t) {
             match t.parse() {
-                Ok(v) => reps.push(v),
+                Ok(v) if v <= MAX_REPS => reps.push(v),
+                Ok(_) => return Reply::Unreadable,
                 Err(_) => return Reply::Unreadable,
             }
         } else {

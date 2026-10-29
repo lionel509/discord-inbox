@@ -306,3 +306,36 @@ fn spaced_uppercase_x_sets_reps() {
     let r = gym::parse_reply("Cable row 3 X 15", &["Cable row".into(), "Face pull".into()]);
     assert_eq!(r, Reply::Did { option: Some("Cable row".into()), reps: vec![15, 15, 15] });
 }
+
+// #150: parser hardening found by the round 3 review of #145.
+fn one_option() -> Vec<String> {
+    vec!["Cable row".to_string()]
+}
+
+#[test]
+fn breaker_bare_caps_sets_line_ends_section() {
+    let text = "## Pull\n- CABLE ROW\n3 X 15\n- FACE PULL\n";
+    let body = gym::section(text, "pull").expect("pull section");
+    assert!(body.contains("3 X 15"), "{body}");
+    assert!(body.contains("FACE PULL"), "{body}");
+}
+
+#[test]
+fn half_spaced_nxm_reads_as_sets_by_reps() {
+    let want = Reply::Did { option: Some("Cable row".into()), reps: vec![15, 15, 15] };
+    assert_eq!(gym::parse_reply("cable row 3x 15", &one_option()), want);
+    assert_eq!(gym::parse_reply("cable row 3 x15", &one_option()), want);
+}
+
+#[test]
+fn trailing_full_stop_does_not_break_a_reply() {
+    let want = Reply::Did { option: Some("Cable row".into()), reps: vec![15, 15, 15] };
+    assert_eq!(gym::parse_reply("Cable row 3 x 15.", &one_option()), want);
+    assert_eq!(gym::parse_reply("stop.", &one_option()), Reply::Stop);
+}
+
+#[test]
+fn absurd_set_count_is_unreadable() {
+    assert_eq!(gym::parse_reply("row 4000000000x1", &one_option()), Reply::Unreadable);
+    assert_eq!(gym::parse_reply("row 21x10", &one_option()), Reply::Unreadable);
+}
