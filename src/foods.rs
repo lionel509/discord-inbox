@@ -404,6 +404,13 @@ fn is_name(words: &[String], f: &SavedFood) -> bool {
         })
 }
 
+/// Whether every key word of a reader's estimate is a word of one of the food's names. Only used to move an estimate
+/// to Not counted; typed text is matched by `names_food` alone.
+pub fn may_be_food(text: &str, f: &SavedFood) -> bool {
+    let w = key_words(text);
+    !w.is_empty() && w.iter().all(|x| f.names.iter().any(|n| key_words(n).iter().any(|y| same(x, y))))
+}
+
 /// Whether the text's words equal one of the saved food's names.
 pub fn names_food(text: &str, f: &SavedFood) -> bool {
     is_name(&key_words(text), f)
@@ -429,7 +436,8 @@ pub fn default_aliases(name: &str) -> Vec<String> {
             && kw.iter().any(|x| x.chars().count() >= 3)
             && kw != name_kw
             && !kept.iter().any(|k| key_words(k) == kw)
-            && nutrition::lookup(&c).is_err();
+            && nutrition::lookup(&c).is_err()
+            && !kw.iter().all(|x| nutrition::is_table_word(x));
         if ok {
             kept.push(c);
         }

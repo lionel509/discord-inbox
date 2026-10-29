@@ -44,6 +44,16 @@ pub fn table_food(name: &str) -> Option<&'static Food> {
     FOODS.iter().find(|f| f.name == n || f.aliases.iter().any(|a| *a == n))
 }
 
+/// Whether `w` is a word the table already uses: a word of a food's name or alias, an ambiguous key or a dish word.
+/// Plural-tolerant.
+pub fn is_table_word(w: &str) -> bool {
+    let w = w.to_lowercase();
+    let eq = |a: &str| a == w || a.strip_suffix('s') == Some(w.as_str()) || w.strip_suffix('s') == Some(a);
+    FOODS.iter().any(|f| std::iter::once(&f.name).chain(f.aliases.iter()).any(|n| n.split_whitespace().any(eq)))
+        || AMBIGUOUS.iter().any(|(k, _)| eq(k))
+        || NOT_THE_SAME_FOOD.iter().any(|k| eq(k))
+}
+
 /// The grams of every mass amount (g, kg, oz, lb) in `text`.
 pub fn typed_grams(text: &str) -> Vec<f64> {
     scan(text).amounts.iter().filter(|a| a.kind == Kind::Mass).map(|a| a.value).collect()

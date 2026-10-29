@@ -183,16 +183,21 @@ fn analyze(text: &str, recipes: &[Recipe], foods: &[SavedFood], read: Option<&dy
     if t.items.is_empty() && t.unknown.is_empty() {
         return an;
     }
-    // The reader was told what is counted; an estimate named exactly like a counted food is that food, shown under Not
-    // counted. Anything named otherwise is kept.
+    // The reader was told what is counted; an estimate whose words are all words of a counted food's names may be that
+    // food, so it goes to Not counted with a way to add it back. Anything else is kept.
     let counted_foods: Vec<&SavedFood> = foods.iter().filter(|f| t.items.iter().any(|i| i.food.name == f.name)).collect();
     let mut dropped = Vec::new();
     an.parsed.items.retain(|i| {
-        let drop = i.estimated && counted_foods.iter().any(|f| foods::names_food(i.food.name, f));
-        if drop {
-            dropped.push(nutrition::Unknown { text: format!("photo estimate {}", i.food.name), hint: "already counted from its label".to_string() });
+        let hit = if i.estimated { counted_foods.iter().find(|f| foods::may_be_food(i.food.name, f)) } else { None };
+        if let Some(f) = hit {
+            let hint = if foods::names_food(i.food.name, f) {
+                "already counted from its label".to_string()
+            } else {
+                format!("may be the {} already counted from its label; if it is a separate food, send: {} {:.0}g", f.name, i.food.name.to_lowercase(), i.grams)
+            };
+            dropped.push(nutrition::Unknown { text: format!("photo estimate {}", i.food.name), hint });
         }
-        !drop
+        hit.is_none()
     });
     an.parsed.unknown.extend(dropped);
     an.parsed.items.splice(0..0, t.items);
