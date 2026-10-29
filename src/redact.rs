@@ -53,9 +53,7 @@ const TOKENS: &[Token] = &[
     Token { prefix: "Bearer ", ci: true, min: 20, keep: true, allowed: token_char },
 ];
 
-/// Masks every sensitive value in `text`. Numbers first, so every card is starred before the label rules read
-/// their values (a label value stops at whitespace, and a spaced card would leak its later groups: #141). Token
-/// runs cross the stars, so a card inside a token is redacted with the token (#140).
+/// Masks every sensitive value in `text`. Numbers first, then secrets, so each value is masked once.
 pub fn sensitive(text: &str) -> String {
     let text = mask_numbers(text);
     let text = mask_ssns(&text);
@@ -293,16 +291,6 @@ fn mask_labelled_accounts(text: &str) -> String {
         .collect()
 }
 
-/// Whether the '*' at j belongs to a card the number rule starred: its star run leads into more digits or stars.
-fn card_star(c: &[char], j: usize) -> bool {
-    let k = (j..c.len()).find(|&k| c[k] != '*').unwrap_or(c.len());
-    match c.get(k) {
-        Some(&ch) if ch.is_ascii_digit() => true,
-        Some(&ch) if matches!(ch, '-' | '.' | '/' | '_') => matches!(c.get(k + 1), Some(&n) if n == '*' || n.is_ascii_digit()),
-        _ => false,
-    }
-}
-
 /// A secret starting at `i`, as (end of the kept part, end of the secret), or `None`.
 fn secret_at(c: &[char], i: usize) -> Option<(usize, usize)> {
     if i > 0 && word_char(c[i - 1]) {
@@ -327,8 +315,7 @@ fn secret_at(c: &[char], i: usize) -> Option<(usize, usize)> {
                 if t.ci { a.eq_ignore_ascii_case(&b) } else { *a == b }
             });
         if matched {
-            // A '*' joins the run only when it is part of a card the number rule starred (#140); bold and other markdown stars end the token (#141).
-            let run = c[i + n..].iter().enumerate().take_while(|&(o, &ch)| (t.allowed)(ch) || (ch == '*' && card_star(c, i + n + o))).count();
+            let run = c[i + n..].iter().take_while(|&&ch| (t.allowed)(ch)).count();
             if run >= t.min {
                 return Some((if t.keep { i + n } else { i }, i + n + run));
             }
