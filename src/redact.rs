@@ -8,6 +8,13 @@ use crate::insight::mask_cards;
 
 const REDACTED: &str = "[redacted]";
 
+/// What a span of the input is written as.
+#[derive(Clone, Copy)]
+enum Fill {
+    Redacted,
+    Ssn,
+}
+
 /// Store labels whose long digit runs are references, not cards.
 const STORE_LABELS: [&str; 9] =
     ["transaction", "reference", "cashier", "station", "invoice", "order", "receipt", "txn", "ref"];
@@ -53,12 +60,51 @@ const TOKENS: &[Token] = &[
     Token { prefix: "Bearer ", ci: true, min: 20, keep: true, allowed: token_char },
 ];
 
-/// Masks every sensitive value in `text`. Numbers first, then secrets, so each value is masked once.
+/// Masks every sensitive value in `text`. Every rule reads `text` as it arrived, never another rule's output (#140):
+/// card, SSN and account digits become stars, and secrets and labelled SSNs become spans. Overlapping spans merge
+/// into one `[redacted]`, and the text is written once, so a `*` the user typed never joins a token (#141).
 pub fn sensitive(text: &str) -> String {
-    let text = mask_numbers(text);
-    let text = mask_ssns(&text);
-    let text = mask_labelled_accounts(&text);
-    mask_secrets(&text)
+    let c: Vec<char> = text.chars().collect();
+    let masked: Vec<char> = mask_numbers(text).chars().collect();
+    debug_assert_eq!(masked.len(), c.len(), "mask_numbers must keep char count");
+    let mut star: Vec<bool> = c.iter().zip(&masked).map(|(a, b)| a != b).collect();
+    let mut spans: Vec<(usize, usize, Fill)> = Vec::new();
+    ssn_spans(&c, &mut star, &mut spans);
+    account_stars(&c, &mut star);
+    secret_spans(&c, &mut spans);
+    spans.sort_by_key(|s| s.0);
+    let mut merged: Vec<(usize, usize, Fill)> = Vec::new();
+    for (s, e, f) in spans {
+        match merged.last_mut() {
+            // Overlapping spans (a secret over an SSN, or a label inside a token) become one `[redacted]`.
+            Some(last) if s < last.1 => {
+                last.1 = last.1.max(e);
+                last.2 = Fill::Redacted;
+            }
+            _ => merged.push((s, e, f)),
+        }
+    }
+    write(&c, &star, &merged)
+}
+
+/// Writes `c` once: each span as its fill, each starred char as `*`, every other char as it was.
+fn write(c: &[char], star: &[bool], spans: &[(usize, usize, Fill)]) -> String {
+    let plain = |r: std::ops::Range<usize>| r.map(|x| if star[x] { '*' } else { c[x] }).collect::<String>();
+    let mut out = String::with_capacity(c.len());
+    let mut at = 0;
+    for &(s, e, f) in spans {
+        out.push_str(&plain(at..s));
+        match f {
+            Fill::Redacted => out.push_str(REDACTED),
+            Fill::Ssn => {
+                out.push_str("***-**-");
+                out.push_str(&plain(e - 4..e));
+            }
+        }
+        at = e;
+    }
+    out.push_str(&plain(at..c.len()));
+    out
 }
 
 fn digit(c: char) -> bool {
@@ -230,65 +276,55 @@ fn loose_ssn_end(c: &[char], q: usize) -> Option<usize> {
     (!c.get(j).is_some_and(|ch| ch.is_ascii_digit())).then_some(j)
 }
 
-/// `###-##-####` with no digit on either side: masked as `***-**-1234`. After an `SSN` label the dashes and
-/// spaces are optional, so `SSN 123456789` and `SSN: 123 45 6789` are masked too.
-fn mask_ssns(text: &str) -> String {
-    let c: Vec<char> = text.chars().collect();
+/// SSNs, read from the original text: `###-##-####` with no digit on either side gets its first five digits starred.
+/// After an `SSN` label the dashes and spaces are optional and the number becomes a span written as `***-**-1234`.
+fn ssn_spans(c: &[char], star: &mut [bool], spans: &mut Vec<(usize, usize, Fill)>) {
     let is_ssn = |s: &[char]| {
         s.iter().enumerate().all(|(k, &ch)| match k {
             3 | 6 => ch == '-',
             _ => ch.is_ascii_digit(),
         })
     };
-    let mut out = String::with_capacity(text.len());
     let mut i = 0;
     while i < c.len() {
-        if word_at(&c, i, "ssn") {
-            let q = after_label(&c, i + 3);
-            if let Some(end) = loose_ssn_end(&c, q) {
-                out.extend(&c[i..q]);
-                out.push_str("***-**-");
-                out.extend(&c[end - 4..end]);
+        if word_at(c, i, "ssn") {
+            let q = after_label(c, i + 3);
+            if let Some(end) = loose_ssn_end(c, q) {
+                spans.push((q, end, Fill::Ssn));
                 i = end;
                 continue;
             }
         }
         let bounded = (i == 0 || !c[i - 1].is_ascii_digit()) && c.get(i + 11).is_none_or(|ch| !ch.is_ascii_digit());
         if i + 11 <= c.len() && bounded && is_ssn(&c[i..i + 11]) {
-            out.push_str("***-**-");
-            out.extend(&c[i + 7..i + 11]);
+            for x in [i, i + 1, i + 2, i + 4, i + 5] {
+                star[x] = true;
+            }
             i += 11;
         } else {
-            out.push(c[i]);
             i += 1;
         }
     }
-    out
 }
 
 /// Account and routing numbers after their label: 6 to 17 digits, all but the last four masked.
-fn mask_labelled_accounts(text: &str) -> String {
-    let c: Vec<char> = text.chars().collect();
-    let mut hide = vec![false; c.len()];
+/// Read from the original text.
+fn account_stars(c: &[char], star: &mut [bool]) {
     for i in 0..c.len() {
-        let Some(label) = ACCOUNT_LABELS.iter().find(|l| word_at(&c, i, l)) else {
+        let Some(label) = ACCOUNT_LABELS.iter().find(|l| word_at(c, i, l)) else {
             continue;
         };
-        let q = after_label(&c, i + label.len());
+        let q = after_label(c, i + label.len());
         let mut j = q;
         while j < c.len() && digit(c[j]) {
             j += 1;
         }
         if (6..=17).contains(&(j - q)) {
-            for h in hide.iter_mut().take(j - 4).skip(q) {
-                *h = true;
+            for s in &mut star[q..j - 4] {
+                *s = true;
             }
         }
     }
-    c.iter()
-        .zip(hide)
-        .map(|(&ch, h)| if h && digit(ch) { '*' } else { ch })
-        .collect()
 }
 
 /// A secret starting at `i`, as (end of the kept part, end of the secret), or `None`.
@@ -321,6 +357,14 @@ fn secret_at(c: &[char], i: usize) -> Option<(usize, usize)> {
             }
         }
     }
+    label_at(c, i)
+}
+
+/// A password or secret label at `i` with its value, as (start of value, end of value), or `None`.
+fn label_at(c: &[char], i: usize) -> Option<(usize, usize)> {
+    if i > 0 && word_char(c[i - 1]) {
+        return None;
+    }
     for label in PASSWORD_LABELS.iter().chain(SECRET_LABELS.iter()) {
         if !word_at(c, i, label) {
             continue;
@@ -342,23 +386,33 @@ fn secret_at(c: &[char], i: usize) -> Option<(usize, usize)> {
     None
 }
 
-/// API keys, tokens, Bearer values and password values, each replaced by `[redacted]`.
-fn mask_secrets(text: &str) -> String {
-    let c: Vec<char> = text.chars().collect();
-    let mut out = String::with_capacity(text.len());
+/// API keys, tokens, Bearer values and password values, found in the original text: each a span written as `[redacted]`.
+fn secret_spans(c: &[char], spans: &mut Vec<(usize, usize, Fill)>) {
     let mut i = 0;
     while i < c.len() {
-        match secret_at(&c, i) {
+        match secret_at(c, i) {
             Some((kept, end)) => {
-                out.extend(&c[i..kept]);
-                out.push_str(REDACTED);
-                i = end;
+                spans.push((kept, end, Fill::Redacted));
+                // Only a label ending at the run's end (`.password: x`) or whose `=` ends the run (`.token= x`) can have a value outside it; that value follows the stand-alone label rule.
+                let mut next = end;
+                for label in PASSWORD_LABELS.iter().chain(SECRET_LABELS.iter()) {
+                    let n = label.chars().count();
+                    let at = if end >= kept + n && word_at(c, end - n, label) {
+                        Some(end - n)
+                    } else if end >= kept + n + 1 && c[end - 1] == '=' && word_at(c, end - 1 - n, label) {
+                        Some(end - 1 - n)
+                    } else {
+                        None
+                    };
+                    if let Some((v, ve)) = at.and_then(|j| label_at(c, j)) {
+                        spans.push((v, ve, Fill::Redacted));
+                        next = ve;
+                        break;
+                    }
+                }
+                i = next;
             }
-            None => {
-                out.push(c[i]);
-                i += 1;
-            }
+            None => i += 1,
         }
     }
-    out
 }
