@@ -69,7 +69,8 @@ fn a_typed_food_is_never_dropped() {
     for (text, _, want_rest) in cases {
         let t = foods::take(&text, &foods, true);
         assert!(t.unknown.is_empty(), "{text}: {:?}", t.unknown);
-        let rest: Vec<&str> = t.rest.split(", ").map(str::trim).filter(|s| !s.is_empty()).collect();
+        // With nothing matched, `rest` is the text itself, so a " with " joiner is still in it.
+        let rest: Vec<&str> = t.rest.split(", ").flat_map(|p| p.split(" with ")).map(str::trim).filter(|s| !s.is_empty()).collect();
         assert_eq!(rest, want_rest, "{text}: rest {:?}", t.rest);
     }
 }

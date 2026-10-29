@@ -72,6 +72,11 @@ pub fn parse_label(out: &str) -> Option<Label> {
 
 /// The prompt on stdin. Photos are named by path so the helper's Read tool can open them.
 pub fn prompt(text: &str, photos: &[PathBuf]) -> String {
+    prompt_counted(text, photos, &[])
+}
+
+/// `prompt`, plus a line naming the saved foods the caption already counted from their labels, so the reader leaves them out.
+pub fn prompt_counted(text: &str, photos: &[PathBuf], counted: &[String]) -> String {
     let message = if text.trim().is_empty() {
         "Message: (no text)".to_string()
     } else {
@@ -83,7 +88,7 @@ pub fn prompt(text: &str, photos: &[PathBuf]) -> String {
         let paths: Vec<String> = photos.iter().map(|p| p.to_string_lossy().into_owned()).collect();
         format!("Photos: {} attached; read each with the Read tool: {}", photos.len(), paths.join(", "))
     };
-    let lines = [
+    let mut lines = vec![
         "You read one food message for a calorie log. Reply with JSON only: no prose, no code fence.".to_string(),
         message,
         photo_line,
@@ -98,13 +103,21 @@ pub fn prompt(text: &str, photos: &[PathBuf]) -> String {
         "- Anything you cannot turn into an item goes in \"unreadable\" with a short reason. No food at all: both lists empty.".to_string(),
         EXAMPLE.to_string(),
     ];
+    if !counted.is_empty() {
+        lines.insert(3, format!("Already counted from his saved labels; do not list these again, even if a photo shows them: {}. Still list every other food, such as the soup, broth or side they came with, without the counted pieces.", redact::sensitive(&counted.join("; "))));
+    }
     lines.join("\n")
 }
 
 /// Runs the helper once: photo paths as arguments, the prompt on stdin. Down on any failure; the output is never printed.
 pub fn read(cmd: &Path, text: &str, photos: &[PathBuf], timeout: Duration) -> Reading {
+    read_counted(cmd, text, photos, &[], timeout)
+}
+
+/// `read`, telling the reader which saved foods are already counted.
+pub fn read_counted(cmd: &Path, text: &str, photos: &[PathBuf], counted: &[String], timeout: Duration) -> Reading {
     let args: Vec<String> = photos.iter().map(|p| p.to_string_lossy().into_owned()).collect();
-    let Some(out) = ocr::run_args(cmd, &args, prompt(text, photos).as_bytes(), timeout) else {
+    let Some(out) = ocr::run_args(cmd, &args, prompt_counted(text, photos, counted).as_bytes(), timeout) else {
         eprintln!("pip: model helper gave nothing");
         return Reading::Down;
     };

@@ -22,7 +22,8 @@ const MAX_G: f64 = 5000.0;
 pub struct SavedFood {
     /// The note's file stem, the name Pip writes.
     pub name: String,
-    /// Every name the food answers to: the stem, the H1 and the front-matter aliases.
+    /// The stem, the H1 and the front-matter aliases (Pip writes `default_aliases` there when it creates the note; he can
+    /// edit them). A typed piece matches only when its words equal one of these.
     pub names: Vec<String>,
     pub serving_g: Option<f64>,
     pub serving_pc: Option<f64>,
@@ -273,8 +274,10 @@ fn splice(old: &str, block: &str) -> String {
 
 /// A new note: the front matter a kitchen-vault ingredient note carries, the block, and the hub line.
 fn new_note(f: &SavedFood, block: &str) -> String {
+    let aliases = default_aliases(&f.name);
+    let aliases = if aliases.is_empty() { String::new() } else { format!("aliases:\n{}", aliases.iter().map(|a| format!("  - \"{a}\"\n")).collect::<String>()) };
     format!(
-        "---\ntags:\n  - making\n  - ingredient\n  - packaged\nstatus: active\n---\n\n# {}\n\n{block}\n\nSaved by Pip from a label photo. Used in: (link recipes here)\n\n**Hub:** [[Home]] · [[Pantry]] · [[Foods]]\n",
+        "---\ntags:\n  - making\n  - ingredient\n  - packaged\nstatus: active\n{aliases}---\n\n# {}\n\n{block}\n\nSaved by Pip from a label photo. Used in: (link recipes here)\n\n**Hub:** [[Home]] · [[Pantry]] · [[Foods]]\n",
         f.name
     )
 }
@@ -299,10 +302,16 @@ fn write_index(dir: &Path) -> io::Result<()> {
 pub fn upsert(dir: &Path, f: &SavedFood) -> io::Result<PathBuf> {
     fs::create_dir_all(dir)?;
     let target = find_note(dir, &f.name).unwrap_or_else(|| dir.join(format!("{}.md", f.name)));
-    let block = format_block(f);
     let text = match fs::read_to_string(&target) {
-        Ok(old) => splice(&old, &block),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => new_note(f, &block),
+        Ok(old) => {
+            // A re-sent label keeps the last count he logged.
+            let mut f = f.clone();
+            if f.last.is_none() {
+                f.last = parse_block(&old).and_then(|o| o.last);
+            }
+            splice(&old, &format_block(&f))
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => new_note(f, &format_block(f)),
         Err(e) => return Err(e),
     };
     write_atomic(&target, &text)?;
@@ -369,11 +378,7 @@ fn food_words(sc: &nutrition::Scan) -> Vec<String> {
         }
     }
     kept.push_str(&sc.text[at..]);
-    kept.split(|c: char| !c.is_alphanumeric() && c != '\'')
-        .filter(|w| !w.is_empty())
-        .map(str::to_lowercase)
-        .filter(|w| !nutrition::STOP.contains(&w.as_str()))
-        .collect()
+    key_words(&kept)
 }
 
 /// Plural-tolerant equality of two lowercase words.
@@ -381,33 +386,55 @@ fn same(a: &str, b: &str) -> bool {
     a == b || a.strip_suffix('s') == Some(b) || b.strip_suffix('s') == Some(a)
 }
 
-/// Whether the food words name this food. A table name in the words (`salmon`) needs the food's whole name, so a saved
-/// "Northwind Salmon Fillets" never takes `salmon 150g` off the table.
-fn fits(words: &[String], f: &SavedFood) -> bool {
-    f.names.iter().any(|name| {
-        let nw = name_words(name);
-        if nw.is_empty() || words.is_empty() {
-            return false;
-        }
-        if nutrition::lookup(&words.join(" ")).is_ok() {
-            nw.iter().all(|n| words.iter().any(|w| same(w, n)))
-        } else {
-            words.iter().all(|w| nw.iter().any(|n| same(w, n)))
-        }
-    })
+/// Lowercase words of `s` (letters, digits and apostrophes) with the table's stop words dropped.
+pub fn key_words(s: &str) -> Vec<String> {
+    s.split(|c: char| !c.is_alphanumeric() && c != '\'')
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .filter(|w| !nutrition::STOP.contains(&w.as_str()))
+        .collect()
 }
 
-/// Whether every food word of a piece is a word of one of the saved food's names (no table lookup), so a piece with
-/// anything else in it is still split on " with ".
-fn whole_name(words: &[String], f: &SavedFood) -> bool {
-    !words.is_empty() && f.names.iter().any(|name| {
-        let nw = name_words(name);
-        words.len() <= nw.len() && words.iter().all(|w| nw.iter().any(|n| same(w, n)))
-    })
+/// Whether the words equal one of the food's names (plural-tolerant), and nothing less or more.
+fn is_name(words: &[String], f: &SavedFood) -> bool {
+    !words.is_empty()
+        && f.names.iter().any(|n| {
+            let nw = key_words(n);
+            nw.len() == words.len() && nw.iter().zip(words).all(|(a, b)| same(a, b))
+        })
 }
 
-fn name_words(name: &str) -> Vec<String> {
-    name.split(|c: char| !c.is_alphanumeric() && c != '\'').filter(|w| !w.is_empty()).map(str::to_lowercase).collect()
+/// Whether the text's words equal one of the saved food's names.
+pub fn names_food(text: &str, f: &SavedFood) -> bool {
+    is_name(&key_words(text), f)
+}
+
+/// The short names Pip writes in a new note: the name without its brand word, and its last word. A candidate with a
+/// digit, no word of 3+ letters, the same words as the name or a kept alias, or a table food's name is skipped.
+pub fn default_aliases(name: &str) -> Vec<String> {
+    let w: Vec<&str> = name.split_whitespace().collect();
+    let mut cands: Vec<String> = Vec::new();
+    if w.len() >= 3 {
+        cands.push(w[1..].join(" "));
+    }
+    if w.len() >= 2 {
+        cands.push(w[w.len() - 1].to_string());
+    }
+    let name_kw = key_words(name);
+    let mut kept: Vec<String> = Vec::new();
+    for c in cands {
+        let kw = key_words(&c);
+        let ok = !kw.is_empty()
+            && !kw.iter().any(|x| x.chars().any(|ch| ch.is_ascii_digit()))
+            && kw.iter().any(|x| x.chars().count() >= 3)
+            && kw != name_kw
+            && !kept.iter().any(|k| key_words(k) == kw)
+            && nutrition::lookup(&c).is_err();
+        if ok {
+            kept.push(c);
+        }
+    }
+    kept
 }
 
 /// Grams for a count of a saved food, or the reason it cannot be worked out.
@@ -438,14 +465,18 @@ pub fn take(text: &str, foods: &[SavedFood], default_portion: bool) -> Taken {
         // A piece that names a saved food whole stays whole, so a saved name with " with " in it (`Northwind Mac with
         // Cheese`) is not split. Only a piece that names no saved food is split on " with ".
         let (_, words) = words_of(&whole);
-        let parts: Vec<String> = if foods.iter().any(|f| whole_name(&words, f)) {
+        // Words that only equal a name because " with " was dropped as a stop word (`chicken 150g with dumplings 150g`) do not
+        // keep the piece whole: it stays whole only when the saved name itself has " with " in it.
+        let has_with = whole.to_lowercase().contains(" with ");
+        let keep = foods.iter().any(|f| is_name(&words, f) && (!has_with || f.names.iter().any(|n| n.to_lowercase().contains(" with "))));
+        let parts: Vec<String> = if keep {
             vec![whole.clone()]
         } else {
             whole.split(" with ").map(str::to_string).collect()
         };
         for piece in parts.iter().map(String::as_str) {
             let (sc, words) = words_of(piece);
-            let hits: Vec<&SavedFood> = foods.iter().filter(|f| fits(&words, f)).collect();
+            let hits: Vec<&SavedFood> = foods.iter().filter(|f| is_name(&words, f)).collect();
             match hits.as_slice() {
                 [] => kept.push(piece.trim().to_string()),
                 [_, _, ..] => {
@@ -474,17 +505,6 @@ fn words_of(piece: &str) -> (nutrition::Scan, Vec<String>) {
     let sc = nutrition::scan(&target);
     let words = food_words(&sc);
     (sc, words)
-}
-
-/// Whether a reader's item (`item`, a food name) is the food the saved name is: the item names the saved name's main
-/// food word (its last word, plural-tolerant), so `Pork wontons in broth` covers "Northwind Pork Wontons" but
-/// `cooked rice` does not. Keeps a photo's estimate of food the caption already counted from its label out (#146).
-pub fn covers(item: &str, saved: &str) -> bool {
-    let (iw, sw) = (name_words(item), name_words(saved));
-    // Words before the matched one must be words of the saved name too, so `wonton soup` is not "Beef Noodle Soup".
-    sw.last().is_some_and(|m| {
-        iw.iter().position(|i| same(i, m)).is_some_and(|at| iw[..at].iter().all(|w| sw.iter().any(|n| same(w, n))))
-    })
 }
 
 /// One matched piece: its amount (or the default) worked out against the label, or refused with the reason.
