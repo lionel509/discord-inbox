@@ -126,6 +126,19 @@ pub fn typed_spans(text: &str) -> Vec<TypedSpan> {
     out
 }
 
+/// The counts he typed (`24 wontons`, `3 pieces`): a reader's `count` must be one of them.
+pub fn typed_counts(text: &str) -> Vec<f64> {
+    let mut out = Vec::new();
+    for piece in split_pieces(text) {
+        for a in scan(&piece).amounts {
+            if matches!(a.kind, Kind::Bare | Kind::Piece { .. }) {
+                out.push(a.value);
+            }
+        }
+    }
+    out
+}
+
 pub const FOODS: &[Food] = &[
     Food { name: "salmon", aliases: &["salmon fillet", "atlantic salmon", "skinless salmon"], kcal: 208.0, protein: 20.4, carbs: 0.0, fat: 13.4, veg: false, cup_g: None, piece_g: Some(150.0), portion_g: 100.0, source: "USDA SR 15236" },
     Food { name: "dry rice", aliases: &["raw rice", "uncooked rice", "white rice dry", "rice dry"], kcal: 365.0, protein: 7.1, carbs: 80.0, fat: 0.7, veg: false, cup_g: Some(185.0), piece_g: None, portion_g: 92.5, source: "USDA SR 20044" },
@@ -939,7 +952,7 @@ pub fn item_line(item: &Item) -> String {
 /// The tail of a label food's line (#146): counted by its pieces, grams or servings, `default` when he named no count.
 /// `None` for every other food, so table and reader lines are unchanged.
 pub fn label_tail(item: &Item) -> Option<String> {
-    if item.food.source != "label" {
+    if item.food.source != "label" || item.scale {
         return None;
     }
     let what = match item.unit {

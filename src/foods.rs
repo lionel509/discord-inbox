@@ -135,16 +135,20 @@ fn unit_word(q: f64, u: Unit) -> String {
     }
 }
 
-/// The Pip-owned block of a note: the markers and the lines between them. No trailing newline.
-pub fn format_block(f: &SavedFood) -> String {
+/// The serving as the note writes it after `- serving: ` (`140 g · 8 pc`, `140 g`, `? g · 8 pc`).
+pub fn serving_text(f: &SavedFood) -> String {
     let serving_g = f.serving_g.map(|g| format!("{} g", num(g))).unwrap_or_else(|| "? g".to_string());
-    let serving = match f.serving_pc {
+    match f.serving_pc {
         Some(pc) => format!("{serving_g} · {} pc", num(pc)),
         None => serving_g,
-    };
+    }
+}
+
+/// The Pip-owned block of a note: the markers and the lines between them. No trailing newline.
+pub fn format_block(f: &SavedFood) -> String {
     let mut lines = vec![
         BLOCK_OPEN.to_string(),
-        format!("- serving: {serving}"),
+        format!("- serving: {}", serving_text(f)),
         format!(
             "- per serving: {} kcal · P {} g · C {} g · F {} g",
             opt(f.kcal),
@@ -207,7 +211,7 @@ pub fn parse_block(text: &str) -> Option<SavedFood> {
 }
 
 /// Lowercase words with every other character as a break, so `Northwind-Pork` and `northwind pork` compare equal.
-fn norm(s: &str) -> String {
+pub(crate) fn norm(s: &str) -> String {
     s.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase).collect::<Vec<_>>().join(" ")
 }
 
@@ -229,7 +233,8 @@ pub fn load(dir: &Path) -> Vec<SavedFood> {
             if let Some(h1) = body.lines().map(str::trim).find_map(|l| l.strip_prefix("# ")) {
                 names.push(h1.trim().to_string());
             }
-            names.extend(recipes::frontmatter_aliases(fm));
+            // An alias that is only table words never names a saved food, whoever wrote it.
+            names.extend(recipes::frontmatter_aliases(fm).into_iter().filter(|a| usable_alias(a)));
             f.name = stem;
             f.names = names;
             Some(f)
@@ -404,16 +409,11 @@ fn is_name(words: &[String], f: &SavedFood) -> bool {
         })
 }
 
-/// Whether every key word of a reader's estimate is a word of one of the food's names. Only used to move an estimate
-/// to Not counted; typed text is matched by `names_food` alone.
-pub fn may_be_food(text: &str, f: &SavedFood) -> bool {
-    let w = key_words(text);
-    !w.is_empty() && w.iter().all(|x| f.names.iter().any(|n| key_words(n).iter().any(|y| same(x, y))))
-}
-
-/// Whether the text's words equal one of the saved food's names.
-pub fn names_food(text: &str, f: &SavedFood) -> bool {
-    is_name(&key_words(text), f)
+/// Whether a short name can stand for a saved food: it has food words, is not a table food's name, and is not only
+/// table words.
+fn usable_alias(a: &str) -> bool {
+    let kw = key_words(a);
+    !kw.is_empty() && nutrition::lookup(a).is_err() && !kw.iter().all(|x| nutrition::is_table_word(x))
 }
 
 /// The short names Pip writes in a new note: the name without its brand word, and its last word. A candidate with a
@@ -436,8 +436,7 @@ pub fn default_aliases(name: &str) -> Vec<String> {
             && kw.iter().any(|x| x.chars().count() >= 3)
             && kw != name_kw
             && !kept.iter().any(|k| key_words(k) == kw)
-            && nutrition::lookup(&c).is_err()
-            && !kw.iter().all(|x| nutrition::is_table_word(x));
+            && usable_alias(&c);
         if ok {
             kept.push(c);
         }
@@ -451,7 +450,7 @@ fn grams_for(f: &SavedFood, q: f64, u: Unit) -> Result<f64, String> {
     match u {
         Unit::Piece => match f.serving_pc {
             Some(pc) => Ok(q * sg / pc),
-            None => Err("its label has no piece count; say grams (wontons 200g) or servings (2 servings wontons)".to_string()),
+            None => Err(format!("its label has no piece count; say grams ({n} 200g) or servings (2 servings {n})", n = f.name.to_lowercase())),
         },
         Unit::Portion => Ok(q * sg),
         _ => Ok(q),
@@ -545,12 +544,51 @@ fn take_one(f: &SavedFood, piece: &str, sc: &nutrition::Scan, default_portion: b
             _ => return refuse(out, "say pieces, grams or servings for this food (wontons 200g, 2 servings wontons)".to_string()),
         },
     };
-    let grams = match grams_for(f, q, u) {
-        Ok(g) => g,
-        Err(hint) => return refuse(out, hint),
-    };
-    if !(1.0..=MAX_G).contains(&grams) {
-        return refuse(out, "you typed this weight; one food must be 1 g to 5 kg".to_string());
+    match item_for(f, food, q, u, assumed) {
+        Ok(item) => out.items.push(item),
+        Err(hint) => refuse(out, hint),
     }
-    out.items.push(Item { food, grams, unit: u, qty: q, assumed, estimated: false, scale: false });
+}
+
+/// A count of a saved food worked out against its label, or the reason it cannot be.
+fn item_for(f: &SavedFood, food: &'static Food, q: f64, u: Unit, assumed: bool) -> Result<Item, String> {
+    let grams = grams_for(f, q, u)?;
+    if !(1.0..=MAX_G).contains(&grams) {
+        return Err("you typed this weight; one food must be 1 g to 5 kg".to_string());
+    }
+    Ok(Item { food, grams, unit: u, qty: q, assumed, estimated: false, scale: false })
+}
+
+/// Prices a reader item the reader marked as one of his saved foods (#146, round 7). The mark must equal one of a
+/// note's names (`norm`). Amount, first that applies: the typed weight bound to the item; the count he typed (the
+/// reader copies it, and it must be one of `typed_counts`); a scale reading; his last count; one label serving.
+/// `Err` is the reason the item must stay the reader's estimate.
+pub fn price(mark: &str, count: Option<f64>, typed: Option<f64>, scale: Option<f64>, typed_counts: &[f64], foods: &[SavedFood]) -> Result<Item, String> {
+    let m = norm(mark);
+    let hits: Vec<&SavedFood> = foods.iter().filter(|f| f.names.iter().any(|n| norm(n) == m)).collect();
+    let f = match hits.as_slice() {
+        [] => return Err(format!("\"{mark}\" is not one of your saved foods")),
+        [f] => *f,
+        _ => {
+            let names: Vec<&str> = hits.iter().map(|f| f.name.as_str()).collect();
+            return Err(format!("more than one saved food is named that: {}", names.join(", ")));
+        }
+    };
+    let food = food_of(f).ok_or_else(|| format!("its note is missing {}; send the label again", missing(f).join(", ")))?;
+    if let Some(g) = typed {
+        return item_for(f, food, g, Unit::G, false);
+    }
+    if let Some(c) = count.filter(|c| *c > 0.0 && typed_counts.contains(c)) {
+        return item_for(f, food, c, Unit::Piece, false);
+    }
+    if let Some(g) = scale {
+        return item_for(f, food, g, Unit::G, false).map(|mut i| {
+            i.scale = true;
+            i
+        });
+    }
+    match f.last {
+        Some((q, u)) => item_for(f, food, q, u, true),
+        None => item_for(f, food, 1.0, Unit::Portion, true),
+    }
 }

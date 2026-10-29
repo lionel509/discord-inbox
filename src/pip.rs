@@ -153,13 +153,27 @@ struct Analysis {
     down: bool,
 }
 
-/// The typed text's items: the reader's when it answers, else the table's. `true` when the reader was down.
-fn typed_of(s: &str, counted: &[String], read: Option<&dyn Fn(&str, &[String]) -> Option<Parsed>>) -> (Parsed, bool) {
+/// The table's reading of typed text: saved foods by their exact names first, the table on the rest.
+fn parsed_of(tk: foods::Taken) -> Parsed {
+    let mut p = nutrition::parse_meal(&tk.rest);
+    p.items.splice(0..0, tk.items);
+    p.unknown.splice(0..0, tk.unknown);
+    p
+}
+
+/// The typed text's items: the reader's when it answers, else saved foods by exact name and the table's. Returns
+/// `(parsed, down, saved)`: `down` when the reader was wired and gave nothing, `saved` when a typed line named a saved
+/// food (counted or refused), so the message is a meal.
+fn typed_of(s: &str, foods: &[SavedFood], photo: bool, read: Option<&dyn Fn(&str) -> Option<Parsed>>) -> (Parsed, bool, bool) {
+    let tk = foods::take(s, foods, true);
+    let saved = !tk.items.is_empty() || !tk.unknown.is_empty();
     match read {
-        None => (nutrition::parse_meal(s), false),
-        Some(f) => match f(s, counted) {
-            Some(p) => (p, false),
-            None => (nutrition::parse_meal(s), true),
+        None => (parsed_of(tk), false, saved),
+        // Nothing but saved-food counts and no photo: priced here, no reader call (his main path, exact and free).
+        Some(_) if !photo && saved && tk.rest.trim().is_empty() => (parsed_of(tk), false, true),
+        Some(f) => match f(s) {
+            Some(p) => (p, false, false),
+            None => (parsed_of(tk), true, saved),
         },
     }
 }
@@ -174,48 +188,19 @@ fn without_name(text: &str, name: &str) -> Option<String> {
     Some(format!("{}{}", &text[..start], &text[end..]))
 }
 
-/// Saved foods first (#146): a typed count of a saved food (`24 wontons`) becomes items from its label, and the rest goes
-/// through `analyze_rest` as before. A refused count still makes the message a meal, with the refusal under Not counted.
-fn analyze(text: &str, recipes: &[Recipe], foods: &[SavedFood], read: Option<&dyn Fn(&str, &[String]) -> Option<Parsed>>) -> Analysis {
-    let t = foods::take(text, foods, true);
-    let counted: Vec<String> = t.items.iter().map(|i| format!("{} {}", i.food.name, nutrition::label_tail(i).unwrap_or_default().trim())).collect();
-    let mut an = analyze_rest(&t.rest, &counted, recipes, foods, read);
-    if t.items.is_empty() && t.unknown.is_empty() {
-        return an;
-    }
-    // The reader was told what is counted; an estimate whose words are all words of a counted food's names may be that
-    // food, so it goes to Not counted with a way to add it back. Anything else is kept.
-    let counted_foods: Vec<&SavedFood> = foods.iter().filter(|f| t.items.iter().any(|i| i.food.name == f.name)).collect();
-    let mut dropped = Vec::new();
-    an.parsed.items.retain(|i| {
-        let hit = if i.estimated { counted_foods.iter().find(|f| foods::may_be_food(i.food.name, f)) } else { None };
-        if let Some(f) = hit {
-            let hint = if foods::names_food(i.food.name, f) {
-                "already counted from its label".to_string()
-            } else {
-                format!("may be the {} already counted from its label; if it is a separate food, send: {} {:.0}g", f.name, i.food.name.to_lowercase(), i.grams)
-            };
-            dropped.push(nutrition::Unknown { text: format!("photo estimate {}", i.food.name), hint });
-        }
-        hit.is_none()
-    });
-    an.parsed.unknown.extend(dropped);
-    an.parsed.items.splice(0..0, t.items);
-    an.parsed.unknown.splice(0..0, t.unknown);
-    an.is_meal = true;
-    an
-}
-
 /// Recipe first (a name match scales it), then the typed lines, then the merge where typed rows win.
+/// One reader call on the whole message (it marks saved foods, `pip_model::parse_saved` prices them); without a reader,
+/// or when it is down, saved foods by their exact typed names (`foods::take`) and the table on the rest. A photo-less
+/// message that is only saved-food counts is priced by `take` with no reader call.
 /// With a reader wired (`read`), a meal needs at least one item; without one, today's rule applies.
-fn analyze_rest(text: &str, counted: &[String], recipes: &[Recipe], foods: &[SavedFood], read: Option<&dyn Fn(&str, &[String]) -> Option<Parsed>>) -> Analysis {
+fn analyze(text: &str, recipes: &[Recipe], foods: &[SavedFood], photo: bool, read: Option<&dyn Fn(&str) -> Option<Parsed>>) -> Analysis {
     let hit = match recipes::resolve_or_refuse(text, recipes) {
         Ok(hit) => hit,
         Err(r) => {
             // A recipe line the typed text cannot use: the meal is still logged, with the refusal as its unknown.
-            let (mut typed, down) = typed_of(&r.rest, counted, read);
+            let (mut typed, down, saved) = typed_of(&r.rest, foods, photo, read);
             typed.unknown.insert(0, r.unknown);
-            let is_meal = read.is_none() || !typed.items.is_empty();
+            let is_meal = read.is_none() || saved || !typed.items.is_empty();
             return Analysis { parsed: typed, overridden: Vec::new(), recipe: None, skipped: Vec::new(), assumed: Vec::new(), is_meal, down };
         }
     };
@@ -225,9 +210,9 @@ fn analyze_rest(text: &str, counted: &[String], recipes: &[Recipe], foods: &[Sav
         (Some(h), Some(_)) => without_name(text, &h.matched).unwrap_or_else(|| typed_text.clone()),
         _ => typed_text.clone(),
     };
-    let (typed, down) = typed_of(&model_text, counted, read);
+    let (typed, down, saved) = typed_of(&model_text, foods, photo, read);
     let Some(h) = hit else {
-        let is_meal = if read.is_some() { !typed.items.is_empty() } else { !typed.items.is_empty() || nutrition::looks_like_food(&typed_text) };
+        let is_meal = saved || !typed.items.is_empty() || (read.is_none() && nutrition::looks_like_food(&typed_text));
         return Analysis { parsed: typed, overridden: Vec::new(), recipe: None, skipped: Vec::new(), assumed: Vec::new(), is_meal, down };
     };
     let name = h.recipe.name.as_str();
@@ -351,7 +336,7 @@ async fn log_message<M: Inbound>(
     }
     let (mut an, paths) = match cfg.model.as_deref() {
         None => {
-            let an = analyze(&subject, &recipe_list, &food_list, None);
+            let an = analyze(&subject, &recipe_list, &food_list, !files.is_empty(), None);
             if fix_rest.is_some() && !an.is_meal {
                 return fix_usage(cfg, m, msg_id).await;
             }
@@ -377,12 +362,12 @@ async fn log_message<M: Inbound>(
             let label_slot: Arc<Mutex<Option<Label>>> = Arc::new(Mutex::new(None));
             let slot = label_slot.clone();
             let work = tokio::task::spawn_blocking(move || {
-                let read = |t: &str, counted: &[String]| -> Option<Parsed> {
+                let read = |t: &str| -> Option<Parsed> {
                     // Nothing to read (a recipe name with no typed rest, and no photo): no model call.
                     if t.trim().is_empty() && reads.is_empty() {
                         return Some(Parsed::default());
                     }
-                    match pip_model::read_counted(&cmd, t, &reads, counted, timeout) {
+                    match pip_model::read_saved(&cmd, t, &reads, &foods_run, timeout) {
                         Reading::Read(p) => Some(p),
                         Reading::Label(l) => {
                             *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(l);
@@ -391,8 +376,8 @@ async fn log_message<M: Inbound>(
                         Reading::Down => None,
                     }
                 };
-                let read_dyn: &dyn Fn(&str, &[String]) -> Option<Parsed> = &read;
-                analyze(&subject_run, &recipes_run, &foods_run, Some(read_dyn))
+                let read_dyn: &dyn Fn(&str) -> Option<Parsed> = &read;
+                analyze(&subject_run, &recipes_run, &foods_run, !reads.is_empty(), Some(read_dyn))
             });
             let an = match typing_while(m, work).await {
                 Ok(an) => an,
