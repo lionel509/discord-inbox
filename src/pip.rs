@@ -182,6 +182,10 @@ fn analyze(text: &str, recipes: &[Recipe], foods: &[SavedFood], read: Option<&dy
     if t.items.is_empty() && t.unknown.is_empty() {
         return an;
     }
+    // A reader that sees a meal photo can estimate food the caption already counted from its label; that estimate is
+    // dropped so the food is counted once, from the label (#146).
+    let taken: Vec<&str> = t.items.iter().map(|i| i.food.name).collect();
+    an.parsed.items.retain(|i| !(i.estimated && taken.iter().any(|n| foods::covers(i.food.name, n))));
     an.parsed.items.splice(0..0, t.items);
     an.parsed.unknown.splice(0..0, t.unknown);
     an.is_meal = true;

@@ -248,3 +248,73 @@ async fn an_estimated_item_says_a_label_makes_it_exact() {
     assert_eq!(run(&c, &m).await, Outcome::Saved);
     assert!(joined(&replies).contains("nutrition label makes it exact"), "{}", joined(&replies));
 }
+
+fn snapshot(dirs: &[&Path]) -> Vec<(PathBuf, String)> {
+    let mut all = Vec::new();
+    for d in dirs {
+        if let Ok(rd) = fs::read_dir(d) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_file() {
+                    all.push((p.clone(), fs::read_to_string(&p).unwrap_or_default()));
+                }
+            }
+        }
+    }
+    all.sort();
+    all
+}
+
+#[tokio::test]
+async fn a_meal_photo_captioned_with_a_saved_count_counts_that_food_once() {
+    let (dir, foods, root) = world("photo-caption");
+    let c = cfg(&dir, Some(&foods), Some(stub(&root)));
+    set_reply(&root, LABEL);
+    assert_eq!(run(&c, &msg(4001, "", &["label.jpg"]).0).await, Outcome::Saved);
+    // The reader sees the photo and estimates the same wontons on the plate (the caption is counted from the label).
+    set_reply(&root, &reply_json(&item("pork wontons", 420.0, 230.0)));
+    let (m, _) = msg(4002, "24 wontons", &["plate.jpg"]);
+    assert_eq!(run(&c, &m).await, Outcome::Saved);
+    let n = note(&dir);
+    assert!(n.contains("(24 pc, label)"), "{n}");
+    let wonton_lines = n.lines().filter(|l| l.starts_with("- ") && l.to_lowercase().contains("wontons")).count();
+    assert_eq!(wonton_lines, 1, "the photo's estimate of the same food was counted too: {n}");
+}
+
+#[tokio::test]
+async fn a_recipe_line_naming_a_saved_food_counts_it_from_the_label() {
+    let (dir, foods, root) = world("recipe-bridge");
+    let recipes = root.join("Recipes");
+    fs::create_dir_all(&recipes).unwrap();
+    fs::write(recipes.join("Dumpling Night.md"), "# Dumpling Night\n\n## Ingredients\n\n- 8 pork wontons\n").unwrap();
+    let mut c = cfg(&dir, Some(&foods), Some(stub(&root)));
+    c.recipes_dir = Some(recipes);
+    set_reply(&root, LABEL);
+    assert_eq!(run(&c, &msg(4001, "", &["label.jpg"]).0).await, Outcome::Saved);
+    // The reader is asked about the typed rest (empty here) and says nothing; the recipe's own line is counted from the label.
+    set_reply(&root, &reply_json(""));
+    let (m, _) = msg(4003, "Dumpling Night", &[]);
+    assert_eq!(run(&c, &m).await, Outcome::Saved);
+    let n = note(&dir);
+    assert!(n.contains("(8 pc, label)"), "{n}");
+}
+
+#[tokio::test]
+async fn one_message_writes_one_thing_and_a_replay_writes_nothing() {
+    let with_item = LABEL.replace("\"items\":[]", &format!("\"items\":[{}]", item("pork wontons", 420.0, 230.0)));
+    let replies = [LABEL.to_string(), with_item, reply_json(&item("cooked rice", 180.0, 130.0)), reply_json("")];
+    for (i, reply) in replies.iter().enumerate() {
+        let (dir, foods, root) = world(&format!("invariant-{i}"));
+        let c = cfg(&dir, Some(&foods), Some(stub(&root)));
+        set_reply(&root, reply);
+        let id = 4100 + i as u64;
+        let (m, _) = msg(id, "", &["photo.jpg"]);
+        run(&c, &m).await;
+        let meal = note(&dir).contains(&format!("<!-- pip:meal {id} -->"));
+        let food = md_count(&foods) > 0;
+        assert!(!(meal && food), "reply {i} wrote a meal and a food: {}", note(&dir));
+        let before = snapshot(&[&dir, &foods]);
+        run(&c, &m).await;
+        assert_eq!(snapshot(&[&dir, &foods]), before, "reply {i}: a replay changed a file");
+    }
+}

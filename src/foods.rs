@@ -41,6 +41,9 @@ pub fn from_label(l: &Label, day: &str) -> Result<SavedFood, String> {
     if name.is_empty() {
         return Err("I couldn't read the product name; send the label with the front of the package".to_string());
     }
+    if name.len() > NAME_MAX_BYTES {
+        return Err("the product name is too long to file; send the label with the short product name".to_string());
+    }
     let bad = |field: &str| format!("the reader gave an impossible number for {field}; send the label again");
     let ok = |v: Option<f64>, lo: f64, hi: f64| v.is_none_or(|x| (lo..=hi).contains(&x));
     if !ok(l.serving_g, 1.0, 2000.0) {
@@ -77,12 +80,15 @@ pub fn from_label(l: &Label, day: &str) -> Result<SavedFood, String> {
     })
 }
 
-/// A file name from a product name: separators and punctuation become spaces, runs collapse, 60 characters at most.
+/// Longest saved name in bytes: a note file is `<name>.md` and a temp file adds more, all within 255 bytes. A longer
+/// name is refused, never cut, so two labels cannot share one note by losing their ends (#146 review).
+const NAME_MAX_BYTES: usize = 200;
+
+/// A file name from a product name: separators and punctuation become spaces, runs collapse.
 fn file_name(s: &str) -> String {
     let cleaned: String = s.chars().map(|c| if "/\\:*?\"<>|[]#^".contains(c) { ' ' } else { c }).collect();
     let joined = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
-    let short: String = joined.trim_end_matches('.').chars().take(60).collect();
-    short.trim().to_string()
+    joined.trim_end_matches('.').trim().to_string()
 }
 
 /// The label values he has not got yet, in the order the note shows them. A missing piece count is not missing.
@@ -243,7 +249,10 @@ fn find_note(dir: &Path, name: &str) -> Option<PathBuf> {
 
 /// Writes through a `.tmp` file and a rename, so a crash never leaves half a note.
 fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
-    let tmp = path.with_file_name(format!("{}.tmp", path.file_name().unwrap_or_default().to_string_lossy()));
+    // A temp name unique to this process and call, so two saves at once never rename each other's temp file (#146 review).
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_file_name(format!("{}.{}-{seq}.tmp", path.file_name().unwrap_or_default().to_string_lossy(), std::process::id()));
     fs::write(&tmp, text)?;
     fs::rename(&tmp, path)
 }
@@ -416,22 +425,29 @@ pub fn take(text: &str, foods: &[SavedFood], default_portion: bool) -> Taken {
     }
     let mut kept: Vec<String> = Vec::new();
     let mut used = false;
-    for piece in nutrition::split_pieces(text).iter().flat_map(|p| p.split(" with ")) {
-        let cleaned = piece.replace("[[", "").replace("]]", "");
-        let target = cleaned.split('|').next().unwrap_or_default().trim().to_string();
-        let sc = nutrition::scan(&target);
-        let words = food_words(&sc);
-        let hits: Vec<&SavedFood> = foods.iter().filter(|f| fits(&words, f)).collect();
-        match hits.as_slice() {
-            [] => kept.push(piece.trim().to_string()),
-            [_, _, ..] => {
-                used = true;
-                let names: Vec<&str> = hits.iter().map(|f| f.name.as_str()).collect();
-                out.unknown.push(Unknown { text: piece.trim().to_string(), hint: format!("more than one saved food fits: {}; name one", names.join(", ")) });
-            }
-            [f] => {
-                used = true;
-                take_one(f, piece.trim(), &sc, default_portion, &mut out, &mut kept);
+    for whole in nutrition::split_pieces(text) {
+        // A piece that names a saved food whole stays whole, so a saved name with " with " in it (`Northwind Mac with
+        // Cheese`) is not split. Only a piece that names no saved food is split on " with ".
+        let (_, words) = words_of(&whole);
+        let parts: Vec<String> = if foods.iter().any(|f| fits(&words, f)) {
+            vec![whole.clone()]
+        } else {
+            whole.split(" with ").map(str::to_string).collect()
+        };
+        for piece in parts.iter().map(String::as_str) {
+            let (sc, words) = words_of(piece);
+            let hits: Vec<&SavedFood> = foods.iter().filter(|f| fits(&words, f)).collect();
+            match hits.as_slice() {
+                [] => kept.push(piece.trim().to_string()),
+                [_, _, ..] => {
+                    used = true;
+                    let names: Vec<&str> = hits.iter().map(|f| f.name.as_str()).collect();
+                    out.unknown.push(Unknown { text: piece.trim().to_string(), hint: format!("more than one saved food fits: {}; name one", names.join(", ")) });
+                }
+                [f] => {
+                    used = true;
+                    take_one(f, piece.trim(), &sc, default_portion, &mut out, &mut kept);
+                }
             }
         }
     }
@@ -439,6 +455,23 @@ pub fn take(text: &str, foods: &[SavedFood], default_portion: bool) -> Taken {
         out.rest = kept.join(", ");
     }
     out
+}
+
+/// A piece's scan and its food words (its amount and the table's stop words taken out), with `[[link]]` marks and a
+/// `|` alias dropped.
+fn words_of(piece: &str) -> (nutrition::Scan, Vec<String>) {
+    let cleaned = piece.replace("[[", "").replace("]]", "");
+    let target = cleaned.split('|').next().unwrap_or_default().trim().to_string();
+    let sc = nutrition::scan(&target);
+    let words = food_words(&sc);
+    (sc, words)
+}
+
+/// Whether a reader's item (`item`, a food name) is a food the saved name covers: every word of the item's name is a
+/// word of the saved name. Used to keep a photo's estimate of food the caption already counted from its label (#146).
+pub fn covers(item: &str, saved: &str) -> bool {
+    let (iw, sw) = (name_words(item), name_words(saved));
+    !iw.is_empty() && iw.iter().all(|i| sw.iter().any(|s| same(i, s)))
 }
 
 /// One matched piece: its amount (or the default) worked out against the label, or refused with the reason.

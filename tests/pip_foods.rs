@@ -205,3 +205,45 @@ fn a_saved_food_sits_beside_a_table_food_in_one_message() {
     assert_eq!(t.items.len(), 1);
     assert_eq!(t.rest, "cooked rice 180g");
 }
+
+fn mac_with_cheese() -> SavedFood {
+    SavedFood {
+        name: "Northwind Mac with Cheese".to_string(),
+        names: vec!["Northwind Mac with Cheese".to_string()],
+        serving_g: Some(140.0),
+        serving_pc: None,
+        kcal: Some(300.0),
+        protein: Some(10.0),
+        carbs: Some(40.0),
+        fat: Some(10.0),
+        last: None,
+        saved: "2026-10-29".to_string(),
+    }
+}
+
+#[test]
+fn a_saved_name_with_with_in_it_is_one_piece() {
+    let t = foods::take("northwind mac with cheese 200g", &[mac_with_cheese()], true);
+    assert_eq!(t.items.len(), 1, "{:?}", t.items.iter().map(|i| (i.food.name, i.grams)).collect::<Vec<_>>());
+    assert!((t.items[0].grams - 200.0).abs() < 1e-9);
+    assert_eq!(t.rest, "");
+}
+
+#[test]
+fn two_long_product_names_that_share_sixty_characters_stay_two_foods() {
+    let dir = scratch("long-names");
+    let a = foods::from_label(&label("Northwind Family Size Chicken Teriyaki Flavoured Bites Party Pack Original", Some(9.0)), "2026-10-29").unwrap();
+    let b = foods::from_label(&label("Northwind Family Size Chicken Teriyaki Flavoured Bites Party Pack Spicy", Some(9.0)), "2026-10-29").unwrap();
+    foods::upsert(&dir, &a).unwrap();
+    foods::upsert(&dir, &b).unwrap();
+    let kept = foods::load(&dir);
+    assert_eq!(kept.len(), 2, "{:?}", kept.iter().map(|f| f.name.clone()).collect::<Vec<_>>());
+    assert!(kept.iter().any(|f| f.name == a.name) && kept.iter().any(|f| f.name == b.name));
+}
+
+#[test]
+fn a_product_name_too_long_to_file_is_refused_not_cut() {
+    let long = "Northwind ".repeat(30);
+    let err = foods::from_label(&label(&long, Some(9.0)), "2026-10-29").unwrap_err();
+    assert!(err.contains("too long"), "{err}");
+}
