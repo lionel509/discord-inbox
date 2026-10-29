@@ -48,8 +48,6 @@ badminton: Tue Thu
 
 ## Any day
 - Hanging knee raise
-
-| Dumbbell row | Cable row |
 ";
 
 #[derive(Clone)]
@@ -294,4 +292,84 @@ fn today_card_has_gym_field_and_footer() {
     let card = discord_inbox::summary::day_card(&dir, DAY, 1800, 2400);
     assert!(card.fields.iter().any(|(name, _, _)| name == "Gym"), "{:?}", card.fields);
     assert!(card.footer.contains("gym"), "{}", card.footer);
+}
+
+// #144 round 4: a core pick, live then replayed. The plan is a made-up fixture.
+const PLAN_CORE: &str = "---
+start: 2026-10-12
+badminton: Tue Thu
+---
+## Weeks 1–2 (made up)
+Week 1: 1 set × 15. Week 2: 2 sets × 15.
+
+### Day 1
+- Lantern lift
+- Comet hold (30 s each side)
+
+### Day 2
+- Kettle sweep
+
+## Week 3+ workouts
+2–3 sets × 15–20, slow and controlled.
+
+### Push
+- Lantern lift
+- Otter twist or Badger press
+
+### Pull
+- Kettle sweep
+
+### Legs
+- Heron reach (left + right foot)
+
+### Core (end of any day, pick 2–3)
+- Moth curl 2×10/side
+- Comet plank 2×20 s/side (slow exhale)
+- Lynx roll (30 s each side)
+- Heron reach (left + right foot)
+- Pike tuck
+";
+
+fn core_at(minutes: i64) -> &'static str {
+    let t = DateTime::parse_from_rfc3339("2026-10-26T18:00:00-04:00").unwrap() + Duration::minutes(minutes);
+    leak(t.to_rfc3339())
+}
+
+#[tokio::test]
+async fn gym_core_pick_live_then_replayed_logs_once() {
+    let dir = scratch("corepick");
+    write_plan(&dir);
+    fs::write(dir.join(gym::PLAN_FILE), PLAN_CORE).unwrap();
+    let a = allow();
+    let c = cfg(&dir);
+    let script: [(u64, &'static str); 6] = [(1, "gym"), (2, "15 15"), (3, "skip"), (4, "1 3"), (5, "10 10"), (6, "30s 30s")];
+    let mut history: Vec<Spec> = Vec::new();
+    for (i, (id, text)) in script.iter().enumerate() {
+        let spec = Spec { id: *id, author: MAIN, received: core_at(i as i64), text, files: vec![] };
+        let m = FakeMsg { spec: spec.clone(), live: true, downloads: Arc::new(AtomicUsize::new(0)) };
+        pip::handle(&a, &c, &m).await;
+        history.push(spec);
+        // After the pick (msg 4) and at the end: a replay of everything so far must add nothing.
+        if i == 3 || i == 5 {
+            let before = snapshot(&dir);
+            let h = FakeHistory { msgs: Mutex::new(history.clone()) };
+            catch_up_each(&a, &dir, &h, &PipHandler { allow: &a, cfg: &c }).await;
+            assert_eq!(before, snapshot(&dir), "msg {id}: first replay must add nothing");
+            catch_up_each(&a, &dir, &h, &PipHandler { allow: &a, cfg: &c }).await;
+            assert_eq!(before, snapshot(&dir), "msg {id}: second replay must add nothing");
+        }
+        if i == 3 {
+            let open = gym::read_open(&dir, core_at(4)).expect("the session is still open after the pick");
+            assert_eq!(open.core, Some(vec![1, 3]), "the pick is stored in the marker");
+        }
+    }
+
+    let text = fs::read_to_string(daylog::note_path(&dir, "2026-10-26")).unwrap_or_default();
+    assert_eq!(text.matches("<!-- pip:gym ").count(), 4, "own, skipped own, two picked: {text}");
+    assert!(text.contains("Moth curl · reps 10 10"), "{text}");
+    assert!(text.contains("Lynx roll · seconds 30 30"), "{text}");
+    assert!(!dir.join(gym::MARKER).exists(), "no session left open");
+    for (id, _) in script {
+        assert!(daylog::command_seen(&dir, id), "msg {id} must be claimed");
+    }
 }

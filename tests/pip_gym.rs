@@ -37,8 +37,6 @@ badminton: Tue Thu
 
 ## Any day
 - Hanging knee raise
-
-| Dumbbell row | Cable row |
 ";
 
 const RECEIVED: &str = "2026-10-12T18:00:00-04:00";
@@ -72,11 +70,11 @@ fn at(base: &str, minutes: i64) -> String {
 }
 
 #[test]
-fn exercises_reads_options_swaps_and_any_day() {
+fn exercises_reads_options_and_any_day() {
     let day1 = gym::exercises(PLAN, Session::Day1, 1);
     let names: Vec<&str> = day1.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(names, vec!["Dumbbell row", "Reverse lunges or Split squats", "Plank"]);
-    assert_eq!(day1[0].options, vec!["Dumbbell row", "Cable row"], "swap table adds the swap target");
+    assert_eq!(day1[0].options, vec!["Dumbbell row"], "no swap table: options are the plan's own A or B parts");
     assert_eq!(day1[1].options, vec!["Reverse lunges", "Split squats"], "A or B splits into options");
     assert!(day1.iter().all(|e| e.name != "Hanging knee raise"), "any-day lines only from week 3");
 
@@ -177,7 +175,7 @@ fn turn_opens_logs_and_finishes() {
 
     let r2 = at(RECEIVED, 1);
     let t2 = gym::turn(&dir, &r2, "cable row 15 15 12", 2).expect("open session takes the reply");
-    assert_eq!(t2.lines, vec!["Dumbbell row · Cable row · reps 15 15 12".to_string()]);
+    assert_eq!(t2.lines, vec!["Dumbbell row · cable row · reps 15 15 12".to_string()]);
     assert!(t2.reply.contains("2/3"), "{}", t2.reply);
     assert!(matches!(t2.marker, Marker::Keep));
     apply(&dir, 2, &t2);
