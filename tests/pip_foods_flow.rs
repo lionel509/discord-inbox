@@ -92,13 +92,18 @@ fn item(name: &str, grams: f64, kcal: f64) -> String {
 fn stub(root: &Path) -> PathBuf {
     let p = root.join("helper.sh");
     let body = format!(
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{args}'\ncat >/dev/null\ncat '{out}'\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{args}'\ncat >> '{stdin}'\ncat '{out}'\n",
         args = root.join("model-args").display(),
+        stdin = root.join("model-stdin").display(),
         out = root.join("model-out").display(),
     );
     fs::write(&p, body).unwrap();
     fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
     p
+}
+
+fn prompts(root: &Path) -> String {
+    fs::read_to_string(root.join("model-stdin")).unwrap_or_default()
 }
 
 fn calls(root: &Path) -> usize {
@@ -282,7 +287,7 @@ async fn a_meal_photo_captioned_with_a_saved_count_counts_that_food_once() {
 }
 
 #[tokio::test]
-async fn a_renamed_estimate_of_the_counted_food_is_dropped_but_other_food_stays() {
+async fn a_renamed_estimate_of_the_counted_food_is_kept_and_shown() {
     let (dir, foods, root) = world("renamed");
     let c = cfg(&dir, Some(&foods), Some(stub(&root)));
     set_reply(&root, LABEL);
@@ -292,9 +297,9 @@ async fn a_renamed_estimate_of_the_counted_food_is_dropped_but_other_food_stays(
     let (m, _) = msg(4002, "24 wontons", &["plate.jpg"]);
     assert_eq!(run(&c, &m).await, Outcome::Saved);
     let n = note(&dir);
-    assert!(!n.contains("in broth (estimated)") && n.contains("photo estimate Pork wontons in broth"), "{n}");
+    assert!(n.contains("in broth (estimated)"), "{n}");
+    assert!(!n.contains("photo estimate Pork wontons in broth"), "{n}");
     assert!(n.contains("cooked rice"), "{n}");
-    assert_eq!(n.lines().filter(|l| l.starts_with("- ") && !l.contains("unknown") && l.to_lowercase().contains("wontons")).count(), 1, "{n}");
 }
 
 #[tokio::test]
@@ -345,4 +350,44 @@ async fn a_food_typed_beside_the_saved_count_is_not_dropped() {
     let (m, _) = msg(4002, "24 wontons, wonton soup", &["plate.jpg"]);
     assert_eq!(run(&c, &m).await, Outcome::Saved);
     assert!(note(&dir).contains("wonton soup"), "{}", note(&dir));
+}
+
+#[tokio::test]
+async fn a_photo_soup_beside_a_saved_count_is_kept_once() {
+    let (dir, foods, root) = world("soup");
+    let c = cfg(&dir, Some(&foods), Some(stub(&root)));
+    set_reply(&root, LABEL);
+    assert_eq!(run(&c, &msg(4001, "", &["label.jpg"]).0).await, Outcome::Saved);
+    set_reply(&root, &reply_json(&item("Wonton soup with broth", 300.0, 60.0)));
+    let (m, _) = msg(4002, "24 wontons", &["plate.jpg"]);
+    assert_eq!(run(&c, &m).await, Outcome::Saved);
+    let n = note(&dir);
+    let counted: Vec<&str> = n.lines().filter(|l| l.contains("(24 pc, label)")).collect();
+    assert_eq!(counted.len(), 1, "{n}");
+    assert!(counted[0].contains("690 kcal"), "{n}");
+    let soup: Vec<&str> = n.lines().filter(|l| l.contains("Wonton soup with broth")).collect();
+    assert_eq!(soup.len(), 1, "{n}");
+    assert!(soup[0].contains("180 kcal"), "{n}");
+    assert!(!n.contains("photo estimate"), "{n}");
+    let p = prompts(&root);
+    assert!(p.contains("Already counted") && p.contains("Northwind Pork Wontons"), "{p}");
+}
+
+#[tokio::test]
+async fn a_typed_soup_the_reader_renames_is_kept_and_its_copy_of_the_count_is_not() {
+    let (dir, foods, root) = world("soup-typed");
+    let c = cfg(&dir, Some(&foods), Some(stub(&root)));
+    set_reply(&root, LABEL);
+    assert_eq!(run(&c, &msg(4001, "", &["label.jpg"]).0).await, Outcome::Saved);
+    let both = format!("{},{}", item("Northwind Pork Wontons", 140.0, 164.0), item("Wonton soup with broth", 300.0, 60.0));
+    set_reply(&root, &reply_json(&both));
+    let (m, _) = msg(4002, "24 wontons, wonton soup", &["plate.jpg"]);
+    assert_eq!(run(&c, &m).await, Outcome::Saved);
+    let n = note(&dir);
+    assert_eq!(n.lines().filter(|l| l.contains("(24 pc, label)")).count(), 1, "{n}");
+    let soup: Vec<&str> = n.lines().filter(|l| l.contains("Wonton soup with broth")).collect();
+    assert_eq!(soup.len(), 1, "{n}");
+    assert!(soup[0].contains("180 kcal"), "{n}");
+    assert!(n.contains("photo estimate Northwind Pork Wontons"), "{n}");
+    assert!(!n.lines().any(|l| l.contains("Northwind Pork Wontons") && l.contains("(estimated)")), "{n}");
 }

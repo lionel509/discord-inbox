@@ -28,7 +28,7 @@ fn label(name: &str, fat: Option<f64>) -> Label {
 fn wontons(last: Option<(f64, Unit)>) -> SavedFood {
     SavedFood {
         name: "Northwind Pork Wontons".to_string(),
-        names: vec!["Northwind Pork Wontons".to_string()],
+        names: vec!["Northwind Pork Wontons".to_string(), "Pork Wontons".to_string(), "Wontons".to_string()],
         serving_g: Some(140.0),
         serving_pc: Some(8.0),
         kcal: Some(230.0),
@@ -182,7 +182,7 @@ fn a_table_food_named_in_part_stays_on_the_table() {
 fn two_saved_foods_that_both_fit_are_refused_by_name() {
     let mut other = wontons(None);
     other.name = "Other Wontons".to_string();
-    other.names = vec!["Other Wontons".to_string()];
+    other.names = vec!["Other Wontons".to_string(), "Wontons".to_string()];
     let t = foods::take("24 wontons", &[wontons(None), other], true);
     assert!(t.items.is_empty());
     assert!(t.unknown[0].hint.contains("more than one"), "{:?}", t.unknown);
@@ -257,13 +257,6 @@ fn a_product_name_too_long_to_file_is_refused_not_cut() {
     let long = "Northwind ".repeat(30);
     let err = foods::from_label(&label(&long, Some(9.0)), "2026-10-29").unwrap_err();
     assert!(err.contains("too long"), "{err}");
-}
-
-#[test]
-fn covers_needs_the_counted_food_not_just_its_last_word() {
-    assert!(!foods::covers("wonton soup", "Northwind Beef Noodle Soup"));
-    assert!(!foods::covers("steamed rice", "Northwind Chicken Rice"));
-    assert!(foods::covers("Pork wontons in broth", "Northwind Pork Wontons"));
 }
 
 #[test]
