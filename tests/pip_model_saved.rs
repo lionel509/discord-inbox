@@ -189,3 +189,95 @@ fn the_prompt_lists_saved_foods_and_the_whole_message() {
     assert!(!pip_model::prompt_saved("", &photo, &[]).contains("Saved foods"));
     let _ = foods::serving_text(&w(None));
 }
+
+// ---- round 8: nothing the reader sends can beat his own text ----
+
+const WON: &str = "Northwind Pork Wontons";
+
+#[test]
+fn one_saved_food_marked_twice_is_priced_once() {
+    let r = reply(&[item("wontons", 420.0, 164.0, "estimate", Some(WON), Some(24.0)), item("plate wontons", 140.0, 164.0, "estimate", Some(WON), None)]);
+    let p = pip_model::parse_saved("24 wontons", &r, &[w(None)]).unwrap();
+    assert_eq!(p.items.len(), 1, "{}", p.items.len());
+    assert_eq!(nutrition::item_line(&p.items[0]), "420 g Northwind Pork Wontons (24 pc, label) \u{b7} 690 kcal");
+    assert_eq!(p.unknown.len(), 1, "{:?}", p.unknown);
+    assert!(p.unknown[0].hint.contains("marked twice by the reader; counted once"), "{:?}", p.unknown);
+}
+
+#[test]
+fn a_typed_name_sets_the_count_whatever_the_reader_sends() {
+    let plain = |c: Option<f64>| marked("wontons", WON, c);
+    let as_string = reply(&[item("wontons", 420.0, 164.0, "estimate", Some(WON), None).replace("\"saved\"", "\"count\":\"24\",\"saved\"")]);
+    for r in [plain(Some(8.0)), plain(None), as_string] {
+        let p = pip_model::parse_saved("24 wontons", &r, &[w(None)]).unwrap();
+        assert_eq!(p.items.len(), 1);
+        assert_eq!(nutrition::item_line(&p.items[0]), "420 g Northwind Pork Wontons (24 pc, label) \u{b7} 690 kcal", "{r}");
+        assert!(!p.items[0].assumed, "{r}");
+    }
+}
+
+#[test]
+fn a_bare_typed_name_ignores_a_count_typed_for_another_food() {
+    let r = marked("wontons", WON, Some(2.0));
+    let p = pip_model::parse_saved("2 eggs, wontons", &r, &[w(None)]).unwrap();
+    assert_eq!(p.items.len(), 1);
+    let i = &p.items[0];
+    assert!(i.assumed, "{}", nutrition::item_line(i));
+    assert_eq!(i.unit, Unit::Portion);
+}
+
+#[test]
+fn a_typed_weight_survives_a_renamed_reader_item() {
+    let r = marked("Pork dumplings", WON, Some(24.0));
+    let p = pip_model::parse_saved("wontons 200g", &r, &[w(None)]).unwrap();
+    assert_eq!(p.items.len(), 1);
+    assert_eq!((p.items[0].grams, p.items[0].unit), (200.0, Unit::G));
+    assert!(nutrition::item_line(&p.items[0]).contains("label"), "{}", nutrition::item_line(&p.items[0]));
+}
+
+#[test]
+fn typed_servings_of_a_saved_food_are_counted() {
+    let r = marked("rice bowl", "Northwind Rice Bowl", None);
+    let p = pip_model::parse_saved("2 servings northwind rice bowl", &r, &[b()]).unwrap();
+    assert_eq!(p.items.len(), 1);
+    assert_eq!(nutrition::item_line(&p.items[0]), "500 g Northwind Rice Bowl (2 servings, label) \u{b7} 800 kcal");
+}
+
+#[test]
+fn a_count_typed_for_a_table_food_is_not_copied_onto_a_saved_food() {
+    let r = marked("dumplings", WON, Some(2.0));
+    let p = pip_model::parse_saved("2 eggs, dumplings", &r, &[w(None)]).unwrap();
+    assert_eq!(p.items.len(), 1);
+    assert!(p.items[0].assumed, "{}", nutrition::item_line(&p.items[0]));
+    assert_ne!(p.items[0].unit, Unit::Piece);
+}
+
+#[test]
+fn a_typed_name_twice_is_refused_and_keeps_the_estimate() {
+    let r = marked("wontons", WON, Some(24.0));
+    let p = pip_model::parse_saved("24 wontons, 8 wontons", &r, &[w(None)]).unwrap();
+    assert!(p.unknown.iter().any(|u| u.hint.contains("named more than once in your message")), "{:?}", p.unknown);
+    assert!(p.items.iter().all(|i| i.food.source != "label"));
+}
+
+#[test]
+fn a_typed_saved_food_the_reader_omits_is_named_under_not_counted() {
+    let r = reply(&[item("egg", 100.0, 143.0, "estimate", None, None)]);
+    let p = pip_model::parse_saved("24 wontons, 2 eggs", &r, &[w(None)]).unwrap();
+    assert_eq!(p.items.len(), 1);
+    assert_eq!(p.unknown.len(), 1, "{:?}", p.unknown);
+    assert!(p.unknown[0].hint.contains("your saved food Northwind Pork Wontons was not matched to an item"), "{:?}", p.unknown);
+}
+
+#[test]
+fn a_saved_food_priced_from_a_mark_is_not_also_named_as_omitted() {
+    let r = marked("wontons", WON, Some(24.0));
+    let p = pip_model::parse_saved("24 wontons", &r, &[w(None)]).unwrap();
+    assert!(p.unknown.is_empty(), "{:?}", p.unknown);
+}
+
+#[test]
+fn the_prompt_says_to_list_each_saved_food_once_marked() {
+    let p = pip_model::prompt_saved("24 wontons", &[], &[w(None)]);
+    assert!(p.contains("List each saved food once, marked: never add a second, unmarked item for it, even when the photo shows it or you would name it differently."), "{p}");
+}

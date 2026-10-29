@@ -510,3 +510,28 @@ async fn a_typed_soup_the_reader_renames_is_kept_beside_the_marked_count() {
     assert!(!n.lines().any(|l| l.contains("Northwind Pork Wontons") && l.contains("(estimated)")), "{n}");
     assert!(!n.contains("unknown"), "{n}");
 }
+
+#[tokio::test]
+async fn a_label_photo_with_a_caption_says_the_caption_was_not_logged() {
+    let (dir, foods, root) = world("label-caption");
+    let c = cfg(&dir, Some(&foods), Some(stub(&root)));
+    set_reply(&root, LABEL);
+    let (m, replies) = msg(4030, "24 wontons", &["label.jpg"]);
+    assert_eq!(run(&c, &m).await, Outcome::Saved);
+    assert!(joined(&replies).contains("Your text was not logged as a meal; send it again to count it."), "{}", joined(&replies));
+    let (m2, replies2) = msg(4031, "", &["label.jpg"]);
+    run(&c, &m2).await;
+    assert!(!joined(&replies2).contains("not logged as a meal"), "{}", joined(&replies2));
+}
+
+#[tokio::test]
+async fn a_photoless_count_with_other_food_reaches_the_reader() {
+    let (dir, foods, root) = world("photoless-rest");
+    let c = cfg(&dir, Some(&foods), Some(stub(&root)));
+    set_reply(&root, LABEL);
+    run(&c, &msg(4040, "", &["label.jpg"]).0).await;
+    let before = calls(&root);
+    set_reply(&root, &reply_json(&item("wonton soup", 300.0, 60.0)));
+    run(&c, &msg(4041, "24 wontons, wonton soup", &[]).0).await;
+    assert_eq!(calls(&root), before + 1, "other food in the message must reach the reader");
+}
