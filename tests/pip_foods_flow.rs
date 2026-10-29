@@ -1,0 +1,250 @@
+//! #146: a label photo saves a food note; a later count logs from it. Through `pip::handle` with the reader stubbed by a
+//! `/bin/sh` helper (`PIP_MODEL`), as in `tests/pip_model_flow.rs`. Scratch dirs under the temp dir; no live model.
+use discord_inbox::allowlist;
+use discord_inbox::daylog;
+use discord_inbox::ingest::{Inbound, Outcome};
+use discord_inbox::pip::{self, Config};
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+const MAIN: u64 = 100000000000000001;
+const MAIN_CH: u64 = 5001;
+const LABEL: &str = r#"{"label":{"name":"Northwind Pork Wontons","serving_g":140,"serving_pc":8,"kcal":230,"protein":9,"carbs":28,"fat":9},"items":[],"unreadable":[]}"#;
+
+struct Msg {
+    id: u64,
+    received: String,
+    text: String,
+    files: Vec<String>,
+    replies: Arc<Mutex<Vec<String>>>,
+}
+
+impl Inbound for Msg {
+    fn author_id(&self) -> u64 {
+        MAIN
+    }
+    fn msg_id(&self) -> u64 {
+        self.id
+    }
+    fn channel_id(&self) -> u64 {
+        MAIN_CH
+    }
+    fn received(&self) -> String {
+        self.received.clone()
+    }
+    fn content(&self) -> String {
+        self.text.clone()
+    }
+    fn attachment_names(&self) -> Vec<String> {
+        self.files.clone()
+    }
+    fn live(&self) -> bool {
+        false
+    }
+    async fn download(&self, _i: usize) -> Result<Vec<u8>, String> {
+        Ok(b"jpeg bytes".to_vec())
+    }
+    async fn react(&self, _emoji: &str) -> Result<(), String> {
+        Ok(())
+    }
+    async fn unreact(&self, _emoji: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn own_reactions(&self) -> Vec<String> {
+        Vec::new()
+    }
+    async fn reply(&self, text: &str) -> Result<(), String> {
+        self.replies.lock().unwrap().push(text.to_string());
+        Ok(())
+    }
+    async fn reply_rich(&self, r: &discord_inbox::rich::Rich) -> Result<(), String> {
+        self.replies.lock().unwrap().push(format!("{:?}", r));
+        Ok(())
+    }
+}
+
+/// Nutrition dir, foods dir, and the root (helper, its output and its call log live there).
+fn world(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let root = std::env::temp_dir().join(format!("pip-foods-flow-{}-{name}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let dir = root.join("Private").join("Nutrition");
+    let foods = root.join("Private").join("Pantry").join("Foods");
+    fs::create_dir_all(&dir).unwrap();
+    (dir, foods, root)
+}
+
+fn set_reply(root: &Path, json: &str) {
+    fs::write(root.join("model-out"), json).unwrap();
+}
+
+fn reply_json(items: &str) -> String {
+    format!("{{\"items\":[{items}],\"unreadable\":[]}}")
+}
+
+fn item(name: &str, grams: f64, kcal: f64) -> String {
+    format!(r#"{{"name":"{name}","grams":{grams},"typed":false,"kcal_100":{kcal},"protein_100":10,"carbs_100":10,"fat_100":5,"veg":false}}"#)
+}
+
+/// A `/bin/sh` reader: appends its arg count to a call log, then prints the reply file.
+fn stub(root: &Path) -> PathBuf {
+    let p = root.join("helper.sh");
+    let body = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{args}'\ncat >/dev/null\ncat '{out}'\n",
+        args = root.join("model-args").display(),
+        out = root.join("model-out").display(),
+    );
+    fs::write(&p, body).unwrap();
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    p
+}
+
+fn calls(root: &Path) -> usize {
+    fs::read_to_string(root.join("model-args")).unwrap_or_default().lines().count()
+}
+
+fn cfg(dir: &Path, foods: Option<&Path>, model: Option<PathBuf>) -> Config {
+    Config {
+        nutrition_dir: dir.to_path_buf(),
+        recipes_dir: None,
+        foods_dir: foods.map(Path::to_path_buf),
+        low_kcal: 1800,
+        kcal_target: 2400,
+        model,
+        model_timeout: Duration::from_secs(5),
+    }
+}
+
+fn allow() -> allowlist::Allowlist {
+    allowlist::parse(&format!("{MAIN}\n")).unwrap()
+}
+
+fn msg(id: u64, text: &str, files: &[&str]) -> (Msg, Arc<Mutex<Vec<String>>>) {
+    let replies = Arc::new(Mutex::new(Vec::new()));
+    let m = Msg {
+        id,
+        received: "2026-10-29T12:00:00-04:00".to_string(),
+        text: text.to_string(),
+        files: files.iter().map(|f| f.to_string()).collect(),
+        replies: replies.clone(),
+    };
+    (m, replies)
+}
+
+async fn run(c: &Config, m: &Msg) -> Outcome {
+    pip::handle(&allow(), c, m).await
+}
+
+fn note(dir: &Path) -> String {
+    fs::read_to_string(daylog::note_path(dir, "2026-10-29")).unwrap_or_default()
+}
+
+fn joined(r: &Arc<Mutex<Vec<String>>>) -> String {
+    r.lock().unwrap().join("\n")
+}
+
+fn md_count(dir: &Path) -> usize {
+    fs::read_dir(dir).map(|rd| rd.filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "md")).count()).unwrap_or(0)
+}
+
+#[tokio::test]
+async fn a_label_photo_saves_a_food_and_no_meal() {
+    let (dir, foods, root) = world("save");
+    let c = cfg(&dir, Some(&foods), Some(stub(&root)));
+    set_reply(&root, LABEL);
+    let (m, replies) = msg(4001, "", &["label.jpg"]);
+    assert_eq!(run(&c, &m).await, Outcome::Saved);
+    assert!(foods.join("Northwind Pork Wontons.md").exists());
+    assert!(foods.join("Foods.md").exists());
+    assert!(!note(&dir).contains("<!-- pip:meal 4001 -->"), "{}", note(&dir));
+    assert!(joined(&replies).contains("Saved Northwind Pork Wontons"), "{}", joined(&replies));
+    assert_eq!(calls(&root), 1);
+}
+
+#[tokio::test]
+async fn a_count_logs_from_the_saved_label_without_the_reader() {
+    let (dir, foods, root) = world("count");
+    let c = cfg(&dir, Some(&foods), Some(stub(&root)));
+    set_reply(&root, LABEL);
+    assert_eq!(run(&c, &msg(4001, "", &["label.jpg"]).0).await, Outcome::Saved);
+    let (m, _) = msg(4002, "24 wontons", &[]);
+    assert_eq!(run(&c, &m).await, Outcome::Saved);
+    assert_eq!(calls(&root), 1, "a typed count from a saved food needs no reader call");
+    let n = note(&dir);
+    assert!(n.contains("<!-- pip:meal 4002 -->"), "{n}");
+    assert!(n.contains("(24 pc, label)"), "{n}");
+    assert!(n.contains("690 kcal"), "{n}");
+    let food = fs::read_to_string(foods.join("Northwind Pork Wontons.md")).unwrap();
+    assert!(food.contains("- last: 24 pc"), "{food}");
+}
+
+#[tokio::test]
+async fn a_bare_name_uses_the_last_count_as_the_default() {
+    let (dir, foods, root) = world("default");
+    let c = cfg(&dir, Some(&foods), Some(stub(&root)));
+    set_reply(&root, LABEL);
+    run(&c, &msg(4001, "", &["label.jpg"]).0).await;
+    run(&c, &msg(4002, "24 wontons", &[]).0).await;
+    run(&c, &msg(4003, "wontons", &[]).0).await;
+    assert!(note(&dir).contains("(default 24 pc, label)"), "{}", note(&dir));
+}
+
+#[tokio::test]
+async fn a_replayed_label_message_saves_nothing_twice() {
+    let (dir, foods, root) = world("replay");
+    let c = cfg(&dir, Some(&foods), Some(stub(&root)));
+    set_reply(&root, LABEL);
+    let (m, _) = msg(4001, "", &["label.jpg"]);
+    assert_eq!(run(&c, &m).await, Outcome::Saved);
+    let before = calls(&root);
+    assert_eq!(run(&c, &m).await, Outcome::Skipped);
+    assert_eq!(calls(&root), before);
+    assert_eq!(md_count(&foods), 2, "one food note and the index");
+}
+
+#[tokio::test]
+async fn a_second_label_photo_updates_the_same_note() {
+    let (dir, foods, root) = world("update");
+    let c = cfg(&dir, Some(&foods), Some(stub(&root)));
+    set_reply(&root, LABEL);
+    run(&c, &msg(4001, "", &["label.jpg"]).0).await;
+    set_reply(&root, &LABEL.replace("\"kcal\":230", "\"kcal\":250"));
+    assert_eq!(run(&c, &msg(4005, "", &["label.jpg"]).0).await, Outcome::Saved);
+    assert_eq!(md_count(&foods), 2);
+    let food = fs::read_to_string(foods.join("Northwind Pork Wontons.md")).unwrap();
+    assert!(food.contains("- per serving: 250 kcal"), "{food}");
+}
+
+#[tokio::test]
+async fn a_meal_photo_never_writes_a_food() {
+    let (dir, foods, root) = world("meal-photo");
+    let c = cfg(&dir, Some(&foods), Some(stub(&root)));
+    set_reply(&root, &reply_json(&item("cooked rice", 180.0, 130.0)));
+    assert_eq!(run(&c, &msg(4010, "", &["plate.jpg"]).0).await, Outcome::Saved);
+    assert!(note(&dir).contains("<!-- pip:meal 4010 -->"), "{}", note(&dir));
+    assert_eq!(md_count(&foods), 0);
+}
+
+#[tokio::test]
+async fn with_no_foods_folder_a_label_is_refused_and_nothing_is_written() {
+    let (dir, foods, root) = world("no-dir");
+    let c = cfg(&dir, None, Some(stub(&root)));
+    set_reply(&root, LABEL);
+    let (m, replies) = msg(4020, "", &["label.jpg"]);
+    assert_eq!(run(&c, &m).await, Outcome::Saved);
+    assert!(joined(&replies).contains("PIP_FOODS_DIR"), "{}", joined(&replies));
+    assert!(!foods.exists());
+    assert!(!note(&dir).contains("<!-- pip:meal 4020 -->"));
+}
+
+#[tokio::test]
+async fn an_estimated_item_says_a_label_makes_it_exact() {
+    let (dir, foods, root) = world("estimate");
+    let c = cfg(&dir, Some(&foods), Some(stub(&root)));
+    set_reply(&root, &reply_json(&item("dumplings", 420.0, 200.0)));
+    let (m, replies) = msg(4030, "24 dumplings", &[]);
+    assert_eq!(run(&c, &m).await, Outcome::Saved);
+    assert!(joined(&replies).contains("nutrition label makes it exact"), "{}", joined(&replies));
+}
