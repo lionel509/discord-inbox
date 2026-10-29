@@ -280,3 +280,18 @@ fn gym_again_after_finish_moves_to_next_session() {
     assert!(t.reply.contains("Day 2"), "{}", t.reply);
     assert!(t.reply.contains("1/3"), "{}", t.reply);
 }
+
+// Review round 1: an all-caps bulleted exercise is a list item, not a heading that ends the section.
+#[test]
+fn all_caps_bullet_does_not_truncate_the_section() {
+    let plan = "## Push\n- BENCH PRESS\n- Overhead press\n";
+    let names: Vec<String> = gym::exercises(plan, Session::Push, 1).into_iter().map(|e| e.name).collect();
+    assert_eq!(names, vec!["BENCH PRESS".to_string(), "Overhead press".to_string()]);
+}
+
+// Review round 1: `3X15` is the same notation as `3x15`.
+#[test]
+fn uppercase_x_notation_is_read() {
+    let r = gym::parse_reply("cable row 3X15", &["Cable row".to_string()]);
+    assert_eq!(r, Reply::Did { option: Some("Cable row".into()), reps: vec![15, 15, 15] });
+}

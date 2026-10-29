@@ -119,6 +119,14 @@ fn is_heading(line: &str) -> bool {
     if t.starts_with('#') {
         return true;
     }
+    // A list item is an exercise even when it is all caps (`- BENCH PRESS`).
+    let bullet = t.starts_with("- ")
+        || t.starts_with("* ")
+        || t.starts_with("• ")
+        || t.split_once(|c: char| c == '.' || c == ')').is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
+    if bullet {
+        return false;
+    }
     !t.is_empty() && t.chars().count() <= 60 && t.chars().any(|c| c.is_alphabetic()) && !t.chars().any(|c| c.is_ascii_lowercase())
 }
 
@@ -393,7 +401,7 @@ pub fn parse_reply(text: &str, options: &[String]) -> Reply {
     let tokens: Vec<&str> = body.split(|c: char| c.is_whitespace() || c == ',').filter(|t| !t.is_empty()).collect();
     let is_num = |t: &str| !t.is_empty() && t.chars().all(|c| c.is_ascii_digit());
     let split_nxm = |t: &str| -> Option<(u32, u32)> {
-        let (a, b) = t.split_once('x').or_else(|| t.split_once('×'))?;
+        let (a, b) = t.split_once(|c: char| matches!(c, 'x' | 'X' | '×'))?;
         if is_num(a) && is_num(b) {
             Some((a.parse().ok()?, b.parse().ok()?))
         } else {

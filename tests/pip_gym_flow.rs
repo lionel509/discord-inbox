@@ -179,6 +179,8 @@ fn snapshot(dir: &Path) -> Vec<(String, Vec<u8>)> {
         Err(_) => vec![],
     };
     v.sort();
+    // catch-up keeps its own cursor file; the claim and note are what must not change.
+    v.retain(|(name, _)| !name.starts_with(".cursor-"));
     v
 }
 
@@ -207,6 +209,9 @@ async fn gym_session_live_then_replayed_twice_logs_once() {
         let c = cfg(&dir);
         let mut history = vec![Spec { id: 1, author: MAIN, received: at(0), text: "gym", files: vec![] }];
         let mut expected_blocks = 0usize;
+        // The `gym` opener is live too, so the session is open before the first reply.
+        let opener = FakeMsg { spec: history[0].clone(), live: true, downloads: Arc::new(AtomicUsize::new(0)) };
+        pip::handle(&a, &c, &opener).await;
         let len = 2 + (rng.next() % 5) as usize; // 2..=6 replies
         for i in 0..len {
             // Stop sending once the session has closed (finished or timed out), so no reply lands as a note.
