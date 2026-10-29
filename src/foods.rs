@@ -564,6 +564,16 @@ fn item_for(f: &SavedFood, food: &'static Food, q: f64, u: Unit, assumed: bool) 
 /// reader copies it, and it must be one of `typed_counts`); a scale reading; his last count; one label serving.
 /// `Err` is the reason the item must stay the reader's estimate.
 /// Round 8: when `text` names the food by an exact saved name, the text sets the amount (a bare name skips the count).
+/// The one saved food a mark resolves to (its `norm` equals one of the food's names); `None` when none or several do.
+pub fn marked<'a>(mark: &str, foods: &'a [SavedFood]) -> Option<&'a SavedFood> {
+    let m = norm(mark);
+    let mut hits = foods.iter().filter(|f| f.names.iter().any(|n| norm(n) == m));
+    match (hits.next(), hits.next()) {
+        (Some(f), None) => Some(f),
+        _ => None,
+    }
+}
+
 pub fn price(text: &str, mark: &str, count: Option<f64>, typed: Option<f64>, scale: Option<f64>, typed_counts: &[f64], foods: &[SavedFood]) -> Result<Item, String> {
     let m = norm(mark);
     let hits: Vec<&SavedFood> = foods.iter().filter(|f| f.names.iter().any(|n| norm(n) == m)).collect();

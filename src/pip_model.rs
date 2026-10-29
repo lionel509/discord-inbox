@@ -192,9 +192,17 @@ pub fn parse_saved(text: &str, out: &str, foods: &[SavedFood]) -> Option<Parsed>
     let names: Vec<String> = items.iter().take(MAX_ITEMS).map(|raw| raw.get("name").and_then(Value::as_str).map(model_text).unwrap_or_default()).collect();
     let (binds, unbound) = bind(&spans, &names);
 
-    let counts = nutrition::typed_counts(text);
+    // A number in a piece that names a saved food by an exact saved name belongs to that food (round 9).
+    let counts: Vec<f64> = nutrition::split_pieces(text)
+        .into_iter()
+        .filter(|p| {
+            let t = foods::take(p, foods, true);
+            t.items.is_empty() && t.unknown.is_empty()
+        })
+        .flat_map(|p| nutrition::typed_counts(&p))
+        .collect();
     let mut parsed = Parsed::default();
-    let mut priced: Vec<String> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
     for (at, raw) in items.iter().enumerate() {
         if at >= MAX_ITEMS {
             // Past the cap: each of the next few is named as unknown, then one line counts the rest. Never silent.
@@ -213,16 +221,18 @@ pub fn parse_saved(text: &str, out: &str, foods: &[SavedFood]) -> Option<Parsed>
                 Err(u) => parsed.unknown.push(with_typed(u, typed)),
             },
             Some(m) => {
+                // Each saved food yields at most one line per reply, keyed on the food the mark resolves to.
+                if let Some(f) = foods::marked(&m, foods) {
+                    if seen.iter().any(|n| *n == f.name) {
+                        parsed.unknown.push(Unknown { text: format!("saved food \"{m}\""), hint: "marked twice by the reader; counted once".to_string() });
+                        continue;
+                    }
+                    seen.push(f.name.clone());
+                }
                 let count = raw.get("count").and_then(Value::as_f64);
                 let scale = est.as_ref().ok().filter(|i| i.scale).map(|i| i.grams);
                 match foods::price(text, &m, count, typed, scale, &counts, foods) {
-                    Ok(item) if priced.iter().any(|n| n == item.food.name) => {
-                        parsed.unknown.push(Unknown { text: format!("saved food \"{m}\""), hint: "marked twice by the reader; counted once".to_string() });
-                    }
-                    Ok(item) => {
-                        priced.push(item.food.name.to_string());
-                        parsed.items.push(item);
-                    }
+                    Ok(item) => parsed.items.push(item),
                     // The mark is not usable: the item stays the reader's estimate, and the reply says why.
                     Err(why) => match est {
                         Ok(item) => {
@@ -235,12 +245,19 @@ pub fn parse_saved(text: &str, out: &str, foods: &[SavedFood]) -> Option<Parsed>
             }
         }
     }
-    // A saved food he typed by exact name that no mark priced is named, never dropped silently (round 8). It is not
-    // counted from the label here: the reader may have listed it unmarked.
+    // A saved food he typed that no mark resolved to is named, never dropped silently. Code cannot tell whether the
+    // reader listed it unmarked, so the line is true either way.
     if !foods.is_empty() {
-        for f in foods.iter().filter(|f| !priced.iter().any(|n| *n == f.name)) {
-            if let Some(piece) = nutrition::split_pieces(text).into_iter().find(|p| !foods::take(p, std::slice::from_ref(f), true).items.is_empty()) {
-                parsed.unknown.push(Unknown { text: piece, hint: format!("your saved food {} was not matched to an item, so it is not counted from its label; check the card or send it again", f.name) });
+        for f in foods.iter().filter(|f| !seen.iter().any(|n| *n == f.name)) {
+            let found = nutrition::split_pieces(text).into_iter().find(|p| {
+                let t = foods::take(p, std::slice::from_ref(f), true);
+                !t.items.is_empty() || !t.unknown.is_empty()
+            });
+            if let Some(piece) = found {
+                parsed.unknown.push(Unknown {
+                    text: piece,
+                    hint: format!("not priced from your saved label for {}: if a line above is this food, that is the reader's estimate; if not, it was not counted", f.name),
+                });
             }
         }
     }
