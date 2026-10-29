@@ -277,7 +277,7 @@ async fn a_meal_photo_captioned_with_a_saved_count_counts_that_food_once() {
     assert_eq!(run(&c, &m).await, Outcome::Saved);
     let n = note(&dir);
     assert!(n.contains("(24 pc, label)"), "{n}");
-    let wonton_lines = n.lines().filter(|l| l.starts_with("- ") && l.to_lowercase().contains("wontons")).count();
+    let wonton_lines = n.lines().filter(|l| l.starts_with("- ") && !l.contains("unknown") && l.to_lowercase().contains("wontons")).count();
     assert_eq!(wonton_lines, 1, "the photo's estimate of the same food was counted too: {n}");
 }
 
@@ -292,9 +292,9 @@ async fn a_renamed_estimate_of_the_counted_food_is_dropped_but_other_food_stays(
     let (m, _) = msg(4002, "24 wontons", &["plate.jpg"]);
     assert_eq!(run(&c, &m).await, Outcome::Saved);
     let n = note(&dir);
-    assert!(!n.contains("in broth"), "{n}");
+    assert!(!n.contains("in broth (estimated)") && n.contains("photo estimate Pork wontons in broth"), "{n}");
     assert!(n.contains("cooked rice"), "{n}");
-    assert_eq!(n.lines().filter(|l| l.starts_with("- ") && l.to_lowercase().contains("wontons")).count(), 1, "{n}");
+    assert_eq!(n.lines().filter(|l| l.starts_with("- ") && !l.contains("unknown") && l.to_lowercase().contains("wontons")).count(), 1, "{n}");
 }
 
 #[tokio::test]
@@ -333,4 +333,16 @@ async fn one_message_writes_one_thing_and_a_replay_writes_nothing() {
         run(&c, &m).await;
         assert_eq!(snapshot(&[&dir, &foods]), before, "reply {i}: a replay changed a file");
     }
+}
+
+#[tokio::test]
+async fn a_food_typed_beside_the_saved_count_is_not_dropped() {
+    let (dir, foods, root) = world("typed");
+    let c = cfg(&dir, Some(&foods), Some(stub(&root)));
+    set_reply(&root, LABEL);
+    assert_eq!(run(&c, &msg(4001, "", &["label.jpg"]).0).await, Outcome::Saved);
+    set_reply(&root, &reply_json(&item("wonton soup", 300.0, 150.0)));
+    let (m, _) = msg(4002, "24 wontons, wonton soup", &["plate.jpg"]);
+    assert_eq!(run(&c, &m).await, Outcome::Saved);
+    assert!(note(&dir).contains("wonton soup"), "{}", note(&dir));
 }

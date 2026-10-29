@@ -402,7 +402,7 @@ fn fits(words: &[String], f: &SavedFood) -> bool {
 fn whole_name(words: &[String], f: &SavedFood) -> bool {
     !words.is_empty() && f.names.iter().any(|name| {
         let nw = name_words(name);
-        words.iter().all(|w| nw.iter().any(|n| same(w, n)))
+        words.len() <= nw.len() && words.iter().all(|w| nw.iter().any(|n| same(w, n)))
     })
 }
 
@@ -481,7 +481,10 @@ fn words_of(piece: &str) -> (nutrition::Scan, Vec<String>) {
 /// `cooked rice` does not. Keeps a photo's estimate of food the caption already counted from its label out (#146).
 pub fn covers(item: &str, saved: &str) -> bool {
     let (iw, sw) = (name_words(item), name_words(saved));
-    sw.last().is_some_and(|m| iw.iter().any(|i| same(i, m)))
+    // Words before the matched one must be words of the saved name too, so `wonton soup` is not "Beef Noodle Soup".
+    sw.last().is_some_and(|m| {
+        iw.iter().position(|i| same(i, m)).is_some_and(|at| iw[..at].iter().all(|w| sw.iter().any(|n| same(w, n))))
+    })
 }
 
 /// One matched piece: its amount (or the default) worked out against the label, or refused with the reason.

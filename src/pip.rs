@@ -185,7 +185,17 @@ fn analyze(text: &str, recipes: &[Recipe], foods: &[SavedFood], read: Option<&dy
     // A reader that sees a meal photo can estimate food the caption already counted from its label; that estimate is
     // dropped so the food is counted once, from the label (#146).
     let taken: Vec<&str> = t.items.iter().map(|i| i.food.name).collect();
-    an.parsed.items.retain(|i| !(i.estimated && taken.iter().any(|n| foods::covers(i.food.name, n))));
+    // Food typed in the rest of the caption is never dropped, and a drop is shown under Not counted.
+    let rest = t.rest.to_lowercase();
+    let mut dropped = Vec::new();
+    an.parsed.items.retain(|i| {
+        let drop = i.estimated && !rest.contains(&i.food.name.to_lowercase()) && taken.iter().any(|n| foods::covers(i.food.name, n));
+        if drop {
+            dropped.push(nutrition::Unknown { text: format!("photo estimate {}", i.food.name), hint: "counted from the label".to_string() });
+        }
+        !drop
+    });
+    an.parsed.unknown.extend(dropped);
     an.parsed.items.splice(0..0, t.items);
     an.parsed.unknown.splice(0..0, t.unknown);
     an.is_meal = true;

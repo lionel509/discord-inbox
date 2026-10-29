@@ -258,3 +258,21 @@ fn a_product_name_too_long_to_file_is_refused_not_cut() {
     let err = foods::from_label(&label(&long, Some(9.0)), "2026-10-29").unwrap_err();
     assert!(err.contains("too long"), "{err}");
 }
+
+#[test]
+fn covers_needs_the_counted_food_not_just_its_last_word() {
+    assert!(!foods::covers("wonton soup", "Northwind Beef Noodle Soup"));
+    assert!(!foods::covers("steamed rice", "Northwind Chicken Rice"));
+    assert!(foods::covers("Pork wontons in broth", "Northwind Pork Wontons"));
+}
+
+#[test]
+fn a_repeated_table_word_is_not_swallowed_by_the_saved_name() {
+    let f = SavedFood {
+        name: "Northwind Salmon Fillets".to_string(),
+        names: vec!["Northwind Salmon Fillets".to_string()],
+        ..wontons(None)
+    };
+    let t = foods::take("salmon with northwind salmon fillets", &[f], true);
+    assert!(t.rest.contains("salmon"), "{:?}", t.rest);
+}
