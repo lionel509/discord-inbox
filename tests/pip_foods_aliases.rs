@@ -48,3 +48,26 @@ fn the_prompt_names_what_is_already_counted() {
     assert!(p.contains("Already counted") && p.contains("Northwind Pork Wontons (24 pc, label)"), "{p}");
     assert!(!pip_model::prompt("", &photo).contains("Already counted"));
 }
+
+#[test]
+fn a_short_name_is_never_only_table_words() {
+    assert!(foods::default_aliases("Northwind Chicken Rice").is_empty());
+    assert!(foods::default_aliases("Northwind Chicken").is_empty());
+    assert!(foods::default_aliases("Northwind Salmon Fillets").is_empty());
+    let kw = |n: &str| foods::default_aliases(n).iter().map(|a| foods::key_words(a)).collect::<Vec<_>>();
+    assert!(kw("Northwind Beef Noodle Soup").iter().all(|k| *k != vec!["soup".to_string()]));
+    assert!(kw("Northwind Mac and Cheese").iter().all(|k| *k != vec!["cheese".to_string()]));
+    let p: Vec<String> = foods::default_aliases("Northwind Pork Wontons").iter().map(|a| a.to_lowercase()).collect();
+    assert_eq!(p, vec!["pork wontons", "wontons"]);
+}
+
+#[test]
+fn a_photo_estimate_may_be_the_counted_food_only_by_its_words() {
+    let f = w();
+    for yes in ["Northwind Wontons", "Wontons", "pork wonton", "steamed wontons"] {
+        assert!(foods::may_be_food(yes, &f), "{yes}");
+    }
+    for no in ["Wonton soup with broth", "Pork wontons in broth", "cooked rice", "", "with"] {
+        assert!(!foods::may_be_food(no, &f), "{no}");
+    }
+}

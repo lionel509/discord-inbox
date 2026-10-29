@@ -287,6 +287,24 @@ async fn a_meal_photo_captioned_with_a_saved_count_counts_that_food_once() {
 }
 
 #[tokio::test]
+async fn a_branded_photo_estimate_of_the_counted_food_is_not_counted_twice() {
+    let (dir, foods, root) = world("branded-estimate");
+    let c = cfg(&dir, Some(&foods), Some(stub(&root)));
+    set_reply(&root, LABEL);
+    assert_eq!(run(&c, &msg(4001, "", &["label.jpg"]).0).await, Outcome::Saved);
+    set_reply(&root, &reply_json(&item("Northwind Wontons", 420.0, 230.0)));
+    let (m, _) = msg(4002, "24 wontons", &["plate.jpg"]);
+    assert_eq!(run(&c, &m).await, Outcome::Saved);
+    let n = note(&dir);
+    let label_lines: Vec<&str> = n.lines().filter(|l| l.contains("(24 pc, label)")).collect();
+    assert_eq!(label_lines.len(), 1, "{n}");
+    assert!(label_lines[0].contains("690 kcal"), "{n}");
+    assert!(!n.lines().any(|l| l.contains("Northwind Wontons") && l.contains("(estimated)")), "{n}");
+    assert!(n.contains("photo estimate Northwind Wontons"), "{n}");
+    assert!(n.contains("send: northwind wontons 420g"), "{n}");
+}
+
+#[tokio::test]
 async fn a_renamed_estimate_of_the_counted_food_is_kept_and_shown() {
     let (dir, foods, root) = world("renamed");
     let c = cfg(&dir, Some(&foods), Some(stub(&root)));

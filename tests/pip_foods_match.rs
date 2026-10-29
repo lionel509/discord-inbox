@@ -145,3 +145,22 @@ fn resaving_a_label_keeps_the_last_count() {
     foods::upsert(&dir, &f).unwrap();
     assert_eq!(foods::load(&dir)[0].last, Some((24.0, Unit::Piece)));
 }
+
+#[test]
+fn a_generic_word_never_takes_a_saved_product_by_its_derived_names() {
+    let foods: Vec<SavedFood> = ["Northwind Chicken Rice", "Northwind Beef Noodle Soup", "Northwind Mac and Cheese", "Northwind Chicken"]
+        .into_iter()
+        .map(|n| {
+            let mut names = vec![n.to_string()];
+            names.extend(foods::default_aliases(n));
+            let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+            food(n, &refs, 200.0, None, 300.0)
+        })
+        .collect();
+    for text in ["rice 150g", "cooked rice 180g", "steamed rice", "soup 300g", "cheese 200g", "chicken 150g"] {
+        let t = foods::take(text, &foods, true);
+        assert!(t.items.is_empty(), "{text}: {:?}", t.items.iter().map(|i| i.food.name).collect::<Vec<_>>());
+        assert!(t.unknown.is_empty(), "{text}");
+        assert_eq!(t.rest, text);
+    }
+}
