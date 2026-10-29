@@ -563,7 +563,8 @@ fn item_for(f: &SavedFood, food: &'static Food, q: f64, u: Unit, assumed: bool) 
 /// note's names (`norm`). Amount, first that applies: the typed weight bound to the item; the count he typed (the
 /// reader copies it, and it must be one of `typed_counts`); a scale reading; his last count; one label serving.
 /// `Err` is the reason the item must stay the reader's estimate.
-pub fn price(mark: &str, count: Option<f64>, typed: Option<f64>, scale: Option<f64>, typed_counts: &[f64], foods: &[SavedFood]) -> Result<Item, String> {
+/// Round 8: when `text` names the food by an exact saved name, the text sets the amount (a bare name skips the count).
+pub fn price(text: &str, mark: &str, count: Option<f64>, typed: Option<f64>, scale: Option<f64>, typed_counts: &[f64], foods: &[SavedFood]) -> Result<Item, String> {
     let m = norm(mark);
     let hits: Vec<&SavedFood> = foods.iter().filter(|f| f.names.iter().any(|n| norm(n) == m)).collect();
     let f = match hits.as_slice() {
@@ -575,10 +576,25 @@ pub fn price(mark: &str, count: Option<f64>, typed: Option<f64>, scale: Option<f
         }
     };
     let food = food_of(f).ok_or_else(|| format!("its note is missing {}; send the label again", missing(f).join(", ")))?;
+    // He typed this food by an exact saved name: his text sets the amount, whatever the reader sent (round 8).
+    let tk = take(text, std::slice::from_ref(f), true);
+    let mut bare = false;
+    match tk.items.len() {
+        0 if !tk.unknown.is_empty() => return Err(tk.unknown[0].hint.clone()),
+        0 => {}
+        1 => {
+            let it = tk.items.into_iter().next().expect("one item");
+            if !it.assumed {
+                return Ok(it);
+            }
+            bare = true;
+        }
+        _ => return Err("named more than once in your message".to_string()),
+    }
     if let Some(g) = typed {
         return item_for(f, food, g, Unit::G, false);
     }
-    if let Some(c) = count.filter(|c| *c > 0.0 && typed_counts.contains(c)) {
+    if let Some(c) = count.filter(|c| !bare && *c > 0.0 && typed_counts.contains(c)) {
         return item_for(f, food, c, Unit::Piece, false);
     }
     if let Some(g) = scale {

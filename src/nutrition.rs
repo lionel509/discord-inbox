@@ -130,6 +130,10 @@ pub fn typed_spans(text: &str) -> Vec<TypedSpan> {
 pub fn typed_counts(text: &str) -> Vec<f64> {
     let mut out = Vec::new();
     for piece in split_pieces(text) {
+        // A number in a piece that already parses as a table food belongs to that food.
+        if !parse_meal(&piece).items.is_empty() {
+            continue;
+        }
         for a in scan(&piece).amounts {
             if matches!(a.kind, Kind::Bare | Kind::Piece { .. }) {
                 out.push(a.value);

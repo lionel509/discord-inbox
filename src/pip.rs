@@ -388,7 +388,7 @@ async fn log_message<M: Inbound>(
             };
             let label = label_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
             if let Some(l) = label {
-                return save_label(cfg, m, msg_id, day, &l).await;
+                return save_label(cfg, m, msg_id, day, &l, &m.content()).await;
             }
             if fix_rest.is_some() && !an.is_meal {
                 return fix_usage(cfg, m, msg_id).await;
@@ -507,8 +507,8 @@ async fn log_message<M: Inbound>(
 
 /// A printed label (#146): saved as a food note, never logged as a meal. The reply says what was saved and what the
 /// label does not print. The ledger line is written after the note, so a replay saves nothing twice.
-async fn save_label<M: Inbound>(cfg: &Config, m: &M, msg_id: u64, day: &str, l: &Label) -> Outcome {
-    let text = match cfg.foods_dir.as_deref() {
+async fn save_label<M: Inbound>(cfg: &Config, m: &M, msg_id: u64, day: &str, l: &Label, caption: &str) -> Outcome {
+    let mut text = match cfg.foods_dir.as_deref() {
         None => "That's a nutrition label. Set PIP_FOODS_DIR and I'll save it; nothing was logged.".to_string(),
         Some(dir) => match foods::from_label(l, day) {
             Err(why) => format!("Nothing saved: {why}."),
@@ -522,6 +522,9 @@ async fn save_label<M: Inbound>(cfg: &Config, m: &M, msg_id: u64, day: &str, l: 
             },
         },
     };
+    if !caption.trim().is_empty() {
+        text.push_str(" Your text was not logged as a meal; send it again to count it.");
+    }
     if let Err(e) = daylog::record_command(&cfg.nutrition_dir, msg_id) {
         eprintln!("pip: command ledger on {msg_id} failed: {e}");
     }

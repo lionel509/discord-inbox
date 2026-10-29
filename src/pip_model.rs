@@ -106,7 +106,7 @@ pub fn prompt_saved(text: &str, photos: &[PathBuf], foods: &[SavedFood]) -> Stri
     ];
     if !foods.is_empty() {
         let list = foods.iter().map(|f| format!("{} ({})", f.name, foods::serving_text(f))).collect::<Vec<_>>().join("; ");
-        lines.insert(6, format!("- Saved foods, from his own labels (name; one serving): {}. An item that is one of these foods gets \"saved\": its exact name from this list, and \"count\": the number of pieces he typed for it, copied as written (never count pieces in a photo; do no arithmetic); leave \"count\" out when he typed no number for it. Fill every other field as usual. The caption and a photo of the same food are one item, never two. Never put \"saved\" on a food that is not in this list.", redact::sensitive(&list)));
+        lines.insert(6, format!("- Saved foods, from his own labels (name; one serving): {}. An item that is one of these foods gets \"saved\": its exact name from this list, and \"count\": the number of pieces he typed for it, copied as written (never count pieces in a photo; do no arithmetic); leave \"count\" out when he typed no number for it. Fill every other field as usual. The caption and a photo of the same food are one item, never two. List each saved food once, marked: never add a second, unmarked item for it, even when the photo shows it or you would name it differently. Never put \"saved\" on a food that is not in this list.", redact::sensitive(&list)));
     }
     lines.join("\n")
 }
@@ -194,6 +194,7 @@ pub fn parse_saved(text: &str, out: &str, foods: &[SavedFood]) -> Option<Parsed>
 
     let counts = nutrition::typed_counts(text);
     let mut parsed = Parsed::default();
+    let mut priced: Vec<String> = Vec::new();
     for (at, raw) in items.iter().enumerate() {
         if at >= MAX_ITEMS {
             // Past the cap: each of the next few is named as unknown, then one line counts the rest. Never silent.
@@ -214,8 +215,14 @@ pub fn parse_saved(text: &str, out: &str, foods: &[SavedFood]) -> Option<Parsed>
             Some(m) => {
                 let count = raw.get("count").and_then(Value::as_f64);
                 let scale = est.as_ref().ok().filter(|i| i.scale).map(|i| i.grams);
-                match foods::price(&m, count, typed, scale, &counts, foods) {
-                    Ok(item) => parsed.items.push(item),
+                match foods::price(text, &m, count, typed, scale, &counts, foods) {
+                    Ok(item) if priced.iter().any(|n| n == item.food.name) => {
+                        parsed.unknown.push(Unknown { text: format!("saved food \"{m}\""), hint: "marked twice by the reader; counted once".to_string() });
+                    }
+                    Ok(item) => {
+                        priced.push(item.food.name.to_string());
+                        parsed.items.push(item);
+                    }
                     // The mark is not usable: the item stays the reader's estimate, and the reply says why.
                     Err(why) => match est {
                         Ok(item) => {
@@ -225,6 +232,15 @@ pub fn parse_saved(text: &str, out: &str, foods: &[SavedFood]) -> Option<Parsed>
                         Err(u) => parsed.unknown.push(with_typed(u, typed)),
                     },
                 }
+            }
+        }
+    }
+    // A saved food he typed by exact name that no mark priced is named, never dropped silently (round 8). It is not
+    // counted from the label here: the reader may have listed it unmarked.
+    if !foods.is_empty() {
+        for f in foods.iter().filter(|f| !priced.iter().any(|n| *n == f.name)) {
+            if let Some(piece) = nutrition::split_pieces(text).into_iter().find(|p| !foods::take(p, std::slice::from_ref(f), true).items.is_empty()) {
+                parsed.unknown.push(Unknown { text: piece, hint: format!("your saved food {} was not matched to an item, so it is not counted from its label; check the card or send it again", f.name) });
             }
         }
     }

@@ -375,7 +375,8 @@ async fn an_unmarked_saved_food_is_one_estimate_never_two() {
     let line = n.lines().find(|l| l.starts_with("- ") && !l.contains("unknown") && l.to_lowercase().contains("wonton")).unwrap();
     assert!(line.contains("(estimated)") && line.contains("966 kcal"), "{n}");
     assert!(!n.contains("(24 pc, label)"), "{n}");
-    assert!(!n.contains("unknown"), "{n}");
+    // Round 8: the only notice of an unmarked twin is the Not counted line (it is not counted from the label).
+    assert!(n.contains("was not matched to an item"), "{n}");
 }
 
 #[tokio::test]

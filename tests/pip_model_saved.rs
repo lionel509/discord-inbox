@@ -72,13 +72,13 @@ fn a_valid_mark_with_his_count_is_priced_from_the_label() {
 #[test]
 fn a_count_he_did_not_type_falls_back_to_his_default() {
     let r = marked("wontons", "Northwind Pork Wontons", Some(8.0));
-    let p = pip_model::parse_saved("24 wontons", &r, &[w(Some((24.0, Unit::Piece)))]).unwrap();
+    let p = pip_model::parse_saved("24 dumplings", &r, &[w(Some((24.0, Unit::Piece)))]).unwrap();
     assert_eq!(p.items.len(), 1);
     let i = &p.items[0];
     assert!(i.assumed);
     assert_eq!((i.qty, i.unit), (24.0, Unit::Piece));
     assert!(p.unknown.is_empty());
-    let p = pip_model::parse_saved("24 wontons", &r, &[w(None)]).unwrap();
+    let p = pip_model::parse_saved("24 dumplings", &r, &[w(None)]).unwrap();
     let i = &p.items[0];
     assert!(i.assumed);
     assert_eq!((i.grams, i.unit, i.qty), (140.0, Unit::Portion, 1.0));
@@ -155,7 +155,8 @@ fn an_ambiguous_mark_keeps_the_estimate() {
     let p = pip_model::parse_saved("24 wontons", &marked("wontons", "Wontons", Some(24.0)), &[w(None), other]).unwrap();
     assert_eq!(p.items.len(), 1);
     assert!(p.items[0].estimated);
-    assert_eq!(p.unknown.len(), 1);
+    // Round 8: each typed saved food that no mark priced is also named under Not counted.
+    assert_eq!(p.unknown.len(), 3, "{:?}", p.unknown);
     assert!(p.unknown[0].hint.contains("more than one saved food"), "{}", p.unknown[0].hint);
 }
 
