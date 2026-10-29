@@ -1,7 +1,5 @@
 //! #146 round 5: the short names Pip writes, exact-name matching for reader items, and the reader prompt.
 use discord_inbox::foods::{self, SavedFood};
-use discord_inbox::pip_model;
-use std::path::PathBuf;
 
 fn w() -> SavedFood {
     SavedFood {
@@ -31,22 +29,17 @@ fn default_aliases_are_the_unbranded_name_and_the_head_noun() {
 
 #[test]
 fn only_an_exact_name_counts_as_the_saved_food() {
-    let f = w();
+    let f = [w()];
     for yes in ["Northwind Pork Wontons", "pork wontons", "Wontons", "steamed wontons"] {
-        assert!(foods::names_food(yes, &f), "{yes}");
+        let t = format!("24 {yes}");
+        assert_eq!(foods::take(&t, &f, true).items.len(), 1, "{yes}");
     }
     for no in ["Wonton soup with broth", "Pork wontons in broth", "wonton soup", "chicken", "pork"] {
-        assert!(!foods::names_food(no, &f), "{no}");
+        let t = format!("24 {no}");
+        let tk = foods::take(&t, &f, true);
+        assert!(tk.items.is_empty(), "{no}");
+        assert_eq!(tk.rest, t, "{no}");
     }
-}
-
-#[test]
-fn the_prompt_names_what_is_already_counted() {
-    let photo = vec![PathBuf::from("/tmp/plate.jpg")];
-    let counted = vec!["Northwind Pork Wontons (24 pc, label)".to_string()];
-    let p = pip_model::prompt_counted("", &photo, &counted);
-    assert!(p.contains("Already counted") && p.contains("Northwind Pork Wontons (24 pc, label)"), "{p}");
-    assert!(!pip_model::prompt("", &photo).contains("Already counted"));
 }
 
 #[test]
@@ -59,15 +52,4 @@ fn a_short_name_is_never_only_table_words() {
     assert!(kw("Northwind Mac and Cheese").iter().all(|k| *k != vec!["cheese".to_string()]));
     let p: Vec<String> = foods::default_aliases("Northwind Pork Wontons").iter().map(|a| a.to_lowercase()).collect();
     assert_eq!(p, vec!["pork wontons", "wontons"]);
-}
-
-#[test]
-fn a_photo_estimate_may_be_the_counted_food_only_by_its_words() {
-    let f = w();
-    for yes in ["Northwind Wontons", "Wontons", "pork wonton", "steamed wontons"] {
-        assert!(foods::may_be_food(yes, &f), "{yes}");
-    }
-    for no in ["Wonton soup with broth", "Pork wontons in broth", "cooked rice", "", "with"] {
-        assert!(!foods::may_be_food(no, &f), "{no}");
-    }
 }

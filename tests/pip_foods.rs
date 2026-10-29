@@ -269,3 +269,27 @@ fn a_repeated_table_word_is_not_swallowed_by_the_saved_name() {
     let t = foods::take("salmon with northwind salmon fillets", &[f], true);
     assert!(t.rest.contains("salmon"), "{:?}", t.rest);
 }
+
+#[test]
+fn a_table_word_alias_in_an_old_note_is_ignored_at_load() {
+    let dir = scratch("old-alias");
+    fs::write(
+        dir.join("Northwind Rice.md"),
+        "---\ntags:\n  - making\n  - ingredient\nstatus: active\naliases:\n  - \"Rice\"\n  - \"Brand Rice\"\n---\n\n# Northwind Rice\n\n<!-- pip:food -->\n- serving: 150 g\n- per serving: 200 kcal \u{b7} P 4 g \u{b7} C 44 g \u{b7} F 1 g\n- saved: 2026-10-29 from a label photo\n<!-- /pip:food -->\n",
+    )
+    .unwrap();
+    let loaded = foods::load(&dir);
+    assert_eq!(loaded.len(), 1);
+    let names = &loaded[0].names;
+    assert!(names.iter().any(|n| n == "Northwind Rice") && names.iter().any(|n| n == "Brand Rice"), "{names:?}");
+    assert!(!names.iter().any(|n| n == "Rice"), "{names:?}");
+    let t = foods::take("rice 150g", &loaded, true);
+    assert!(t.items.is_empty());
+    assert_eq!(t.rest, "rice 150g");
+}
+
+#[test]
+fn typed_counts_are_the_bare_and_piece_numbers() {
+    assert_eq!(nutrition::typed_counts("rice 150g, 24 wontons, 3 pieces chicken"), vec![24.0, 3.0]);
+    assert!(nutrition::typed_counts("wontons 200g").is_empty());
+}

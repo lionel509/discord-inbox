@@ -88,6 +88,21 @@ fn item(name: &str, grams: f64, kcal: f64) -> String {
     format!(r#"{{"name":"{name}","grams":{grams},"typed":false,"kcal_100":{kcal},"protein_100":10,"carbs_100":10,"fat_100":5,"veg":false}}"#)
 }
 
+/// `item` with the reader's saved-food mark and, when `Some`, the piece count it copied from his text.
+fn item_saved(name: &str, grams: f64, kcal: f64, saved: &str, count: Option<f64>) -> String {
+    let base = item(name, grams, kcal);
+    let base = base.strip_suffix('}').unwrap();
+    match count {
+        Some(c) => format!("{base},\"saved\":\"{saved}\",\"count\":{c}}}"),
+        None => format!("{base},\"saved\":\"{saved}\"}}"),
+    }
+}
+
+/// Lines of the note that log a wontons food (not Not counted lines).
+fn wonton_lines(n: &str) -> usize {
+    n.lines().filter(|l| l.starts_with("- ") && !l.contains("unknown") && l.to_lowercase().contains("wonton")).count()
+}
+
 /// A `/bin/sh` reader: appends its arg count to a call log, then prints the reply file.
 fn stub(root: &Path) -> PathBuf {
     let p = root.join("helper.sh");
@@ -271,53 +286,136 @@ fn snapshot(dirs: &[&Path]) -> Vec<(PathBuf, String)> {
 }
 
 #[tokio::test]
-async fn a_meal_photo_captioned_with_a_saved_count_counts_that_food_once() {
-    let (dir, foods, root) = world("photo-caption");
+async fn a_descriptor_in_the_readers_name_is_one_wontons_line_from_the_label() {
+    let (dir, foods, root) = world("descriptor");
     let c = cfg(&dir, Some(&foods), Some(stub(&root)));
     set_reply(&root, LABEL);
     assert_eq!(run(&c, &msg(4001, "", &["label.jpg"]).0).await, Outcome::Saved);
-    // The reader sees the photo and estimates the same wontons on the plate (the caption is counted from the label).
+    set_reply(&root, &reply_json(&item_saved("Pan-fried pork wontons", 420.0, 164.0, "Northwind Pork Wontons", Some(24.0))));
+    let (m, _) = msg(4002, "24 wontons", &["plate.jpg"]);
+    assert_eq!(run(&c, &m).await, Outcome::Saved);
+    let n = note(&dir);
+    assert_eq!(wonton_lines(&n), 1, "{n}");
+    let line = n.lines().find(|l| l.contains("(24 pc, label)")).unwrap_or_else(|| panic!("{n}"));
+    assert!(line.contains("690 kcal"), "{n}");
+    assert_eq!(calls(&root), 2, "one reader call for the label, one for the plate");
+    let p = prompts(&root);
+    assert!(p.contains("Message: \"24 wontons\""), "{p}");
+    assert!(p.contains("Saved foods") && p.contains("Northwind Pork Wontons (140 g \u{b7} 8 pc)"), "{p}");
+    let food = fs::read_to_string(foods.join("Northwind Pork Wontons.md")).unwrap();
+    assert!(food.contains("- last: 24 pc"), "{food}");
+}
+
+#[tokio::test]
+async fn a_count_or_possessive_in_the_readers_name_is_one_wontons_line() {
+    for (i, reader_name) in ["Pork wontons (24)", "NORTHWIND PORK WONTON'S"].iter().enumerate() {
+        let (dir, foods, root) = world(&format!("possessive-{i}"));
+        let c = cfg(&dir, Some(&foods), Some(stub(&root)));
+        set_reply(&root, LABEL);
+        assert_eq!(run(&c, &msg(4001, "", &["label.jpg"]).0).await, Outcome::Saved);
+        set_reply(&root, &reply_json(&item_saved(reader_name, 420.0, 164.0, "Northwind Pork Wontons", Some(24.0))));
+        let (m, _) = msg(4002, "24 wontons", &["plate.jpg"]);
+        assert_eq!(run(&c, &m).await, Outcome::Saved);
+        let n = note(&dir);
+        assert_eq!(wonton_lines(&n), 1, "{reader_name}: {n}");
+        assert!(n.contains("(24 pc, label)") && n.contains("690 kcal"), "{reader_name}: {n}");
+    }
+}
+
+#[tokio::test]
+async fn typed_rice_and_wontons_with_a_photo_count_each_once() {
+    let (dir, foods, root) = world("rice-wontons");
+    let c = cfg(&dir, Some(&foods), Some(stub(&root)));
+    set_reply(&root, LABEL);
+    assert_eq!(run(&c, &msg(4001, "", &["label.jpg"]).0).await, Outcome::Saved);
+    let both = format!("{},{}", item("cooked rice", 180.0, 130.0), item_saved("wontons", 420.0, 164.0, "Northwind Pork Wontons", Some(24.0)));
+    set_reply(&root, &reply_json(&both));
+    let (m, _) = msg(4002, "rice 150g, 24 wontons", &["plate.jpg"]);
+    assert_eq!(run(&c, &m).await, Outcome::Saved);
+    let n = note(&dir);
+    let rice: Vec<&str> = n.lines().filter(|l| l.contains("cooked rice")).collect();
+    assert_eq!(rice.len(), 1, "{n}");
+    assert!(rice[0].contains("150 g") && rice[0].contains("195 kcal"), "{n}");
+    assert_eq!(wonton_lines(&n), 1, "{n}");
+    assert!(n.lines().any(|l| l.contains("(24 pc, label)") && l.contains("690 kcal")), "{n}");
+    assert!(n.contains("885 kcal"), "{n}");
+    assert!(!n.contains("unknown"), "{n}");
+}
+
+#[tokio::test]
+async fn an_unknown_saved_mark_keeps_the_estimate_and_says_so() {
+    let (dir, foods, root) = world("unknown-mark");
+    let c = cfg(&dir, Some(&foods), Some(stub(&root)));
+    set_reply(&root, LABEL);
+    assert_eq!(run(&c, &msg(4001, "", &["label.jpg"]).0).await, Outcome::Saved);
+    set_reply(&root, &reply_json(&item_saved("Pan-fried pork wontons", 420.0, 164.0, "Northwind Wonton Co", Some(24.0))));
+    let (m, replies) = msg(4002, "24 wontons", &["plate.jpg"]);
+    assert_eq!(run(&c, &m).await, Outcome::Saved);
+    let n = note(&dir);
+    assert_eq!(wonton_lines(&n), 1, "{n}");
+    let line = n.lines().find(|l| l.starts_with("- ") && !l.contains("unknown") && l.to_lowercase().contains("wonton")).unwrap();
+    assert!(line.contains("Pan-fried pork wontons (estimated)") && line.contains("689 kcal"), "{n}");
+    assert!(!n.contains("(24 pc, label)"), "{n}");
+    assert!(n.contains("saved food \"Northwind Wonton Co\""), "{n}");
+    assert!(n.contains("is not one of your saved foods") && n.contains("counted as the reader's estimate"), "{n}");
+    assert!(joined(&replies).contains("Northwind Wonton Co"), "{}", joined(&replies));
+}
+
+#[tokio::test]
+async fn an_unmarked_saved_food_is_one_estimate_never_two() {
+    let (dir, foods, root) = world("unmarked");
+    let c = cfg(&dir, Some(&foods), Some(stub(&root)));
+    set_reply(&root, LABEL);
+    assert_eq!(run(&c, &msg(4001, "", &["label.jpg"]).0).await, Outcome::Saved);
     set_reply(&root, &reply_json(&item("pork wontons", 420.0, 230.0)));
     let (m, _) = msg(4002, "24 wontons", &["plate.jpg"]);
     assert_eq!(run(&c, &m).await, Outcome::Saved);
     let n = note(&dir);
-    assert!(n.contains("(24 pc, label)"), "{n}");
-    let wonton_lines = n.lines().filter(|l| l.starts_with("- ") && !l.contains("unknown") && l.to_lowercase().contains("wontons")).count();
-    assert_eq!(wonton_lines, 1, "the photo's estimate of the same food was counted too: {n}");
+    assert_eq!(wonton_lines(&n), 1, "{n}");
+    let line = n.lines().find(|l| l.starts_with("- ") && !l.contains("unknown") && l.to_lowercase().contains("wonton")).unwrap();
+    assert!(line.contains("(estimated)") && line.contains("966 kcal"), "{n}");
+    assert!(!n.contains("(24 pc, label)"), "{n}");
+    assert!(!n.contains("unknown"), "{n}");
 }
 
 #[tokio::test]
-async fn a_branded_photo_estimate_of_the_counted_food_is_not_counted_twice() {
-    let (dir, foods, root) = world("branded-estimate");
-    let c = cfg(&dir, Some(&foods), Some(stub(&root)));
-    set_reply(&root, LABEL);
-    assert_eq!(run(&c, &msg(4001, "", &["label.jpg"]).0).await, Outcome::Saved);
-    set_reply(&root, &reply_json(&item("Northwind Wontons", 420.0, 230.0)));
-    let (m, _) = msg(4002, "24 wontons", &["plate.jpg"]);
+async fn no_reader_counts_saved_foods_by_exact_name_and_ignores_a_table_word_alias() {
+    let (dir, foods, root) = world("no-reader");
+    let c = cfg(&dir, Some(&foods), None);
+    fs::create_dir_all(&foods).unwrap();
+    fs::write(
+        foods.join("Northwind Rice.md"),
+        "---\ntags:\n  - making\n  - ingredient\n  - packaged\nstatus: active\naliases:\n  - \"Rice\"\n---\n\n# Northwind Rice\n\n<!-- pip:food -->\n- serving: 150 g\n- per serving: 200 kcal \u{b7} P 4 g \u{b7} C 44 g \u{b7} F 1 g\n- saved: 2026-10-29 from a label photo\n<!-- /pip:food -->\n\n**Hub:** [[Home]] \u{b7} [[Pantry]] \u{b7} [[Foods]]\n",
+    )
+    .unwrap();
+    let label = discord_inbox::pip_model::parse_label(LABEL).unwrap();
+    discord_inbox::foods::upsert(&foods, &discord_inbox::foods::from_label(&label, "2026-10-29").unwrap()).unwrap();
+    assert_eq!(run(&c, &msg(4002, "24 wontons", &[]).0).await, Outcome::Saved);
+    let n = note(&dir);
+    assert!(n.contains("(24 pc, label)") && n.contains("690 kcal"), "{n}");
+    assert_eq!(run(&c, &msg(4003, "wontons", &[]).0).await, Outcome::Saved);
+    assert!(note(&dir).contains("(default 24 pc, label)"), "{}", note(&dir));
+    let (m, replies) = msg(4004, "rice 150g", &[]);
     assert_eq!(run(&c, &m).await, Outcome::Saved);
     let n = note(&dir);
-    let label_lines: Vec<&str> = n.lines().filter(|l| l.contains("(24 pc, label)")).collect();
-    assert_eq!(label_lines.len(), 1, "{n}");
-    assert!(label_lines[0].contains("690 kcal"), "{n}");
-    assert!(!n.lines().any(|l| l.contains("Northwind Wontons") && l.contains("(estimated)")), "{n}");
-    assert!(n.contains("photo estimate Northwind Wontons"), "{n}");
-    assert!(n.contains("send: northwind wontons 420g"), "{n}");
+    assert!(!n.contains("Northwind Rice"), "{n}");
+    assert!(n.contains("dry rice or cooked rice") || joined(&replies).contains("dry rice or cooked rice"), "{n}\n{}", joined(&replies));
 }
 
 #[tokio::test]
-async fn a_renamed_estimate_of_the_counted_food_is_kept_and_shown() {
-    let (dir, foods, root) = world("renamed");
+async fn a_replayed_caption_photo_writes_nothing_twice() {
+    let (dir, foods, root) = world("replay-caption");
     let c = cfg(&dir, Some(&foods), Some(stub(&root)));
     set_reply(&root, LABEL);
     assert_eq!(run(&c, &msg(4001, "", &["label.jpg"]).0).await, Outcome::Saved);
-    let both = format!("{},{}", item("Pork wontons in broth", 120.0, 200.0), item("cooked rice", 150.0, 130.0));
-    set_reply(&root, &reply_json(&both));
+    set_reply(&root, &reply_json(&item_saved("Pan-fried pork wontons", 420.0, 164.0, "Northwind Pork Wontons", Some(24.0))));
     let (m, _) = msg(4002, "24 wontons", &["plate.jpg"]);
     assert_eq!(run(&c, &m).await, Outcome::Saved);
-    let n = note(&dir);
-    assert!(n.contains("in broth (estimated)"), "{n}");
-    assert!(!n.contains("photo estimate Pork wontons in broth"), "{n}");
-    assert!(n.contains("cooked rice"), "{n}");
+    let before = snapshot(&[&dir, &foods]);
+    let before_calls = calls(&root);
+    assert_eq!(run(&c, &m).await, Outcome::Skipped);
+    assert_eq!(snapshot(&[&dir, &foods]), before);
+    assert_eq!(calls(&root), before_calls);
 }
 
 #[tokio::test]
@@ -376,7 +474,8 @@ async fn a_photo_soup_beside_a_saved_count_is_kept_once() {
     let c = cfg(&dir, Some(&foods), Some(stub(&root)));
     set_reply(&root, LABEL);
     assert_eq!(run(&c, &msg(4001, "", &["label.jpg"]).0).await, Outcome::Saved);
-    set_reply(&root, &reply_json(&item("Wonton soup with broth", 300.0, 60.0)));
+    let both = format!("{},{}", item_saved("wontons", 420.0, 164.0, "Northwind Pork Wontons", Some(24.0)), item("Wonton soup with broth", 300.0, 60.0));
+    set_reply(&root, &reply_json(&both));
     let (m, _) = msg(4002, "24 wontons", &["plate.jpg"]);
     assert_eq!(run(&c, &m).await, Outcome::Saved);
     let n = note(&dir);
@@ -386,26 +485,28 @@ async fn a_photo_soup_beside_a_saved_count_is_kept_once() {
     let soup: Vec<&str> = n.lines().filter(|l| l.contains("Wonton soup with broth")).collect();
     assert_eq!(soup.len(), 1, "{n}");
     assert!(soup[0].contains("180 kcal"), "{n}");
-    assert!(!n.contains("photo estimate"), "{n}");
+    assert!(!n.contains("unknown"), "{n}");
     let p = prompts(&root);
-    assert!(p.contains("Already counted") && p.contains("Northwind Pork Wontons"), "{p}");
+    assert!(p.contains("Saved foods") && p.contains("Northwind Pork Wontons (140 g \u{b7} 8 pc)"), "{p}");
 }
 
 #[tokio::test]
-async fn a_typed_soup_the_reader_renames_is_kept_and_its_copy_of_the_count_is_not() {
+async fn a_typed_soup_the_reader_renames_is_kept_beside_the_marked_count() {
     let (dir, foods, root) = world("soup-typed");
     let c = cfg(&dir, Some(&foods), Some(stub(&root)));
     set_reply(&root, LABEL);
     assert_eq!(run(&c, &msg(4001, "", &["label.jpg"]).0).await, Outcome::Saved);
-    let both = format!("{},{}", item("Northwind Pork Wontons", 140.0, 164.0), item("Wonton soup with broth", 300.0, 60.0));
+    let both = format!("{},{}", item_saved("Northwind Pork Wontons", 420.0, 164.0, "Northwind Pork Wontons", Some(24.0)), item("Wonton soup with broth", 300.0, 60.0));
     set_reply(&root, &reply_json(&both));
     let (m, _) = msg(4002, "24 wontons, wonton soup", &["plate.jpg"]);
     assert_eq!(run(&c, &m).await, Outcome::Saved);
     let n = note(&dir);
-    assert_eq!(n.lines().filter(|l| l.contains("(24 pc, label)")).count(), 1, "{n}");
+    let counted: Vec<&str> = n.lines().filter(|l| l.contains("(24 pc, label)")).collect();
+    assert_eq!(counted.len(), 1, "{n}");
+    assert!(counted[0].contains("690 kcal"), "{n}");
     let soup: Vec<&str> = n.lines().filter(|l| l.contains("Wonton soup with broth")).collect();
     assert_eq!(soup.len(), 1, "{n}");
     assert!(soup[0].contains("180 kcal"), "{n}");
-    assert!(n.contains("photo estimate Northwind Pork Wontons"), "{n}");
     assert!(!n.lines().any(|l| l.contains("Northwind Pork Wontons") && l.contains("(estimated)")), "{n}");
+    assert!(!n.contains("unknown"), "{n}");
 }
