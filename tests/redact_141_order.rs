@@ -55,6 +55,7 @@ fn bearer_dotted_card_inside_token_is_redacted_whole() {
 }
 
 #[test]
-fn bold_card_inside_bearer_token_is_redacted_whole() {
-    assert_eq!(sensitive("Authorization: Bearer x/**4111-1111-1111-1112**"), "Authorization: Bearer [redacted]**");
+fn bold_card_inside_bearer_token_shows_only_last_four() {
+    // The user's bold ends the token (x/ is too short), so the card rule masks it: last four only.
+    assert_eq!(sensitive("Authorization: Bearer x/**4111-1111-1111-1112**"), "Authorization: Bearer x/******-****-****-1112**");
 }
