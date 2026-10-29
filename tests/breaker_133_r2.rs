@@ -107,7 +107,7 @@ fn cfg(dir: &Path, model: Option<PathBuf>) -> Config {
     Config {
         nutrition_dir: dir.to_path_buf(),
         recipes_dir: None,
-        low_kcal: 1800,
+        foods_dir: None,        low_kcal: 1800,
         kcal_target: 2400,
         model,
         model_timeout: Duration::from_secs(5),

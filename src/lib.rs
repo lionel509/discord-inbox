@@ -15,6 +15,7 @@ pub mod redact;
 pub mod live;
 pub mod nutrition;
 pub mod recipes;
+pub mod foods;
 pub mod daylog;
 pub mod checkin;
 pub mod pip;

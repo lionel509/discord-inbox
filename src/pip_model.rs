@@ -1,4 +1,5 @@
 //! #130 unit A: the meal reader. The model's JSON becomes items only through `enforce`/`parse`, so an impossible number never reaches the log. Weight precedence per food: a weight he typed beside that food (bound by `nutrition::typed_spans`) > a scale reading, only when an image is attached (` (scale)`) > the reader's estimate (` (estimated)`). A typed weight no food matches is listed under Not counted. Plain water and sparkling water are logged at 0 kcal. The helper is injected through `PIP_MODEL` (see pip.rs); this file never names a model or a network endpoint.
+use crate::foods::{self, SavedFood};
 use crate::nutrition::{self, Food, Item, Parsed, Unit, Unknown};
 use crate::{ocr, redact};
 use serde_json::Value;
@@ -33,11 +34,50 @@ const HEIF_BRANDS: &[&[u8]] = &[b"heic", b"heif", b"mif1", b"avif"];
 /// What the helper gave back: a parsed reading, or nothing usable (helper failed, timed out, or printed non-JSON).
 pub enum Reading {
     Read(Parsed),
+    /// A printed Nutrition Facts panel (#146): saved as a food, never a meal.
+    Label(Label),
     Down,
+}
+
+/// A saved food's label as the reader copied it (#146): the panel's per-serving numbers, `None` where it prints nothing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Label {
+    pub name: String,
+    pub serving_g: Option<f64>,
+    pub serving_pc: Option<f64>,
+    pub kcal: Option<f64>,
+    pub protein: Option<f64>,
+    pub carbs: Option<f64>,
+    pub fat: Option<f64>,
+}
+
+/// The label reply: a `label` object with the panel's values. `None` for any other reply, or with no name.
+pub fn parse_label(out: &str) -> Option<Label> {
+    let v = reply_object(out)?;
+    let l = v.get("label")?.as_object()?;
+    let name = model_text(l.get("name")?.as_str()?);
+    if name.is_empty() {
+        return None;
+    }
+    let num = |k: &str| l.get(k).and_then(Value::as_f64);
+    Some(Label {
+        name,
+        serving_g: num("serving_g"),
+        serving_pc: num("serving_pc"),
+        kcal: num("kcal"),
+        protein: num("protein"),
+        carbs: num("carbs"),
+        fat: num("fat"),
+    })
 }
 
 /// The prompt on stdin. Photos are named by path so the helper's Read tool can open them.
 pub fn prompt(text: &str, photos: &[PathBuf]) -> String {
+    prompt_saved(text, photos, &[])
+}
+
+/// `prompt`, plus a rule listing his saved foods (name and one serving), so the reader can mark an item as one of them.
+pub fn prompt_saved(text: &str, photos: &[PathBuf], foods: &[SavedFood]) -> String {
     let message = if text.trim().is_empty() {
         "Message: (no text)".to_string()
     } else {
@@ -49,7 +89,7 @@ pub fn prompt(text: &str, photos: &[PathBuf]) -> String {
         let paths: Vec<String> = photos.iter().map(|p| p.to_string_lossy().into_owned()).collect();
         format!("Photos: {} attached; read each with the Read tool: {}", photos.len(), paths.join(", "))
     };
-    let lines = [
+    let mut lines = vec![
         "You read one food message for a calorie log. Reply with JSON only: no prose, no code fence.".to_string(),
         message,
         photo_line,
@@ -58,22 +98,35 @@ pub fn prompt(text: &str, photos: &[PathBuf]) -> String {
         "- If the message gives a weight for a food (g, grams, kg, oz, lb), use exactly that weight and set \"source\": \"text\". Otherwise estimate grams from the photo or a normal portion and set \"source\": \"estimate\". Never change a typed weight.".to_string(),
         "- A photo of a kitchen scale display is a weight he measured: use the number shown and set \"source\": \"scale\". If one photo shows an empty container and a later one shows the same container with food, the food weighs the difference (subtract the empty reading). Name which food each scale photo is weighing from what is in the container.".to_string(),
         "- A receipt photo: list the food items bought as the meal at their printed quantities; skip non-food lines; never copy card numbers, totals or addresses.".to_string(),
+        r#"- A photo of a packaged food's printed Nutrition Facts panel is a label, not a meal: reply {"label":{"name":"<product name from the package>","serving_g":140,"serving_pc":8,"kcal":230,"protein":9,"carbs":28,"fat":9},"items":[],"unreadable":[]}. Values are per serving, copied from the panel. A field the panel does not print is null; serving_pc is null when the serving is not a count of pieces. Never estimate a label field. A plate, bowl, receipt or scale display is never a label."#.to_string(),
         "- Plain water or sparkling water: name it exactly \"water\" or \"sparkling water\", with kcal_100 0.".to_string(),
         "- Per-100 g values are for the food as eaten (cooked), USDA-style.".to_string(),
         "- Anything you cannot turn into an item goes in \"unreadable\" with a short reason. No food at all: both lists empty.".to_string(),
         EXAMPLE.to_string(),
     ];
+    if !foods.is_empty() {
+        let list = foods.iter().map(|f| format!("{} ({})", f.name, foods::serving_text(f))).collect::<Vec<_>>().join("; ");
+        lines.insert(6, format!("- Saved foods, from his own labels (name; one serving): {}. An item that is one of these foods gets \"saved\": its exact name from this list, and \"count\": the number of pieces he typed for it, copied as written (never count pieces in a photo; do no arithmetic); leave \"count\" out when he typed no number for it. Fill every other field as usual. The caption and a photo of the same food are one item, never two. List each saved food once, marked: never add a second, unmarked item for it, even when the photo shows it or you would name it differently. Never put \"saved\" on a food that is not in this list.", redact::sensitive(&list)));
+    }
     lines.join("\n")
 }
 
 /// Runs the helper once: photo paths as arguments, the prompt on stdin. Down on any failure; the output is never printed.
 pub fn read(cmd: &Path, text: &str, photos: &[PathBuf], timeout: Duration) -> Reading {
+    read_saved(cmd, text, photos, &[], timeout)
+}
+
+/// `read`, telling the reader his saved foods so it can mark them (`parse_saved` prices the marks).
+pub fn read_saved(cmd: &Path, text: &str, photos: &[PathBuf], foods: &[SavedFood], timeout: Duration) -> Reading {
     let args: Vec<String> = photos.iter().map(|p| p.to_string_lossy().into_owned()).collect();
-    let Some(out) = ocr::run_args(cmd, &args, prompt(text, photos).as_bytes(), timeout) else {
+    let Some(out) = ocr::run_args(cmd, &args, prompt_saved(text, photos, foods).as_bytes(), timeout) else {
         eprintln!("pip: model helper gave nothing");
         return Reading::Down;
     };
-    match parse(text, &out) {
+    if let Some(label) = parse_label(&out) {
+        return Reading::Label(label);
+    }
+    match parse_saved(text, &out, foods) {
         Some(p) if !photos.iter().any(|f| is_image(f)) => Reading::Read(without_photo_scales(p)),
         Some(p) => Reading::Read(p),
         None => {
@@ -124,6 +177,13 @@ fn has_image_magic(b: &[u8]) -> bool {
 /// Finds the JSON object in the reply (prose and code fences are skipped) and checks every item.
 /// `None` when there is no object with an `items` array.
 pub fn parse(text: &str, out: &str) -> Option<Parsed> {
+    parse_saved(text, out, &[])
+}
+
+/// `parse`, plus his saved foods: an item the reader marked (`"saved"`, `"count"`) is priced from the label when the
+/// mark is valid (`foods::price`); otherwise it stays the reader's estimate and the reply says why. With no foods the
+/// marks are ignored.
+pub fn parse_saved(text: &str, out: &str, foods: &[SavedFood]) -> Option<Parsed> {
     let v = reply_object(out)?;
     let items = v.get("items")?.as_array()?;
 
@@ -132,7 +192,18 @@ pub fn parse(text: &str, out: &str) -> Option<Parsed> {
     let names: Vec<String> = items.iter().take(MAX_ITEMS).map(|raw| raw.get("name").and_then(Value::as_str).map(model_text).unwrap_or_default()).collect();
     let (binds, unbound) = bind(&spans, &names);
 
+    // A number in a piece that names a saved food by an exact saved name belongs to that food (round 9).
+    let counts: Vec<f64> = nutrition::split_pieces(text)
+        .into_iter()
+        .filter(|p| {
+            let t = foods::take(p, foods, true);
+            t.items.is_empty() && t.unknown.is_empty()
+        })
+        .flat_map(|p| nutrition::typed_counts(&p))
+        .collect();
     let mut parsed = Parsed::default();
+    let mut seen: Vec<String> = Vec::new();
+    let mut seen_marks: Vec<String> = Vec::new();
     for (at, raw) in items.iter().enumerate() {
         if at >= MAX_ITEMS {
             // Past the cap: each of the next few is named as unknown, then one line counts the rest. Never silent.
@@ -143,9 +214,61 @@ pub fn parse(text: &str, out: &str) -> Option<Parsed> {
             continue;
         }
         let typed = binds[at].map(|j| spans[j].grams);
-        match item_from(raw, typed) {
-            Ok(item) => parsed.items.push(item),
-            Err(u) => parsed.unknown.push(with_typed(u, typed)),
+        let est = item_from(raw, typed);
+        let mark = raw.get("saved").and_then(Value::as_str).map(model_text).filter(|m| !m.is_empty() && !foods.is_empty());
+        match mark {
+            None => match est {
+                Ok(item) => parsed.items.push(item),
+                Err(u) => parsed.unknown.push(with_typed(u, typed)),
+            },
+            Some(m) => {
+                // Each saved food yields at most one line per reply, keyed on the food the mark resolves to.
+                let dup = match foods::marked(&m, foods) {
+                    Some(f) if seen.contains(&f.name) => true,
+                    Some(f) => {
+                        seen.push(f.name.clone());
+                        false
+                    }
+                    None if seen_marks.contains(&foods::norm(&m)) => true,
+                    None => {
+                        seen_marks.push(foods::norm(&m));
+                        false
+                    }
+                };
+                if dup {
+                    parsed.unknown.push(Unknown { text: format!("saved food \"{m}\""), hint: "marked twice by the reader; counted once".to_string() });
+                    continue;
+                }
+                let count = raw.get("count").and_then(Value::as_f64);
+                let scale = est.as_ref().ok().filter(|i| i.scale).map(|i| i.grams);
+                match foods::price(text, &m, count, typed, scale, &counts, foods) {
+                    Ok(item) => parsed.items.push(item),
+                    // The mark is not usable: the item stays the reader's estimate, and the reply says why.
+                    Err(why) => match est {
+                        Ok(item) => {
+                            parsed.unknown.push(Unknown { text: format!("saved food \"{m}\""), hint: format!("{why}; {} is counted as the reader's estimate", item.food.name) });
+                            parsed.items.push(item);
+                        }
+                        Err(u) => parsed.unknown.push(with_typed(u, typed)),
+                    },
+                }
+            }
+        }
+    }
+    // A saved food he typed that no mark resolved to is named, never dropped silently. Code cannot tell whether the
+    // reader listed it unmarked, so the line is true either way.
+    if !foods.is_empty() {
+        for f in foods.iter().filter(|f| !seen.iter().any(|n| *n == f.name)) {
+            let found = nutrition::split_pieces(text).into_iter().find(|p| {
+                let t = foods::take(p, std::slice::from_ref(f), true);
+                !t.items.is_empty() || !t.unknown.is_empty()
+            });
+            if let Some(piece) = found {
+                parsed.unknown.push(Unknown {
+                    text: piece,
+                    hint: format!("not priced from your saved label for {}: if a line above is this food, that is the reader's estimate; if not, it was not counted", f.name),
+                });
+            }
         }
     }
     parsed.unknown.extend(unbound);

@@ -139,6 +139,7 @@ fn read_passes_photos_as_args_and_prompt_on_stdin() {
     let photos = vec![dir.join("a.jpg"), dir.join("b.jpg")];
     match pip_model::read(&cmd, "salmon 100g", &photos, Duration::from_secs(5)) {
         Reading::Read(_) => {}
+        Reading::Label(_) => panic!("a meal reply is not a label"),
         Reading::Down => panic!("helper printed JSON; it should be read"),
     }
     let got_args = fs::read_to_string(&args).unwrap();
