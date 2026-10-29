@@ -293,6 +293,16 @@ fn mask_labelled_accounts(text: &str) -> String {
         .collect()
 }
 
+/// Whether the '*' at j belongs to a card the number rule starred: its star run leads into more digits or stars.
+fn card_star(c: &[char], j: usize) -> bool {
+    let k = (j..c.len()).find(|&k| c[k] != '*').unwrap_or(c.len());
+    match c.get(k) {
+        Some(&ch) if ch.is_ascii_digit() => true,
+        Some(&ch) if matches!(ch, '-' | '.' | '/' | '_') => matches!(c.get(k + 1), Some(&n) if n == '*' || n.is_ascii_digit()),
+        _ => false,
+    }
+}
+
 /// A secret starting at `i`, as (end of the kept part, end of the secret), or `None`.
 fn secret_at(c: &[char], i: usize) -> Option<(usize, usize)> {
     if i > 0 && word_char(c[i - 1]) {
@@ -317,12 +327,8 @@ fn secret_at(c: &[char], i: usize) -> Option<(usize, usize)> {
                 if t.ci { a.eq_ignore_ascii_case(&b) } else { *a == b }
             });
         if matched {
-            // `*` is in the run so a card the number rule already starred stays inside the token. A trailing `*`
-            // is never part of a starred card (it ends in four kept digits), so it is Discord bold, not token.
-            let mut run = c[i + n..].iter().take_while(|&&ch| (t.allowed)(ch) || ch == '*').count();
-            while run > 0 && c[i + n + run - 1] == '*' {
-                run -= 1;
-            }
+            // A '*' joins the run only when it is part of a card the number rule starred (#140); bold and other markdown stars end the token (#141).
+            let run = c[i + n..].iter().enumerate().take_while(|&(o, &ch)| (t.allowed)(ch) || (ch == '*' && card_star(c, i + n + o))).count();
             if run >= t.min {
                 return Some((if t.keep { i + n } else { i }, i + n + run));
             }
