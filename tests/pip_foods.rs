@@ -293,3 +293,19 @@ fn typed_counts_are_the_bare_and_piece_numbers() {
     assert_eq!(nutrition::typed_counts("rice 150g, 24 wontons, 3 pieces chicken"), vec![24.0, 3.0]);
     assert!(nutrition::typed_counts("wontons 200g").is_empty());
 }
+
+#[test]
+fn a_multiplier_over_twelve_on_a_saved_food_is_refused() {
+    for text in ["wontons x24", "24x wontons", "wontons x 24"] {
+        let t = foods::take(text, &[wontons(None)], true);
+        assert!(t.items.is_empty(), "{text}: {:?}", t.items.iter().map(|i| i.grams).collect::<Vec<_>>());
+        assert_eq!(t.unknown.len(), 1, "{text}: {:?}", t.unknown);
+        assert!(t.unknown[0].hint.contains("only x1 to x12"), "{text}: {}", t.unknown[0].hint);
+    }
+    let t = foods::take("wontons x2", &[wontons(None)], true);
+    assert_eq!(t.items.len(), 1);
+    assert_eq!(t.items[0].grams, 280.0);
+    let t = foods::take("wontons x12", &[wontons(None)], true);
+    assert_eq!(t.items.len(), 1);
+    assert_eq!(t.items[0].grams, 1680.0);
+}

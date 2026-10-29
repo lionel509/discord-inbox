@@ -358,3 +358,35 @@ fn a_refused_typed_saved_food_the_reader_omits_is_named() {
     let p = pip_model::parse_saved("2-3 wontons, 2 eggs", &r, &[w(None)]).unwrap();
     assert!(p.unknown.iter().any(|u| u.text == "2-3 wontons"), "{:?}", p.unknown);
 }
+
+#[test]
+fn a_multiplier_over_twelve_keeps_the_reader_estimate() {
+    for text in ["wontons x24", "24x wontons", "wontons x 24"] {
+        let p = pip_model::parse_saved(text, &marked("Wontons", "Wontons", Some(24.0)), &[w(None)]).unwrap();
+        assert_eq!(p.items.len(), 1, "{text}: {:?}", p.unknown);
+        assert_eq!(p.items[0].grams, 420.0, "{text}");
+        assert!(p.items[0].estimated, "{text}");
+        assert_ne!(p.items[0].food.source, "label", "{text}");
+        assert_eq!(p.unknown.iter().filter(|u| u.hint.contains("only x1 to x12")).count(), 1, "{text}: {:?}", p.unknown);
+    }
+}
+
+#[test]
+fn an_ambiguous_alias_marked_twice_is_one_estimate() {
+    let mut a = w(None);
+    a.name = "Acme Dumplings".to_string();
+    a.names = vec!["Acme Dumplings".to_string(), "Dumplings".to_string()];
+    let mut c = w(None);
+    c.name = "Northwind Dumplings".to_string();
+    c.names = vec!["Northwind Dumplings".to_string(), "Dumplings".to_string()];
+    let r = reply(&[
+        item("Dumplings", 200.0, 200.0, "estimate", Some("Dumplings"), None),
+        item("Dumplings", 200.0, 200.0, "estimate", Some("Dumplings"), None),
+    ]);
+    let p = pip_model::parse_saved("2 dumplings", &r, &[a, c]).unwrap();
+    assert_eq!(p.items.len(), 1, "{:?}", p.unknown);
+    assert_eq!(p.items[0].grams, 200.0);
+    assert!(p.items[0].estimated);
+    assert_eq!(p.unknown.iter().filter(|u| u.hint == "marked twice by the reader; counted once").count(), 1, "{:?}", p.unknown);
+    assert_eq!(p.unknown.iter().filter(|u| u.hint.contains("more than one saved food")).count(), 1, "{:?}", p.unknown);
+}
