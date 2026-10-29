@@ -393,12 +393,20 @@ fn secret_spans(c: &[char], spans: &mut Vec<(usize, usize, Fill)>) {
         match secret_at(c, i) {
             Some((kept, end)) => {
                 spans.push((kept, end, Fill::Redacted));
-                // A label inside the token run (`.password:` after a Bearer) keeps its value redacted.
+                // Only a label ending at the run's end (`.password: x`) or whose `=` ends the run (`.token= x`) can have a value outside it; that value follows the stand-alone label rule.
                 let mut next = end;
-                for j in kept..end {
-                    if let Some((v, ve)) = label_at(c, j) {
+                for label in PASSWORD_LABELS.iter().chain(SECRET_LABELS.iter()) {
+                    let n = label.chars().count();
+                    let at = if end >= kept + n && word_at(c, end - n, label) {
+                        Some(end - n)
+                    } else if end >= kept + n + 1 && c[end - 1] == '=' && word_at(c, end - 1 - n, label) {
+                        Some(end - 1 - n)
+                    } else {
+                        None
+                    };
+                    if let Some((v, ve)) = at.and_then(|j| label_at(c, j)) {
                         spans.push((v, ve, Fill::Redacted));
-                        next = end.max(ve);
+                        next = ve;
                         break;
                     }
                 }
