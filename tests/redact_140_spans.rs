@@ -213,9 +213,43 @@ fn url_userinfo_label_keeps_host() {
     assert_eq!(sensitive("https://user:token=abc@example.com/x"), "https://user:[redacted]@example.com/x");
 }
 
+// Ruling 141: a value after a run-final label= is redacted like a stand-alone label's; markup and a password made of markup can't be told apart.
 #[test]
-fn bold_bearer_empty_in_run_value_keeps_markup() {
-    assert_eq!(sensitive("**Bearer abcdefghijklmnopqrst.token=**"), "**Bearer [redacted]**");
+fn bold_bearer_empty_in_run_value_follows_standalone_rule() {
+    assert_eq!(sensitive("**Bearer abcdefghijklmnopqrst.token=**"), "**Bearer [redacted][redacted]");
+}
+
+#[test]
+fn bearer_run_token_eq_space_value_hidden() {
+    let out = sensitive("Bearer abcdefghijklmnopqrst.token= hunter22");
+    assert_eq!(out, "Bearer [redacted] [redacted]");
+    assert!(!out.contains("hunter22"));
+}
+
+#[test]
+fn bearer_run_pwd_eq_space_value_hidden() {
+    let out = sensitive("Bearer abcdefghijklmnopqrst.pwd= hunter22");
+    assert_eq!(out, "Bearer [redacted] [redacted]");
+    assert!(!out.contains("hunter22"));
+}
+
+#[test]
+fn bearer_run_password_eq_space_value_hidden() {
+    let out = sensitive("Bearer abcdefghijklmnopqrst.password= hunter22");
+    assert_eq!(out, "Bearer [redacted] [redacted]");
+    assert!(!out.contains("hunter22"));
+}
+
+#[test]
+fn bearer_run_password_eq_adjacent_value_hidden() {
+    let out = sensitive("Bearer abcdefghijklmnopqrst.password=!hunter22");
+    assert_eq!(out, "Bearer [redacted][redacted]");
+    assert!(!out.contains("hunter22"));
+}
+
+#[test]
+fn bold_bearer_pwd_value_in_run_keeps_markup() {
+    assert_eq!(sensitive("**Bearer abcdefghijklmnopqrst.pwd=abcd**"), "**Bearer [redacted]**");
 }
 
 #[test]
