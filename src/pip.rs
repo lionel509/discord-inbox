@@ -5,6 +5,7 @@
 //! (`nutrition`); recipes are read, never written (`recipes`).
 use crate::allowlist::Allowlist;
 use crate::daylog::{self, Meal, NoteMsg, Totals, Written};
+use crate::gym;
 use crate::ingest::{typing_while, Handle, Inbound, Outcome, FAILED_MARK, SAVED_MARK};
 use crate::nutrition::{self, Parsed};
 use crate::pip_model::{self, Reading};
@@ -28,7 +29,7 @@ const UNREADABLE_HEAD: &str = "I couldn't read that as food: ";
 const UNREADABLE_TAIL: &str = ". Nothing logged; send it again with names and weights (cooked rice 180g).";
 const PHOTO_UNREAD_REPLY: &str = "No food I could read in the photo(s), so nothing was logged. Reply with what was in it (salmon 100g, cooked rice 180g).";
 
-pub const HELP: &str = "Send what you ate, one item per line: salmon 100g, cooked rice 180g, cabbage 85g, or a recipe name (add a count like 2 x, or a weight).\nCommands: today (the day's card), week (the last seven days), undo (drop the last meal), fix <meal> (replace the last meal), help.\nA message with no food in it is saved as a note, not a meal.";
+pub const HELP: &str = "Send what you ate, one item per line: salmon 100g, cooked rice 180g, cabbage 85g, or a recipe name (add a count like 2 x, or a weight).\nCommands: today (the day's card), week (the last seven days), undo (drop the last meal), fix <meal> (replace the last meal), help.\nA message with no food in it is saved as a note, not a meal.\ngym starts today's session from the plan, one exercise at a time: reply with what you did and reps per set (cable row 15 15 12), or skip / stop.";
 
 const FIX_USAGE: &str = "Send fix with the replacement meal, e.g. fix salmon 120g. It replaces the last meal logged today.";
 
@@ -247,6 +248,15 @@ pub async fn handle<M: Inbound>(allow: &Allowlist, cfg: &Config, m: &M) -> Outco
     if let Err(e) = std::fs::create_dir_all(&cfg.nutrition_dir) {
         eprintln!("pip: nutrition dir {} not creatable: {e}", cfg.nutrition_dir.display());
         return Outcome::Failed;
+    }
+    // A gym session (or a `gym` that opens one) takes the text before any command or meal parsing. Photos never do.
+    if files.is_empty() {
+        if let Some(t) = gym::turn(&cfg.nutrition_dir, &received, &text, msg_id) {
+            if m.live() {
+                m.typing().await;
+            }
+            return run_gym(cfg, m, msg_id, &time, t).await;
+        }
     }
     // Commands other than `fix` are answered from the ledger and never owe a meal. `fix` is the one command
     // that also takes a meal (and a photo).
@@ -506,6 +516,35 @@ async fn claim<M: Inbound>(cfg: &Config, m: &M, msg_id: u64) -> Option<Outcome> 
             Some(Outcome::Failed)
         }
     }
+}
+
+/// Applies one gym turn: claim the DM, write its `pip:gym` block, move the open-session marker, then reply.
+/// A gym DM is never owed or paid, so it can't become a meal.
+async fn run_gym<M: Inbound>(cfg: &Config, m: &M, msg_id: u64, time: &str, t: gym::Turn) -> Outcome {
+    let dir = cfg.nutrition_dir.as_path();
+    if let Some(out) = claim(cfg, m, msg_id).await {
+        return out;
+    }
+    let saved = if t.lines.is_empty() {
+        Ok(())
+    } else {
+        daylog::write_gym(dir, &t.day, msg_id, time, &t.tag, &t.lines).map(|_| ())
+    };
+    let saved = saved.and_then(|_| match &t.marker {
+        gym::Marker::Open(text) => gym::write_marker(dir, text),
+        gym::Marker::Clear => gym::clear_marker(dir),
+        gym::Marker::Keep => Ok(()),
+    });
+    if let Err(e) = saved {
+        eprintln!("pip: gym write for {msg_id} failed: {e}");
+        let _ = m.react(FAILED_MARK).await;
+        return Outcome::Failed;
+    }
+    if let Err(e) = m.reply(&t.reply).await {
+        eprintln!("pip: gym reply on {msg_id} failed: {e}");
+    }
+    let _ = m.react(SAVED_MARK).await;
+    Outcome::Saved
 }
 
 /// Answers a command (never `fix`, which `handle` runs itself). The ledger is claimed before the action.
