@@ -262,7 +262,7 @@ fn splice(old: &str, block: &str) -> String {
     }
 }
 
-/// A new note: the front matter a Fidelity ingredient note carries, the block, and the hub line.
+/// A new note: the front matter a kitchen-vault ingredient note carries, the block, and the hub line.
 fn new_note(f: &SavedFood, block: &str) -> String {
     format!(
         "---\ntags:\n  - making\n  - ingredient\n  - packaged\nstatus: active\n---\n\n# {}\n\n{block}\n\nSaved by Pip from a label photo. Used in: (link recipes here)\n\n**Hub:** [[Home]] · [[Pantry]] · [[Foods]]\n",
