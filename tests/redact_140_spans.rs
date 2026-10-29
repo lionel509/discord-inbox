@@ -137,3 +137,47 @@ fn plain_secrets_keep_surrounding_markup() {
         }
     }
 }
+
+// #141 rework r1 breaker: a label swallowed by a token run still has its value redacted.
+#[test]
+fn bearer_digits_then_dot_password_label_hides_value() {
+    let out = sensitive("Bearer 12345678901234.password: hunter22");
+    assert_eq!(out, "Bearer [redacted]: [redacted]");
+    assert!(!out.contains("hunter22"));
+}
+
+#[test]
+fn bearer_card_then_dot_token_label_hides_value() {
+    let out = sensitive("Bearer 4111111111111111.token: hunter22");
+    assert_eq!(out, "Bearer [redacted]: [redacted]");
+    assert!(!out.contains("hunter22"));
+}
+
+#[test]
+fn basic_card_then_tilde_password_is_hides_value() {
+    let out = sensitive("Authorization: Basic 4111111111111111~~password is hunter22");
+    assert_eq!(out, "Authorization: Basic [redacted] is [redacted]");
+    assert!(!out.contains("hunter22"));
+}
+
+#[test]
+fn bearer_ssn_then_dot_password_label_hides_value() {
+    let out = sensitive("Bearer 123-45-6789.password: hunter22");
+    assert_eq!(out, "Bearer [redacted]: [redacted]");
+    assert!(!out.contains("hunter22"));
+}
+
+#[test]
+fn bearer_letters_then_dot_password_label_hides_value() {
+    let out = sensitive("Bearer abcdefghijklmnopqrst.password: hunter22");
+    assert_eq!(out, "Bearer [redacted]: [redacted]");
+    assert!(!out.contains("hunter22"));
+}
+
+#[test]
+fn labels_inside_long_token_run_are_linear() {
+    let input = format!("Bearer {}x", ".password=".repeat(20_000));
+    let t = Instant::now();
+    let _ = sensitive(&input);
+    assert!(t.elapsed().as_secs_f64() < 1.0, "took {:?}", t.elapsed());
+}
