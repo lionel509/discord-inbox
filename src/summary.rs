@@ -2,6 +2,7 @@
 //! Everything is computed from the day notes on disk; the charts carry no text, so the numbers go in the card.
 use crate::charts::{self, Bar};
 use crate::daylog::{self, MealRow};
+use crate::gym;
 use crate::nutrition::Macros;
 use crate::rich::Rich;
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Timelike, Weekday};
@@ -13,7 +14,7 @@ use std::path::{Path, PathBuf};
 pub const SUMMARY_HOUR: u32 = 22;
 const GREEN: u32 = 0x9ED9A0;
 const PINK: u32 = 0xF7B6A3;
-const FOOTER: &str = "today · week · undo · fix <meal> · help";
+const FOOTER: &str = "today · week · gym · undo · fix <meal> · help";
 
 /// Daily targets from the kcal target: protein 20 % of kcal at 4 kcal/g, carbs 50 % at 4, fat 30 % at 9.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -145,6 +146,7 @@ pub fn day_card(dir: &Path, day: &str, low: u32, kcal_target: u32) -> Rich {
         ("Meals".to_string(), meals_value(&meals), false),
         ("Flags".to_string(), flags, true),
         ("Streak".to_string(), format!("{} day(s)", streak(dir, day)), true),
+        ("Gym".to_string(), gym::day_line(dir, day), true),
     ];
     let title = format!("{day} · {kcal} / {kcal_target} kcal");
     let image = charts::day_png(
