@@ -122,6 +122,7 @@ fn is_heading(line: &str) -> bool {
     // A list item is an exercise even when it is all caps (`- BENCH PRESS`).
     let bullet = t.starts_with("- ")
         || t.starts_with("* ")
+        || t.starts_with("+ ")
         || t.starts_with("• ")
         || t.split_once(|c: char| c == '.' || c == ')').is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()));
     if bullet {
@@ -398,7 +399,21 @@ pub fn parse_reply(text: &str, options: &[String]) -> Reply {
         "skip" | "next" => return Reply::Skip,
         _ => {}
     }
-    let tokens: Vec<&str> = body.split(|c: char| c.is_whitespace() || c == ',').filter(|t| !t.is_empty()).collect();
+    let raw: Vec<&str> = body.split(|c: char| c.is_whitespace() || c == ',').filter(|t| !t.is_empty()).collect();
+    // Join a spaced `3 x 15` into `3x15`.
+    let mut joined: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < raw.len() {
+        let is_x = |t: &str| matches!(t, "x" | "X" | "×");
+        if i + 2 < raw.len() + 0 && raw[i].chars().all(|c| c.is_ascii_digit()) && is_x(raw[i + 1]) && raw[i + 2].chars().all(|c| c.is_ascii_digit()) {
+            joined.push(format!("{}x{}", raw[i], raw[i + 2]));
+            i += 3;
+        } else {
+            joined.push(raw[i].to_string());
+            i += 1;
+        }
+    }
+    let tokens: Vec<&str> = joined.iter().map(|s| s.as_str()).collect();
     let is_num = |t: &str| !t.is_empty() && t.chars().all(|c| c.is_ascii_digit());
     let split_nxm = |t: &str| -> Option<(u32, u32)> {
         let (a, b) = t.split_once(|c: char| matches!(c, 'x' | 'X' | '×'))?;

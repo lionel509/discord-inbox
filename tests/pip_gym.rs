@@ -295,3 +295,14 @@ fn uppercase_x_notation_is_read() {
     let r = gym::parse_reply("cable row 3X15", &["Cable row".to_string()]);
     assert_eq!(r, Reply::Did { option: Some("Cable row".into()), reps: vec![15, 15, 15] });
 }
+
+#[test]
+fn plus_bullet_is_not_a_heading() {
+    assert_eq!(gym::section("## Pull\n+ CABLE ROW\n+ FACE PULL\n", "pull").as_deref(), Some("+ CABLE ROW\n+ FACE PULL"));
+}
+
+#[test]
+fn spaced_uppercase_x_sets_reps() {
+    let r = gym::parse_reply("Cable row 3 X 15", &["Cable row".into(), "Face pull".into()]);
+    assert_eq!(r, Reply::Did { option: Some("Cable row".into()), reps: vec![15, 15, 15] });
+}
