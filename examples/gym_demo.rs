@@ -1,5 +1,7 @@
 //! Demo: drives one gym session through `pip::handle` on a scratch nutrition folder.
-//! Usage: `cargo run --example gym_demo -- [path/to/Gym Plan.md]` (default: examples/gym-plan.md, a made-up plan).
+//! Usage: `cargo run --example gym_demo -- [path/to/Gym Plan.md] [message ...]` (default plan: examples/gym-plan.md, a
+//! made-up plan). The messages after the plan path are the whole script, sent verbatim in order; with none, the default
+//! script runs. Example: `-- examples/gym-plan.md gym "15 15 12" skip "15 14" "1 3" "10 10" "30s 30s" today`.
 use discord_inbox::allowlist;
 use discord_inbox::ingest::{Inbound, Outcome};
 use discord_inbox::pip::{self, Config};
@@ -54,7 +56,8 @@ impl Inbound for Msg {
 
 #[tokio::main]
 async fn main() {
-    let plan = std::env::args().nth(1).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/gym-plan.md"));
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let plan = args.first().map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/gym-plan.md"));
     let root = std::env::temp_dir().join(format!("gym-demo-{}", std::process::id()));
     let dir = root.join("Nutrition");
     fs::create_dir_all(&dir).expect("scratch folder");
@@ -69,10 +72,11 @@ async fn main() {
         model: None,
         model_timeout: std::time::Duration::from_secs(90),
     };
-    let script = ["gym", "15 15 12", "skip", "15 14", "stop", "today"];
+    let default_script = ["gym", "15 15 12", "skip", "15 14", "stop", "today"];
+    let script: Vec<String> = if args.len() > 1 { args[1..].to_vec() } else { default_script.iter().map(|s| s.to_string()).collect() };
     for (i, t) in script.iter().enumerate() {
         println!("you> {t}");
-        let msg = Msg { id: 900 + i as u64, text: t.to_string(), received: format!("2026-10-28T18:{:02}:00+00:00", i) };
+        let msg = Msg { id: 900 + i as u64, text: t.clone(), received: format!("2026-10-28T{:02}:{:02}:00+00:00", 18 + i / 60, i % 60) };
         let out = pip::handle(&allow, &cfg, &msg).await;
         println!("  outcome: {}", match out {
             Outcome::Saved => "saved",

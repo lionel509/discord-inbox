@@ -27,11 +27,11 @@ badminton: Tue Thu
 - Goblet squat
 - Reverse lunges or Split squats
 
-## Any day
-- Hanging knee raise
-
-| Dumbbell row | Cable row |
-| Overhead press | Landmine press |
+## Core (end of any day, pick 2–3)
+- Hanging knee raise 2×10/side
+- Lantern hold 2×20 s/side (slow exhale)
+- Comet reach (30 s each side)
+- Otter roll (left + right foot)
 
 # Warm-up
 - Five minutes of brisk walking

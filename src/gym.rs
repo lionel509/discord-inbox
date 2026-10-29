@@ -4,7 +4,6 @@
 //! The plan file is not parsed into a schema: two plain settings lines (`start:`, `badminton:`) and headings are read.
 use crate::daylog;
 use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveDate, Weekday};
-use std::collections::HashMap;
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
@@ -136,14 +135,25 @@ fn heading_text(line: &str) -> String {
     line.trim().trim_start_matches('#').trim().to_lowercase()
 }
 
+/// The index of the first heading whose text contains `key`. `section` and `heading_of` both use it.
+fn find_heading(lines: &[&str], key: &str) -> Option<usize> {
+    let key = key.to_lowercase();
+    lines.iter().position(|l| is_heading(l) && heading_text(l).contains(&key))
+}
+
 /// The body under the first heading whose text contains `key`, up to the next heading. `None` when absent or empty.
 pub fn section(text: &str, key: &str) -> Option<String> {
-    let key = key.to_lowercase();
     let lines: Vec<&str> = text.lines().collect();
-    let start = lines.iter().position(|l| is_heading(l) && heading_text(l).contains(&key))?;
+    let start = find_heading(&lines, key)?;
     let body: Vec<&str> = lines[start + 1..].iter().take_while(|l| !is_heading(l)).copied().collect();
     let body = body.join("\n").trim().to_string();
     (!body.is_empty()).then_some(body)
+}
+
+/// The text of the heading `section` reads for `key`, lowercased and without its `#`s.
+fn heading_of(text: &str, key: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    find_heading(&lines, key).map(|i| heading_text(lines[i]))
 }
 
 pub fn monday(d: NaiveDate) -> NaiveDate {
@@ -193,40 +203,28 @@ pub fn next_session(week: u32, last: Option<Session>, tomorrow_badminton: bool) 
     }
 }
 
-/// One exercise of a session. `options[0]` is the plan's own entry; the rest are the `A or B` parts and swap targets.
+/// One exercise of a session. `name` is what he types to pick it, and `options` are the name's `A or B` / `A / B`
+/// parts. `target` is the bullet's own sets x reps (`2×10/side`, `30 s each side`), `note` is bracketed text with no
+/// digit, and `seconds` marks a timed item, whose reply numbers are seconds.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Exercise {
     pub name: String,
     pub options: Vec<String>,
+    pub target: Option<String>,
+    pub note: Option<String>,
+    pub seconds: bool,
 }
 
-/// Lowercased source → target pairs from the whole plan: `A → B`, `A -> B`, and two-cell table rows `| A | B |`.
-fn swap_table(plan_text: &str) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    for line in plan_text.lines().map(str::trim) {
-        if line.starts_with('|') {
-            let cells: Vec<&str> = line.split('|').map(str::trim).filter(|c| !c.is_empty()).collect();
-            if cells.len() == 2 && !cells.iter().all(|c| c.chars().all(|ch| matches!(ch, '-' | ':'))) {
-                map.insert(cells[0].to_lowercase(), cells[1].to_string());
-            }
-        } else if let Some((a, b)) = line.split_once('→').or_else(|| line.split_once("->")) {
-            if !a.trim().is_empty() && !b.trim().is_empty() {
-                map.insert(a.trim().to_lowercase(), b.trim().to_string());
-            }
-        }
-    }
-    map
-}
-
-fn is_swap_or_table(line: &str) -> bool {
-    line.starts_with('|') || line.contains('→') || line.contains("->")
+/// A table row is never an exercise. Every other line, including one with `->`, is read as one.
+fn is_table_row(line: &str) -> bool {
+    line.starts_with('|')
 }
 
 /// The exercise lines of one section body, bullets and numbers stripped.
 fn exercise_lines(body: &str) -> Vec<String> {
     let mut out = Vec::new();
     for raw in body.lines().map(str::trim) {
-        if raw.is_empty() || is_swap_or_table(raw) {
+        if raw.is_empty() || is_table_row(raw) {
             continue;
         }
         let lower = raw.to_lowercase();
@@ -254,30 +252,160 @@ fn exercise_lines(body: &str) -> Vec<String> {
     out
 }
 
-/// The exercises of `session` in `week`, from its heading in the plan. Week 3 on adds the `Any day` section.
-pub fn exercises(plan_text: &str, session: Session, week: u32) -> Vec<Exercise> {
-    let swaps = swap_table(plan_text);
-    let mut names = section(plan_text, session.key()).map(|b| exercise_lines(&b)).unwrap_or_default();
-    if week >= 3 {
-        names.extend(section(plan_text, "any day").map(|b| exercise_lines(&b)).unwrap_or_default());
-    }
-    names
-        .into_iter()
-        .map(|name| {
-            let mut options: Vec<String> = Vec::new();
-            for part in name.replace(" / ", " or ").split(" or ").map(str::trim).filter(|p| !p.is_empty()) {
-                if !options.iter().any(|o| o == part) {
-                    options.push(part.to_string());
-                }
-                if let Some(target) = swaps.get(&part.to_lowercase()) {
-                    if !options.iter().any(|o| o == target) {
-                        options.push(target.clone());
-                    }
-                }
+/// The `A` in `A × 2` shape: a token that starts with a digit and has `×`, `x` or `X` directly before a digit
+/// (`2×10/side`, `3x15`).
+fn is_sets_token(token: &str) -> bool {
+    token.starts_with(|c: char| c.is_ascii_digit())
+        && token.char_indices().any(|(i, c)| matches!(c, '×' | 'x' | 'X') && token[i + c.len_utf8()..].starts_with(|d: char| d.is_ascii_digit()))
+}
+
+/// Splits one bullet into (name, target, note). Bracketed text with a digit is the target, bracketed text without one
+/// is a note, and the first `NxM`-shaped token starts the target. The name is never empty.
+fn split_item(line: &str) -> (String, Option<String>, Option<String>) {
+    // Pass 1: each `(`...`)` pair is a group, and the line outside the groups keeps one space where a group was.
+    let chars: Vec<char> = line.chars().collect();
+    let mut outside = String::new();
+    let mut groups: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '(' {
+            if let Some(close) = chars[i + 1..].iter().position(|&c| c == ')') {
+                groups.push(chars[i + 1..i + 1 + close].iter().collect());
+                outside.push(' ');
+                i += close + 2;
+                continue;
             }
-            Exercise { name, options }
-        })
-        .collect()
+        }
+        outside.push(chars[i]);
+        i += 1;
+    }
+
+    // Pass 2: the first group with a digit is the target; the others are notes.
+    let mut paren_target: Option<String> = None;
+    let mut notes: Vec<String> = Vec::new();
+    for g in groups {
+        let t = g.trim().to_string();
+        if paren_target.is_none() && t.chars().any(|c| c.is_ascii_digit()) {
+            paren_target = Some(t);
+        } else if !t.is_empty() {
+            notes.push(t);
+        }
+    }
+
+    // Pass 3: a sets token starts the target, and the tokens from it on are the target.
+    let tokens: Vec<&str> = outside.split_whitespace().collect();
+    let (name, target) = match tokens.iter().position(|t| is_sets_token(t)) {
+        Some(at) => {
+            if let Some(p) = paren_target {
+                notes.insert(0, p);
+            }
+            (tokens[..at].join(" "), Some(tokens[at..].join(" ")))
+        }
+        None => (tokens.join(" "), paren_target),
+    };
+
+    // Pass 4: the name loses trailing separators; an empty name falls back to the whole line.
+    let name = name.trim_end_matches(|c: char| c.is_whitespace() || matches!(c, '-' | '–' | '—' | ':' | ',')).to_string();
+    if name.is_empty() {
+        return (line.trim().to_string(), None, None);
+    }
+    let note = (!notes.is_empty()).then(|| notes.join("; "));
+    (name, target, note)
+}
+
+/// A timed target: a unit word (`s`, `sec`, `secs`, `second`, `seconds`) or a digit+`s` token (`30s`, `2×20s`).
+fn is_seconds(target: &str) -> bool {
+    target.to_lowercase().replace('/', " ").split_whitespace().any(|t| {
+        matches!(t, "s" | "sec" | "secs" | "second" | "seconds")
+            || (t.len() > 1 && t.ends_with('s') && t[..t.len() - 1].ends_with(|c: char| c.is_ascii_digit()))
+    })
+}
+
+/// One bullet as an exercise. The options are the name's own `A or B` parts.
+fn to_exercise(line: String) -> Exercise {
+    let (name, target, note) = split_item(&line);
+    let mut options: Vec<String> = Vec::new();
+    for part in name.replace(" / ", " or ").split(" or ").map(str::trim).filter(|p| !p.is_empty()) {
+        if !options.iter().any(|o| o == part) {
+            options.push(part.to_string());
+        }
+    }
+    if options.is_empty() {
+        options = vec![name.clone()];
+    }
+    let seconds = target.as_deref().is_some_and(is_seconds);
+    Exercise { name, options, target, note, seconds }
+}
+
+/// The exercises under `session`'s own heading, in plan order.
+fn own(plan_text: &str, session: Session) -> Vec<Exercise> {
+    section(plan_text, session.key()).map(|b| exercise_lines(&b).into_iter().map(to_exercise).collect()).unwrap_or_default()
+}
+
+/// The core section of a week-3 plan: its items, and the pick range from its heading (`pick 2–3`) when it has one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Core {
+    pub items: Vec<Exercise>,
+    pub range: Option<(usize, usize)>,
+}
+
+/// The core for `week`. Empty before week 3. Without a usable pick range, every core item is walked.
+pub fn core(plan_text: &str, week: u32) -> Core {
+    if week < 3 {
+        return Core { items: Vec::new(), range: None };
+    }
+    let items: Vec<Exercise> = section(plan_text, "any day").map(|b| exercise_lines(&b).into_iter().map(to_exercise).collect()).unwrap_or_default();
+    let range = heading_of(plan_text, "any day").and_then(|h| pick_range(&h));
+    match range {
+        Some((lo, hi)) if items.len() > lo => {
+            let hi = hi.min(items.len());
+            Core { items, range: Some((lo, hi)) }
+        }
+        _ => Core { items, range: None },
+    }
+}
+
+/// The exercises of `session` in `week`: its own, then the core. Every core item, picked or not.
+pub fn exercises(plan_text: &str, session: Session, week: u32) -> Vec<Exercise> {
+    let mut all = own(plan_text, session);
+    all.extend(core(plan_text, week).items);
+    all
+}
+
+/// The `lo–hi` of a heading's `pick lo–hi` (`–`, `-`, `—` or ` to `), or `pick N` for exactly N. `None` when absent.
+pub fn pick_range(heading: &str) -> Option<(usize, usize)> {
+    let lower = heading.to_lowercase();
+    let rest = lower.split_once("pick")?.1.trim_start();
+    let digits = |s: &str| s.chars().take_while(|c| c.is_ascii_digit()).count();
+    let n = digits(rest);
+    if n == 0 {
+        return None;
+    }
+    let a: usize = rest[..n].parse().ok()?;
+    let tail = rest[n..].trim_start();
+    let after = tail.strip_prefix(['–', '-', '—']).or_else(|| tail.strip_prefix("to "));
+    let b = match after {
+        Some(t) => {
+            let t = t.trim_start();
+            let m = digits(t);
+            if m == 0 {
+                a
+            } else {
+                t[..m].parse().ok()?
+            }
+        }
+        None => a,
+    };
+    (a > 0 && b >= a).then_some((a, b))
+}
+
+/// The pick range as the prompt writes it: `2` or `2–3`.
+fn range_text((lo, hi): (usize, usize)) -> String {
+    if lo == hi {
+        format!("{lo}")
+    } else {
+        format!("{lo}–{hi}")
+    }
 }
 
 /// The `pip:gym` blocks of one session's day. Each is `(msg_id, heading, lines)`.
@@ -317,7 +445,8 @@ pub fn last_session(dir: &Path, today: NaiveDate) -> Option<Session> {
     })
 }
 
-/// An open session: the day it runs on, its session, its week, the DM that started it and when.
+/// An open session: the day it runs on, its session, its week, the DM that started it and when, and the core pick
+/// (`None` until he picks; the core items are then walked in the order he typed them, 1-based).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Open {
     pub day: String,
@@ -325,15 +454,29 @@ pub struct Open {
     pub week: u32,
     pub open_id: u64,
     pub opened: DateTime<FixedOffset>,
+    pub core: Option<Vec<usize>>,
 }
 
-/// The marker line: `{day} {session key} {week} {open_id} {opened RFC 3339}`.
+/// The marker line: `{day} {session key} {week} {open_id} {opened RFC 3339}`, plus ` core=1,3` once a pick is made.
 pub fn marker_text(o: &Open) -> String {
-    format!("{} {} {} {} {}", o.day, o.session.key(), o.week, o.open_id, o.opened.to_rfc3339())
+    let base = format!("{} {} {} {} {}", o.day, o.session.key(), o.week, o.open_id, o.opened.to_rfc3339());
+    match o.core.as_deref() {
+        Some(c) if !c.is_empty() => format!("{base} core={}", c.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(",")),
+        _ => base,
+    }
 }
 
 fn parse_marker(text: &str) -> Option<Open> {
-    let tokens: Vec<&str> = text.split_whitespace().collect();
+    let mut tokens: Vec<&str> = text.split_whitespace().collect();
+    // A `core=` token is popped first. A list that does not parse leaves the pick unmade, so he is asked again.
+    let last = tokens.last().copied().unwrap_or("");
+    let core = match last.strip_prefix("core=") {
+        Some(list) => {
+            tokens.pop();
+            list.split(',').map(|n| n.parse::<usize>().ok().filter(|&v| v >= 1)).collect::<Option<Vec<usize>>>()
+        }
+        None => None,
+    };
     if tokens.len() < 5 {
         return None;
     }
@@ -344,6 +487,7 @@ fn parse_marker(text: &str) -> Option<Open> {
         week: tokens[n - 3].parse().ok()?,
         open_id: tokens[n - 2].parse().ok()?,
         opened: DateTime::parse_from_rfc3339(tokens[n - 1]).ok()?,
+        core,
     })
 }
 
@@ -432,8 +576,38 @@ fn join_sets(raw: &[&str]) -> Vec<String> {
     out
 }
 
+/// Sanity cap on one timed set, in seconds.
+const MAX_SECONDS: u32 = 600;
+
+/// Seconds mode: a unit word after a number is dropped (`30 s`), and a unit suffix is cut (`30s`, `30sec`).
+fn seconds_tokens(raw: &[&str]) -> Vec<String> {
+    const UNITS: [&str; 4] = ["seconds", "secs", "sec", "s"];
+    let ends_digit = |t: &str| t.ends_with(|c: char| c.is_ascii_digit());
+    let mut out: Vec<String> = Vec::new();
+    for &t in raw {
+        if UNITS.iter().any(|u| t.eq_ignore_ascii_case(u)) {
+            if !out.last().is_some_and(|p| ends_digit(p)) {
+                out.push(t.to_string());
+            }
+            continue;
+        }
+        let cut = UNITS.iter().find_map(|u| {
+            let at = t.len().checked_sub(u.len())?;
+            (t.is_char_boundary(at) && t[at..].eq_ignore_ascii_case(u) && ends_digit(&t[..at])).then(|| t[..at].to_string())
+        });
+        out.push(cut.unwrap_or_else(|| t.to_string()));
+    }
+    out
+}
+
 /// Reads a reply to an exercise prompt: `[what you did] reps...`, `skip`, `stop`.
 pub fn parse_reply(text: &str, options: &[String]) -> Reply {
+    parse_reply_unit(text, options, false)
+}
+
+/// As `parse_reply`. With `seconds`, the numbers are seconds per set (`30 30`, `30s 30s`, `2x30s`), capped at
+/// `MAX_SECONDS` instead of `MAX_REPS`.
+pub fn parse_reply_unit(text: &str, options: &[String], seconds: bool) -> Reply {
     let body = text.trim().trim_start_matches(['/', '!']).trim().trim_end_matches(['.', '!']).trim();
     let lower = body.to_lowercase();
     match lower.as_str() {
@@ -442,6 +616,9 @@ pub fn parse_reply(text: &str, options: &[String]) -> Reply {
         _ => {}
     }
     let raw: Vec<&str> = body.split(|c: char| c.is_whitespace() || c == ',').filter(|t| !t.is_empty()).collect();
+    let raw: Vec<String> = if seconds { seconds_tokens(&raw) } else { raw.iter().map(|t| t.to_string()).collect() };
+    let raw: Vec<&str> = raw.iter().map(|t| t.as_str()).collect();
+    let cap = if seconds { MAX_SECONDS } else { MAX_REPS };
     let joined = join_sets(&raw);
     let tokens: Vec<&str> = joined.iter().map(|s| s.as_str()).collect();
     let is_num = |t: &str| !t.is_empty() && t.chars().all(|c| c.is_ascii_digit());
@@ -459,13 +636,13 @@ pub fn parse_reply(text: &str, options: &[String]) -> Reply {
     let mut reps: Vec<u32> = Vec::new();
     for t in &tokens[first_num..] {
         if let Some((n, m)) = split_nxm(t) {
-            if n > MAX_SETS || m > MAX_REPS {
+            if n > MAX_SETS || m > cap {
                 return Reply::Unreadable;
             }
             reps.extend(std::iter::repeat(m).take(n as usize));
         } else if is_num(t) {
             match t.parse() {
-                Ok(v) if v <= MAX_REPS => reps.push(v),
+                Ok(v) if v <= cap => reps.push(v),
                 Ok(_) => return Reply::Unreadable,
                 Err(_) => return Reply::Unreadable,
             }
@@ -492,14 +669,91 @@ pub fn parse_reply(text: &str, options: &[String]) -> Reply {
     }
 }
 
+/// An item's text in a prompt: its options, then its own target or the week's sets x reps, then its note.
+fn item_text(ex: &Exercise, week: u32) -> String {
+    let target = ex.target.as_deref().unwrap_or(sets_reps(week));
+    let mut out = format!("{} · {target}", ex.options.join(" or "));
+    if let Some(note) = &ex.note {
+        out.push_str(&format!(" · {note}"));
+    }
+    out
+}
+
 /// The prompt for exercise `k` of `n`.
 pub fn prompt(ex: &Exercise, k: usize, n: usize, week: u32) -> String {
-    format!(
-        "{}/{n} · {} · {}\nReply with what you did and reps per set (e.g. cable row 15 15 12), or skip / stop.",
-        k + 1,
-        ex.options.join(" or "),
-        sets_reps(week)
-    )
+    let hint = if ex.seconds {
+        "Reply with seconds per set (e.g. 30 30 or 30s 30s), or skip / stop."
+    } else {
+        "Reply with what you did and reps per set (e.g. cable row 15 15 12), or skip / stop."
+    };
+    format!("{}/{n} · {}\n{hint}", k + 1, item_text(ex, week))
+}
+
+/// The exercises this session walks: its own, then the core. Without a pick range that is every core item. With one,
+/// it is none until he picks, then the picked items in the order he typed them.
+pub fn walk(plan_text: &str, o: &Open) -> Vec<Exercise> {
+    let mut list = own(plan_text, o.session);
+    let c = core(plan_text, o.week);
+    match (c.range, o.core.as_ref()) {
+        (None, _) => list.extend(c.items),
+        (Some(_), Some(picks)) => list.extend(picks.iter().filter_map(|&i| i.checked_sub(1).and_then(|j| c.items.get(j).cloned()))),
+        (Some(_), None) => {}
+    }
+    list
+}
+
+/// The core this session is waiting on a pick for: it has a pick range and no pick is made yet.
+fn pending(plan_text: &str, o: &Open) -> Option<Core> {
+    let c = core(plan_text, o.week);
+    (c.range.is_some() && o.core.is_none()).then_some(c)
+}
+
+/// The pick prompt: the range, the numbers to type, and one line per core item.
+pub fn pick_prompt(core: &Core, week: u32) -> String {
+    let (lo, hi) = core.range.unwrap_or((1, core.items.len()));
+    let mut out = format!("Core · pick {} by number (e.g. 1 3), or skip.", range_text((lo, hi)));
+    for (i, item) in core.items.iter().enumerate() {
+        out.push_str(&format!("\n{}. {}", i + 1, item_text(item, week)));
+    }
+    out
+}
+
+/// What a reply at the pick prompt means.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Pick {
+    Chosen(Vec<usize>),
+    Skip,
+    Stop,
+    Bad,
+}
+
+/// Reads a pick: 1-based numbers, separated by spaces and/or commas (`and` and `&` are ignored, duplicates keep their
+/// first place). The count must be within `lo..=hi`, and each number within `1..=len`. `skip` and `stop` as elsewhere.
+pub fn parse_pick(text: &str, len: usize, lo: usize, hi: usize) -> Pick {
+    let body = text.trim().trim_start_matches(['/', '!']).trim().trim_end_matches(['.', '!']).trim();
+    match body.to_lowercase().as_str() {
+        "stop" | "done" | "end" | "quit" => return Pick::Stop,
+        "skip" | "next" | "none" | "no" => return Pick::Skip,
+        _ => {}
+    }
+    let mut picks: Vec<usize> = Vec::new();
+    for tok in body.split(|c: char| c.is_whitespace() || c == ',').filter(|t| !t.is_empty()) {
+        let lower = tok.to_lowercase();
+        if lower == "and" || lower == "&" {
+            continue;
+        }
+        let Ok(n) = tok.parse::<usize>() else { return Pick::Bad };
+        if n == 0 || n > len {
+            return Pick::Bad;
+        }
+        if !picks.contains(&n) {
+            picks.push(n);
+        }
+    }
+    if picks.len() < lo || picks.len() > hi {
+        return Pick::Bad;
+    }
+    Pick::Chosen(picks)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -534,12 +788,13 @@ fn summary(label: &str, entries: &[Vec<String>]) -> String {
     out
 }
 
-fn did_line(name: &str, chosen: &str, reps: &[u32]) -> String {
+fn did_line(name: &str, chosen: &str, reps: &[u32], seconds: bool) -> String {
+    let unit = if seconds { "seconds" } else { "reps" };
     let reps: Vec<String> = reps.iter().map(|r| r.to_string()).collect();
     if chosen == name {
-        format!("{name} · reps {}", reps.join(" "))
+        format!("{name} · {unit} {}", reps.join(" "))
     } else {
-        format!("{name} · {chosen} · reps {}", reps.join(" "))
+        format!("{name} · {chosen} · {unit} {}", reps.join(" "))
     }
 }
 
@@ -560,8 +815,11 @@ pub fn turn(dir: &Path, received: &str, text: &str, msg_id: u64) -> Option<Turn>
             let week = week_number(start_date(dir, s, today), today);
             let tomorrow_badminton = s.badminton.contains(&(today + Duration::days(1)).weekday());
             let session = next_session(week, last_session(dir, today), tomorrow_badminton);
-            let exs = exercises(&plan.text, session, week);
-            if exs.is_empty() {
+            let opened = DateTime::parse_from_rfc3339(received).ok()?;
+            let o = Open { day: today_str.clone(), session, week, open_id: msg_id, opened, core: None };
+            let list = walk(&plan.text, &o);
+            let pend = pending(&plan.text, &o);
+            if list.is_empty() && pend.is_none() {
                 return Some(Turn {
                     reply: format!(
                         "The plan has no exercise lines under a '{}' heading (headings I look for: Day 1, Day 2, Push, Pull, Legs, Any day).",
@@ -573,26 +831,35 @@ pub fn turn(dir: &Path, received: &str, text: &str, msg_id: u64) -> Option<Turn>
                     marker: Marker::Keep,
                 });
             }
-            let n = exs.len();
-            let reply = format!("Week {week} · {} · {n} exercises\n{}", session.label(), prompt(&exs[0], 0, n, week));
-            let opened = DateTime::parse_from_rfc3339(received).ok()?;
-            let marker = marker_text(&Open { day: today_str.clone(), session, week, open_id: msg_id, opened });
-            return Some(Turn { reply, day: today_str, tag: String::new(), lines: Vec::new(), marker: Marker::Open(marker) });
+            let n = list.len();
+            let head = match &pend {
+                Some(c) => format!("Week {week} · {} · {n} exercises + core (pick {})", session.label(), range_text(c.range.unwrap_or((1, 1)))),
+                None => format!("Week {week} · {} · {n} exercises", session.label()),
+            };
+            let body = match list.first() {
+                Some(ex) => prompt(ex, 0, n, week),
+                None => pick_prompt(pend.as_ref()?, week),
+            };
+            let marker = marker_text(&o);
+            return Some(Turn { reply: format!("{head}\n{body}"), day: today_str, tag: String::new(), lines: Vec::new(), marker: Marker::Open(marker) });
         };
         let plan = match load_plan(dir) {
             Ok(p) => p,
             Err(e) => return Some(plan_error(&e, &o.day)),
         };
-        let exs = exercises(&plan.text, o.session, o.week);
+        let list = walk(&plan.text, o);
         let k = progress(dir, o).len();
-        if k < exs.len() {
+        if k < list.len() {
             return Some(Turn {
-                reply: prompt(&exs[k], k, exs.len(), o.week),
+                reply: prompt(&list[k], k, list.len(), o.week),
                 day: o.day.clone(),
                 tag: String::new(),
                 lines: Vec::new(),
                 marker: Marker::Keep,
             });
+        }
+        if let Some(c) = pending(&plan.text, o) {
+            return Some(Turn { reply: pick_prompt(&c, o.week), day: o.day.clone(), tag: String::new(), lines: Vec::new(), marker: Marker::Keep });
         }
         return Some(finish(dir, o, Vec::new()));
     }
@@ -615,15 +882,45 @@ pub fn turn(dir: &Path, received: &str, text: &str, msg_id: u64) -> Option<Turn>
         Ok(p) => p,
         Err(e) => return Some(plan_error(&e, &o.day)),
     };
-    let exs = exercises(&plan.text, o.session, o.week);
+    let list = walk(&plan.text, &o);
     let k = progress(dir, &o).len();
-    let n = exs.len();
-    if k >= n {
-        return Some(finish(dir, &o, Vec::new()));
-    }
-    let ex = &exs[k];
     let keep = |reply: String| Turn { reply, day: o.day.clone(), tag: String::new(), lines: Vec::new(), marker: Marker::Keep };
-    match parse_reply(text, &ex.options) {
+    if k >= list.len() {
+        // Every own exercise is answered. A pending core waits for its pick; otherwise the session is done.
+        let Some(core) = pending(&plan.text, &o) else {
+            return Some(finish(dir, &o, Vec::new()));
+        };
+        let (lo, hi) = core.range.unwrap_or((1, core.items.len()));
+        let entries = || -> Vec<Vec<String>> { progress(dir, &o).into_iter().map(|(_, l)| l).collect() };
+        return Some(match parse_pick(text, core.items.len(), lo, hi) {
+            Pick::Stop => Turn {
+                reply: format!("Stopped before core. {}", summary(o.session.label(), &entries())),
+                day: o.day.clone(),
+                tag: String::new(),
+                lines: Vec::new(),
+                marker: Marker::Clear,
+            },
+            Pick::Skip => finish(dir, &o, Vec::new()),
+            Pick::Chosen(picks) => {
+                let o2 = Open { core: Some(picks), ..o.clone() };
+                let l2 = walk(&plan.text, &o2);
+                if l2.len() <= k {
+                    return Some(finish(dir, &o2, Vec::new()));
+                }
+                Turn {
+                    reply: prompt(&l2[k], k, l2.len(), o.week),
+                    day: o.day.clone(),
+                    tag: String::new(),
+                    lines: Vec::new(),
+                    marker: Marker::Open(marker_text(&o2)),
+                }
+            }
+            Pick::Bad => keep(format!("Couldn't read that as a pick. {}", pick_prompt(&core, o.week))),
+        });
+    }
+    let n = list.len();
+    let ex = &list[k];
+    match parse_reply_unit(text, &ex.options, ex.seconds) {
         Reply::Stop => {
             let entries: Vec<Vec<String>> = progress(dir, &o).into_iter().map(|(_, l)| l).collect();
             Some(Turn {
@@ -640,7 +937,7 @@ pub fn turn(dir: &Path, received: &str, text: &str, msg_id: u64) -> Option<Turn>
         }
         Reply::Did { option, reps } => {
             let chosen = option.unwrap_or_else(|| ex.options[0].clone());
-            let line = did_line(&ex.name, &chosen, &reps);
+            let line = did_line(&ex.name, &chosen, &reps, ex.seconds);
             Some(advance(dir, &o, &plan.text, k, vec![line]))
         }
         Reply::Ambiguous(ms) => Some(keep(format!("Which one: {}? Reply with the name and reps.", ms.join(" or ")))),
@@ -650,13 +947,22 @@ pub fn turn(dir: &Path, received: &str, text: &str, msg_id: u64) -> Option<Turn>
 
 /// The reply after exercise `k` is answered with `lines`: the next prompt, or the finish when it was the last.
 fn advance(dir: &Path, o: &Open, plan_text: &str, k: usize, lines: Vec<String>) -> Turn {
-    let exs = exercises(plan_text, o.session, o.week);
-    let n = exs.len();
+    let list = walk(plan_text, o);
+    let n = list.len();
     if k + 1 >= n {
+        if let Some(core) = pending(plan_text, o) {
+            return Turn {
+                reply: pick_prompt(&core, o.week),
+                day: o.day.clone(),
+                tag: format!("gym {} · session {}", o.session.label(), o.open_id),
+                lines,
+                marker: Marker::Keep,
+            };
+        }
         finish(dir, o, lines)
     } else {
         Turn {
-            reply: prompt(&exs[k + 1], k + 1, n, o.week),
+            reply: prompt(&list[k + 1], k + 1, n, o.week),
             day: o.day.clone(),
             tag: format!("gym {} · session {}", o.session.label(), o.open_id),
             lines,
