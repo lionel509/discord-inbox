@@ -15,7 +15,7 @@ use discord_inbox::pip;
 
 const MAIN: u64 = 100000000000000001;
 const MAIN_CH: u64 = 5001;
-const LABEL_SOURDOUGH: &str = r#"{"label":{"name":"Farmhouse Sourdough Bread","serving_g":43,"serving_pc":1,"kcal":265,"protein":9,"carbs":49,"fat":3},"items":[],"unreadable":[]}"#;
+const LABEL_SOURDOUGH: &str = r#"{"label":{"name":"Farmhouse Sourdough Bread","serving_g":43,"serving_pc":1,"kcal":114,"protein":4,"carbs":21,"fat":1.3},"items":[],"unreadable":[]}"#;
 
 struct Msg {
     id: u64,
