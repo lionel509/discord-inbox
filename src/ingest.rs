@@ -244,7 +244,7 @@ pub(crate) async fn typing_while<M: Inbound, F: std::future::Future>(m: &M, work
 }
 
 /// The reply to a DM with nothing to read (#46).
-pub const BLANK_REPLY: &str = "Got it 🐾";
+pub const BLANK_REPLY: &str = "Got it.";
 /// How much of a text attachment is read as the message (#46).
 pub const ATTACH_TEXT_CHARS: usize = 20_000;
 
@@ -600,9 +600,9 @@ pub async fn ingest_with<M: Inbound>(
             };
             mark(m, SAVED_MARK).await;
             let text = if first {
-                Some(reply_text("Sorry, my brain's a little foggy right now 😿 Your message is saved in your Inbox. For the next 10 minutes I'll just ✅ new ones and catch up after.", verdict.as_deref()))
+                Some(reply_text("Sorry, my brain's a little foggy right now. Your message is saved in your Inbox. For the next 10 minutes I'll just ✅ new ones and catch up after.", verdict.as_deref()))
             } else {
-                verdict.map(|v| reply_text("Still a little foggy 😿 This one's saved in your Inbox too.", Some(&v)))
+                verdict.map(|v| reply_text("Still a little foggy. This one's saved in your Inbox too.", Some(&v)))
             };
             if let Some(text) = text {
                 if let Err(e) = m.reply(&text).await {
@@ -640,7 +640,7 @@ pub async fn ingest_with<M: Inbound>(
                         eprintln!("discord-inbox: lookup for {id} failed: {e}");
                         let kept = vaults::without_promises(&d.reply);
                         let filed_in = d.target.map(|t| format!("Filed it in {}.", t.folder));
-                        let said = if kept.is_empty() && filed_in.is_some() { filed_in.as_deref().unwrap() } else if kept.is_empty() { "I tried to look that up for you and couldn't get to your notes 😿" } else { kept.as_str() };
+                        let said = if kept.is_empty() && filed_in.is_some() { filed_in.as_deref().unwrap() } else if kept.is_empty() { "I tried to look that up for you and couldn't get to your notes." } else { kept.as_str() };
                         format!("{said}\n\n(I couldn't peek at your notes just now, sorry!)")
                     }
                 };

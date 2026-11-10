@@ -109,6 +109,9 @@ fn meal_id(line: &str) -> Option<u64> {
     meal_open_id(line).or_else(|| meal_close_id(line))
 }
 
+const GYM_OPEN: &str = "<!-- pip:gym ";
+const GYM_CLOSE: &str = "<!-- /pip:gym ";
+
 /// The id on any Pip marker that records a message: a meal, a note, or an undone meal.
 fn any_id(line: &str) -> Option<u64> {
     meal_id(line)
@@ -116,6 +119,8 @@ fn any_id(line: &str) -> Option<u64> {
         .or_else(|| marker_id(line, "<!-- /pip:note "))
         .or_else(|| marker_id(line, "<!-- pip:undone "))
         .or_else(|| marker_id(line, "<!-- /pip:undone "))
+        .or_else(|| marker_id(line, GYM_OPEN))
+        .or_else(|| marker_id(line, GYM_CLOSE))
 }
 
 pub fn logged(dir: &Path, day: &str, msg_id: u64) -> bool {
@@ -446,10 +451,16 @@ fn note_block(n: &NoteMsg) -> String {
 /// Appends a non-meal message to the day's note. It never touches the totals. A message id already in
 /// the note writes nothing.
 pub fn write_note(dir: &Path, day: &str, n: &NoteMsg, _low_kcal: u32) -> io::Result<Written> {
+    append_block(dir, day, n.msg_id, &note_block(n))
+}
+
+/// Appends a finished block to the day's note, creating the note when it is missing. A message id
+/// already in the note writes nothing.
+fn append_block(dir: &Path, day: &str, msg_id: u64, block: &str) -> io::Result<Written> {
     let _guard = dump::LOCK.lock().unwrap_or_else(|p| p.into_inner());
     fs::create_dir_all(dir)?;
     let existing = read_note(dir, day)?.unwrap_or_default();
-    if existing.lines().any(|l| any_id(l) == Some(n.msg_id)) {
+    if existing.lines().any(|l| any_id(l) == Some(msg_id)) {
         return Ok(Written::Already);
     }
     let mut text = if existing.is_empty() {
@@ -458,27 +469,52 @@ pub fn write_note(dir: &Path, day: &str, n: &NoteMsg, _low_kcal: u32) -> io::Res
         existing
     };
     separate(&mut text);
-    text.push_str(&note_block(n));
+    text.push_str(block);
     let tmp = dir.join(format!("{day}.md.tmp"));
     fs::write(&tmp, text)?;
     fs::rename(&tmp, note_path(dir, day))?;
     Ok(Written::Logged)
 }
 
-/// Each meal region as (id, its lines between the markers), in file order. A region ends at its own
-/// close marker; a region left open by hand is dropped.
-fn meal_regions(text: &str) -> Vec<(u64, Vec<&str>)> {
+/// Appends one gym exercise block to the day's note. It is Pip's own block, never a meal: no meal
+/// marker, so totals, `has_meal`, streaks and the check-in ignore it.
+pub fn write_gym(dir: &Path, day: &str, msg_id: u64, time: &str, tag: &str, lines: &[String]) -> io::Result<Written> {
+    let mut block = format!("{GYM_OPEN}{msg_id} -->\n### {} · msg {msg_id} · {}\n", one_line(time), one_line(tag));
+    for l in lines {
+        block.push_str(&format!("- {}\n", one_line(l)));
+    }
+    block.push_str(&format!("{GYM_CLOSE}{msg_id} -->\n"));
+    append_block(dir, day, msg_id, &block)
+}
+
+/// Each gym block of the day as (msg id, heading text after `### `, its `- ` lines with the dash
+/// stripped). Empty when the note is missing or unreadable.
+pub fn gym_blocks(dir: &Path, day: &str) -> Vec<(u64, String, Vec<String>)> {
+    let Ok(Some(text)) = read_note(dir, day) else { return Vec::new() };
+    regions(&text, GYM_OPEN, GYM_CLOSE)
+        .into_iter()
+        .map(|(id, body)| {
+            let heading = body.iter().find_map(|l| l.strip_prefix("### ")).unwrap_or("").to_string();
+            let lines = body.iter().filter_map(|l| l.strip_prefix("- ")).map(|l| l.trim().to_string()).collect();
+            (id, heading, lines)
+        })
+        .collect()
+}
+
+/// Each region between `open_prefix`N and `close_prefix`N markers as (id, its lines between them), in
+/// file order. A region ends at its own close marker; a region left open by hand is dropped.
+fn regions<'a>(text: &'a str, open_prefix: &str, close_prefix: &str) -> Vec<(u64, Vec<&'a str>)> {
     let mut out = Vec::new();
     let mut open: Option<(u64, Vec<&str>)> = None;
     for line in text.lines() {
         let t = line.trim();
-        if let Some(id) = meal_open_id(t) {
+        if let Some(id) = marker_id(t, open_prefix) {
             if open.is_none() {
                 open = Some((id, Vec::new()));
             }
             continue;
         }
-        let closes = matches!(&open, Some((id, _)) if meal_close_id(t) == Some(*id));
+        let closes = matches!(&open, Some((id, _)) if marker_id(t, close_prefix) == Some(*id));
         if closes {
             if let Some(region) = open.take() {
                 out.push(region);
@@ -516,7 +552,7 @@ fn meal_row(id: u64, body: &[&str]) -> MealRow {
 pub fn meals(dir: &Path, day: &str) -> Vec<MealRow> {
     let Ok(Some(text)) = read_note(dir, day) else { return Vec::new() };
     let mut seen = HashSet::new();
-    meal_regions(&text)
+    regions(&text, "<!-- pip:meal ", "<!-- /pip:meal ")
         .into_iter()
         .filter(|(id, _)| seen.insert(*id))
         .map(|(id, body)| meal_row(id, &body))

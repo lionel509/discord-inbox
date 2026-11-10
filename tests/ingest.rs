@@ -973,7 +973,7 @@ async fn no_reply_when_nothing_to_say() {
     assert_eq!(ingest(&allow(), &inbox, &msg(&w, &good)).await, Outcome::Saved);
     let notice = w.replies_for(102);
     assert_eq!(notice.len(), 1, "{notice:?}");
-    assert!(notice[0].starts_with("Sorry, my brain's a little foggy right now 😿") && !notice[0].contains("chat off"), "{}", notice[0]);
+    assert!(notice[0].starts_with("Sorry, my brain's a little foggy right now.") && !notice[0].contains("chat off"), "{}", notice[0]);
 
     let stranger = spec(STRANGER, STRANGER_CH, 103, &[("receipt.png", b"receipt")]);
     assert_eq!(ingest(&allow(), &inbox, &msg(&w, &stranger)).await, Outcome::Ignored);
@@ -1316,7 +1316,7 @@ async fn chat_failure_falls_back_to_tick() {
     assert_eq!(w.marks(320), vec!["✅"]);
     let replies = w.replies_for(320);
     assert_eq!(replies.len(), 1, "{replies:?}");
-    assert!(replies[0].starts_with("Sorry, my brain's a little foggy right now 😿") && !replies[0].contains("http 404"), "{}", replies[0]);
+    assert!(replies[0].starts_with("Sorry, my brain's a little foggy right now.") && !replies[0].contains("http 404"), "{}", replies[0]);
     assert!(files_in(&root_of(&inbox).join("Citadel/Ideas")).is_empty());
     assert_eq!(chat.calls(), 1);
 }
@@ -1545,7 +1545,7 @@ async fn chat_failure_with_receipt_sends_one_reply() {
     assert_eq!(ingest_with(&allow(), &inbox, &msg(&w, &s), &f).await, Outcome::Saved);
     let replies = w.replies_for(325);
     assert_eq!(replies.len(), 1, "{replies:?}");
-    assert!(replies[0].starts_with("Sorry, my brain's a little foggy right now 😿") && !replies[0].contains("http 500"), "{}", replies[0]);
+    assert!(replies[0].starts_with("Sorry, my brain's a little foggy right now.") && !replies[0].contains("http 500"), "{}", replies[0]);
     assert_eq!(w.marks(325), vec!["✅"]);
 }
 
@@ -1694,7 +1694,7 @@ async fn same_chat_error_notices_once_until_chat_works() {
     }
     let first = w.replies_for(340);
     assert_eq!(first.len(), 1, "{first:?}");
-    assert!(first[0].starts_with("Sorry, my brain's a little foggy right now 😿") && !first[0].contains("http 401"), "{}", first[0]);
+    assert!(first[0].starts_with("Sorry, my brain's a little foggy right now.") && !first[0].contains("http 401"), "{}", first[0]);
     assert!(w.replies_for(341).is_empty(), "{:?}", w.replies_for(341));
     assert_eq!(w.marks(341), vec!["✅"]);
     let third = w.replies_for(342);
@@ -1702,7 +1702,7 @@ async fn same_chat_error_notices_once_until_chat_works() {
     assert!(third[0].contains("ok"), "{}", third[0]);
     let fourth = w.replies_for(343);
     assert_eq!(fourth.len(), 1, "{fourth:?}");
-    assert!(fourth[0].starts_with("Sorry, my brain's a little foggy right now 😿") && !fourth[0].contains("http 401"), "{}", fourth[0]);
+    assert!(fourth[0].starts_with("Sorry, my brain's a little foggy right now.") && !fourth[0].contains("http 401"), "{}", fourth[0]);
 }
 
 /// A question the model routes to a running list is answered, and the list is left alone.

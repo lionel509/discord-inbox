@@ -354,7 +354,7 @@ impl Report {
             format!("Nothing food-shaped to add from {}.", self.source)
         } else {
             let parts: Vec<String> = self.added.iter().map(|a| format!("+{a}")).collect();
-            format!("Pantry restocked from {}: {} 🐾", self.source, parts.join(", "))
+            format!("Pantry restocked from {}: {}", self.source, parts.join(", "))
         };
         if self.others > 0 {
             s.push_str(&format!("\nSkipped {} rows for other people.", self.others));
@@ -515,7 +515,7 @@ pub fn out_of(root: &Path, item: &str, today: &str) -> Result<String, String> {
     if !dropped.is_empty() {
         write_note(root, &rows, today)?;
     }
-    let mut reply = if dropped.is_empty() { String::new() } else { format!("Dropped {} from the pantry 🐾", dropped.join(", ")) };
+    let mut reply = if dropped.is_empty() { String::new() } else { format!("Dropped {} from the pantry", dropped.join(", ")) };
     if !missing.is_empty() {
         let m = format!("No {} in the pantry right now.", missing.join(", "));
         if reply.is_empty() {

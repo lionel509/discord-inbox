@@ -17,6 +17,7 @@ pub mod nutrition;
 pub mod recipes;
 pub mod foods;
 pub mod daylog;
+pub mod gym;
 pub mod checkin;
 pub mod pip;
 pub mod pip_model;
