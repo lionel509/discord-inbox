@@ -2,9 +2,11 @@
 
 use crate::dump;
 use crate::vaults::{PANTRY, SPLITS};
+use crate::{foods, ocr, redact};
 use chrono::{Local, NaiveDate};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Whole-word food names (lowercase word, canonical). This is both the normaliser and the food filter.
 /// Nothing that is also a receipt word (total, tax, cash, member, price).
@@ -327,6 +329,11 @@ pub fn days(bought: &str, today: &str) -> Option<i64> {
 
 /// The whole note, rewritten by the bot. Prose outside the table is not kept.
 pub fn render(rows: &[Row], today: &str) -> String {
+    render_with(rows, &[], today)
+}
+
+/// `render` plus the products block (#159). With no products the output is `render`'s, byte for byte.
+pub fn render_with(rows: &[Row], products: &[Product], today: &str) -> String {
     let mut s = format!(
         "# On Hand\n\n_Bought dates come from receipts; Days as of {today}. Say \"out of X\" to Stormy to drop a row._\n\n| Item | Qty | Store | Bought | Days |\n|---|---|---|---|---|\n"
     );
@@ -334,7 +341,16 @@ pub fn render(rows: &[Row], today: &str) -> String {
         let d = days(&r.bought, today).map(|d| d.to_string()).unwrap_or_else(|| "?".into());
         s.push_str(&format!("| {} | {} | {} | {} | {} |\n", r.item, r.qty, r.store, r.bought, d));
     }
-    s.push_str("\n**Hub:** [[Pantry]]\n");
+    let lines: Vec<String> = products.iter().filter_map(product_line).collect();
+    if !lines.is_empty() {
+        s.push_str(&format!("\n## Products\n\n{PRODUCTS_OPEN}\n"));
+        for l in &lines {
+            s.push_str(l);
+            s.push('\n');
+        }
+        s.push_str(&format!("{PRODUCTS_CLOSE}\n"));
+    }
+    s.push_str("\nHub: [[Pantry]]\n");
     s
 }
 
@@ -370,6 +386,19 @@ impl Report {
     }
 }
 
+/// The restock reply: `Report::text`, plus the products added (#159).
+fn reply(r: &Report, products: &[String]) -> String {
+    if products.is_empty() {
+        return r.text();
+    }
+    let mut s = r.text();
+    if r.added.is_empty() {
+        s = s.replacen(&format!("Nothing food-shaped to add from {}.", r.source), &format!("Pantry restocked from {}.", r.source), 1);
+    }
+    s.push_str(&format!("\nProducts: {}.", products.join("; ")));
+    s
+}
+
 fn today() -> String {
     Local::now().format("%Y-%m-%d").to_string()
 }
@@ -392,19 +421,35 @@ fn oldest(rows: &[Row], today: &str) -> Vec<(String, i64)> {
     v
 }
 
-fn write_note(root: &Path, rows: &[Row], today: &str) -> Result<(), String> {
+fn write_note(root: &Path, rows: &[Row], products: &[Product], today: &str) -> Result<(), String> {
     let dir: PathBuf = root.join("Fidelity/Pantry");
     let tmp = dir.join(".On Hand.md.tmp");
-    fs::write(&tmp, render(rows, today)).map_err(|e| e.to_string())?;
+    fs::write(&tmp, render_with(rows, products, today)).map_err(|e| e.to_string())?;
     fs::rename(&tmp, root.join(PANTRY)).map_err(|e| e.to_string())
 }
 
 /// `restock` for `date`, as of today's local date.
 pub fn restock(root: &Path, date: &str, all: bool) -> Result<Report, String> {
-    restock_at(root, date, all, &today())
+    with_helper(|ex| restock_with(root, date, all, &today(), ex)).map(|(r, _)| r)
 }
 
-fn restock_at(root: &Path, date: &str, all: bool, today: &str) -> Result<Report, String> {
+/// The extractor (a slow model call) runs before the lock, which is taken only for the note write.
+/// Returns the report and the product names newly added (#159).
+fn restock_with(root: &Path, date: &str, all: bool, today: &str, extract: Option<&dyn Fn(&str) -> Option<String>>) -> Result<(Report, Vec<String>), String> {
+    let split_path = root.join(SPLITS).join(format!("Costco Split — {date}.md"));
+    let split = is_regular(&split_path);
+    let mut new_products: Vec<Product> = Vec::new();
+    if let (Some(ex), false) = (extract, split) {
+        let receipts = filed_receipts(root, date);
+        let costco = receipts.iter().any(|(_, t)| costco_text(t));
+        if !receipts.is_empty() && (all || !costco) {
+            for (_, text) in &receipts {
+                if let Some(reply) = ex(&extract_prompt(text)) {
+                    upsert_products(&mut new_products, parse_extract(&reply, date));
+                }
+            }
+        }
+    }
     let _guard = dump::LOCK.lock().unwrap_or_else(|p| p.into_inner());
     if !root.join("Fidelity/Pantry").is_dir() {
         return Err("there is no Fidelity/Pantry folder in the vault".into());
@@ -412,10 +457,14 @@ fn restock_at(root: &Path, date: &str, all: bool, today: &str) -> Result<Report,
     let note_path = root.join(PANTRY);
     refuse_link(&note_path)?;
 
-    let split_path = root.join(SPLITS).join(format!("Costco Split — {date}.md"));
-    let (new_rows, source, others, unassigned) = if is_regular(&split_path) {
+    let (new_rows, source, others, unassigned) = if split {
         let text = fs::read_to_string(&split_path).map_err(|e| e.to_string())?;
         let s = parse_split(&text);
+        if extract.is_some() {
+            for (c, _) in &s.mine {
+                upsert_products(&mut new_products, vec![Product { name: c.clone(), brand: "Costco".into(), size: String::new(), bought: date.into() }]);
+            }
+        }
         let source = split_path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         let rows: Vec<Row> = s
             .mine
@@ -444,8 +493,7 @@ fn restock_at(root: &Path, date: &str, all: bool, today: &str) -> Result<Report,
                 continue;
             }
             let text = fs::read_to_string(&p).unwrap_or_default();
-            let ocr = ocr_lines(&text);
-            costco |= ocr.iter().any(|l| { let m: String = l.to_lowercase().replace('0', "o").split_whitespace().collect(); m.contains("costco") });
+            costco |= costco_text(&text);
             filed += 1;
             for c in receipt_items(&text) {
                 if !found.iter().any(|(f, _)| *f == c) {
@@ -473,20 +521,31 @@ fn restock_at(root: &Path, date: &str, all: bool, today: &str) -> Result<Report,
         (rows, source, 0, Vec::new())
     };
 
-    let mut rows = parse_note(&fs::read_to_string(&note_path).unwrap_or_default());
+    let old = fs::read_to_string(&note_path).unwrap_or_default();
+    let mut rows = parse_note(&old);
+    let mut have = parse_products(&old);
+    let mut product_names: Vec<String> = Vec::new();
+    for p in &new_products {
+        let key = foods::norm(&p.name);
+        if !have.iter().any(|h| foods::norm(&h.name) == key) && !product_names.contains(&p.name) {
+            product_names.push(p.name.clone());
+        }
+    }
     let mut added: Vec<String> = Vec::new();
     for r in &new_rows {
         if !added.contains(&r.item) {
             added.push(r.item.clone());
         }
     }
-    if !new_rows.is_empty() {
+    if !new_rows.is_empty() || !new_products.is_empty() {
         upsert(&mut rows, new_rows);
-        write_note(root, &rows, today)?;
+        upsert_products(&mut have, new_products);
+        write_note(root, &rows, &have, today)?;
     } else {
         added.clear();
     }
-    Ok(Report { source, added, others, unassigned, oldest: oldest(&rows, today) })
+    let report = Report { source, added, others, unassigned, oldest: oldest(&rows, today) };
+    Ok((report, product_names))
 }
 
 /// Drops the row for each food the item names ("eggs and milk"). Anything that is not whole food names is refused.
@@ -500,20 +559,23 @@ pub fn out_of(root: &Path, item: &str, today: &str) -> Result<String, String> {
         return Ok("No pantry note yet.".into());
     }
     refuse_link(&note_path)?;
-    let mut rows = parse_note(&fs::read_to_string(&note_path).map_err(|e| e.to_string())?);
+    let old = fs::read_to_string(&note_path).map_err(|e| e.to_string())?;
+    let mut rows = parse_note(&old);
+    let mut have = parse_products(&old);
     let mut dropped: Vec<&str> = Vec::new();
     let mut missing: Vec<&str> = Vec::new();
     for k in keys {
-        let before = rows.len();
+        let before = rows.len() + have.len();
         rows.retain(|r| !r.item.eq_ignore_ascii_case(k));
-        if rows.len() < before {
+        have.retain(|p| food(&p.name) != Some(k));
+        if rows.len() + have.len() < before {
             dropped.push(k);
         } else {
             missing.push(k);
         }
     }
     if !dropped.is_empty() {
-        write_note(root, &rows, today)?;
+        write_note(root, &rows, &have, today)?;
     }
     let mut reply = if dropped.is_empty() { String::new() } else { format!("Dropped {} from the pantry", dropped.join(", ")) };
     if !missing.is_empty() {
@@ -528,18 +590,34 @@ pub fn out_of(root: &Path, item: &str, today: &str) -> Result<String, String> {
     Ok(reply)
 }
 
+/// Runs `f` with the products extractor: the helper at `DISCORD_INBOX_PRODUCTS` (absolute path), or none.
+fn with_helper<T>(f: impl FnOnce(Option<&dyn Fn(&str) -> Option<String>>) -> T) -> T {
+    match std::env::var("DISCORD_INBOX_PRODUCTS").ok().map(PathBuf::from).filter(|p| p.is_absolute()) {
+        Some(helper) => {
+            let ex = move |p: &str| ocr::run_args(&helper, &[], p.as_bytes(), Duration::from_secs(45));
+            f(Some(&ex as &dyn Fn(&str) -> Option<String>))
+        }
+        None => f(None),
+    }
+}
+
 /// Runs a command against the vault at `root`. `today` is the sender's local date.
 pub fn run(root: &Path, cmd: Command, today: &str) -> Result<String, String> {
+    with_helper(|ex| run_with(root, cmd, today, ex))
+}
+
+/// `run` with the products extractor given: tests pass a stub, `run` passes the helper or none (#159).
+pub fn run_with(root: &Path, cmd: Command, today: &str, extract: Option<&dyn Fn(&str) -> Option<String>>) -> Result<String, String> {
     match cmd {
         Command::Restock { date, all } => {
             let d = date.unwrap_or_else(|| today.to_string());
-            restock_at(root, &d, all, today).map(|r| r.text())
+            restock_with(root, &d, all, today, extract).map(|(r, names)| reply(&r, &names))
         }
         Command::OutOf(item) => out_of(root, &item, today),
     }
 }
 
-// ---- #159 skeleton: bodies are `todo!()` until U1 fills them in ----
+// ---- #159: bought products in the kitchen pantry note ----
 
 /// A bought product from the kitchen pantry note's products block.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -555,50 +633,187 @@ pub const PRODUCTS_CLOSE: &str = "<!-- /pantry:products -->";
 pub const PRODUCT_DAYS: i64 = 90;
 pub const MAX_PRODUCTS: usize = 60;
 
-/// One product field, cleaned: no money, no 4+ digit runs, no markup, one line, at most 60 chars.
+/// The extractor's instructions; the cleaned OCR text follows.
+const EXTRACT_HEAD: &str = "You list the food and drink products on one store receipt or store-app purchase-history screen. Reply with these lines and nothing else:\ndate: <purchase date as YYYY-MM-DD, or unknown>\n- <product name> | <brand, or -> | <package size, or ->\nOne line per food or drink product. Write the name in full words (expand a receipt abbreviation only when you are sure). Size is the package size as printed (24 oz, 12 ct, 8 oz / 12 slices). Leave out prices, totals, quantities bought, order and card numbers, addresses and every person's name. Leave out anything that is not food or drink. No food: reply with the date line only.\n\nText:\n";
+
+fn date_of(s: &str) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
+}
+
+fn has_digit_run(s: &str, n: usize) -> bool {
+    s.as_bytes().windows(n).any(|w| w.iter().all(u8::is_ascii_digit))
+}
+
+/// A token that is a price, a card number or a `*` mask. Dropped whole.
+fn money_token(t: &str) -> bool {
+    if t.contains(['$', '€', '£', '¥', '*']) || has_digit_run(t, 4) {
+        return true;
+    }
+    t.contains('.') && t.chars().all(|c| c.is_ascii_digit() || c == '.') && t.rsplit('.').next().is_some_and(|f| f.len() == 2)
+}
+
+/// One product field, safe for the pantry note: no secrets, markup, prices or card digits; 60 chars at most.
 pub fn clean_field(s: &str) -> String {
-    let _ = s;
-    todo!()
+    let safe = redact::sensitive(s);
+    let spaced: String = safe.chars().map(|c| if c.is_control() || "|·<>[]()#`".contains(c) { ' ' } else { c }).collect();
+    let kept: Vec<&str> = spaced.split_whitespace().filter(|t| !money_token(t)).collect();
+    kept.join(" ").chars().take(60).collect::<String>().trim().to_string()
 }
 
-/// Products between the block markers of a pantry note.
+/// A size keeps only if a digit survives the cleaning ("24 oz" yes, "-" or "Costco" no).
+fn clean_size(s: &str) -> String {
+    let c = clean_field(s);
+    if c.chars().any(|ch| ch.is_ascii_digit()) { c } else { String::new() }
+}
+
+/// A table or extractor cell: `-` is empty, anything else cleaned.
+fn cell(s: &str) -> String {
+    if s.trim() == "-" { String::new() } else { clean_field(s) }
+}
+
+fn product_line(p: &Product) -> Option<String> {
+    date_of(&p.bought)?;
+    let name = clean_field(&p.name);
+    if name.is_empty() {
+        return None;
+    }
+    let or_dash = |s: String| if s.is_empty() { "-".to_string() } else { s };
+    Some(format!("- {name} · {} · {} · {}", or_dash(clean_field(&p.brand)), or_dash(clean_size(&p.size)), p.bought))
+}
+
+/// The products block's lines between its markers, as written. `-` reads as empty.
 pub fn parse_products(text: &str) -> Vec<Product> {
-    let _ = text;
-    todo!()
+    let mut out = Vec::new();
+    let mut inside = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t == PRODUCTS_OPEN {
+            inside = true;
+            continue;
+        }
+        if t == PRODUCTS_CLOSE {
+            break;
+        }
+        if !inside {
+            continue;
+        }
+        let Some(body) = t.strip_prefix("- ") else { continue };
+        let parts: Vec<&str> = body.split(" · ").collect();
+        if parts.len() != 4 || date_of(parts[3].trim()).is_none() {
+            continue;
+        }
+        let field = |s: &str| if s.trim() == "-" { String::new() } else { s.trim().to_string() };
+        out.push(Product { name: field(parts[0]), brand: field(parts[1]), size: field(parts[2]), bought: parts[3].trim().to_string() });
+    }
+    out
 }
 
-/// The extractor prompt for a receipt note's OCR text (tender lines removed, masked, capped).
+/// What `restock` sends the extractor for one receipt: the instructions, then the cleaned OCR lines.
 pub fn extract_prompt(note: &str) -> String {
-    let _ = note;
-    todo!()
+    let lines: Vec<&str> = ocr_lines(note).into_iter().filter(|l| !is_tender_line(l)).collect();
+    let text: String = redact::sensitive(&lines.join("\n")).chars().take(4000).collect();
+    format!("{EXTRACT_HEAD}{text}")
 }
 
-/// The extractor's reply as products (name, brand, size; `bought` from its date line or `note_date`).
+/// The extractor's reply as products. `bought` is its `date:` when that lies within 60 days before the note's date.
 pub fn parse_extract(reply: &str, note_date: &str) -> Vec<Product> {
-    let _ = (reply, note_date);
-    todo!()
+    let Some(note) = date_of(note_date) else { return Vec::new() };
+    let mut bought = note_date.to_string();
+    if let Some(d) = reply.lines().find_map(|l| l.trim().strip_prefix("date:")) {
+        if let Some(b) = date_of(d.trim()) {
+            if (0..=60).contains(&(note - b).num_days()) {
+                bought = b.format("%Y-%m-%d").to_string();
+            }
+        }
+    }
+    let mut out: Vec<Product> = Vec::new();
+    for line in reply.lines() {
+        let Some(body) = line.trim().strip_prefix("- ") else { continue };
+        let cells: Vec<&str> = body.split('|').collect();
+        let name = cell(cells[0]);
+        if name.is_empty() || out.iter().any(|p| foods::norm(&p.name) == foods::norm(&name)) {
+            continue;
+        }
+        let brand = cells.get(1).map(|c| cell(c)).unwrap_or_default();
+        let size = cells.get(2).map(|c| clean_size(c)).unwrap_or_default();
+        out.push(Product { name, brand, size, bought: bought.clone() });
+        if out.len() == 40 {
+            break;
+        }
+    }
+    out
 }
 
-/// Adds or refreshes products by `foods::norm(name)`; keeps the list sorted by (bought, name).
+/// Same product (by normalised name) replaces brand, size and bought unless the new purchase is older.
+/// An empty new brand or size keeps the old one. Oldest first, then by name.
 pub fn upsert_products(have: &mut Vec<Product>, new: Vec<Product>) {
-    let _ = (have, new);
-    todo!()
+    for n in new {
+        let key = foods::norm(&n.name);
+        match have.iter_mut().find(|p| foods::norm(&p.name) == key) {
+            Some(p) => {
+                let older = matches!((date_of(&n.bought), date_of(&p.bought)), (Some(a), Some(b)) if a < b);
+                if !older {
+                    if !n.brand.is_empty() {
+                        p.brand = n.brand;
+                    }
+                    if !n.size.is_empty() {
+                        p.size = n.size;
+                    }
+                    p.bought = n.bought;
+                }
+            }
+            None => have.push(n),
+        }
+    }
+    have.sort_by(|a, b| (a.bought.as_str(), a.name.as_str()).cmp(&(b.bought.as_str(), b.name.as_str())));
 }
 
-/// The pantry note text: the table, then the products block when there are products.
-pub fn render_with(rows: &[Row], products: &[Product], today: &str) -> String {
-    let _ = (rows, products, today);
-    todo!()
-}
-
-/// Fresh products (not older than `PRODUCT_DAYS`, not from the future) from the note; `[]` for a missing or linked note.
+/// The products the kitchen pantry note holds for `today`: a regular file only (links refused), at most
+/// PRODUCT_DAYS old and at most a day ahead, every field cleaned again, newest first, then by name.
 pub fn products_at(note: &Path, today: &str) -> Vec<Product> {
-    let _ = (note, today);
-    todo!()
+    let Some(t) = date_of(today) else { return Vec::new() };
+    if !is_regular(note) {
+        return Vec::new();
+    }
+    let Ok(text) = fs::read_to_string(note) else { return Vec::new() };
+    let mut out: Vec<Product> = parse_products(&text)
+        .into_iter()
+        .filter_map(|p| {
+            let name = clean_field(&p.name);
+            let age = (t - date_of(&p.bought)?).num_days();
+            if name.is_empty() || age > PRODUCT_DAYS || age < -1 {
+                return None;
+            }
+            Some(Product { name, brand: clean_field(&p.brand), size: clean_size(&p.size), bought: p.bought })
+        })
+        .collect();
+    out.sort_by(|a, b| b.bought.cmp(&a.bought).then_with(|| a.name.cmp(&b.name)));
+    out.truncate(MAX_PRODUCTS);
+    out
 }
 
-/// `run` with an optional extractor (the reader helper); `None` is today's behaviour.
-pub fn run_with(root: &Path, cmd: Command, today: &str, extract: Option<&dyn Fn(&str) -> Option<String>>) -> Result<String, String> {
-    let _ = (root, cmd, today, extract);
-    todo!()
+/// Regular `<date> *.md` notes in the solo-receipt folder, as (title, text). Empty when the folder can't be read.
+fn filed_receipts(root: &Path, date: &str) -> Vec<(String, String)> {
+    let Ok(rd) = fs::read_dir(root.join("State Street")) else { return Vec::new() };
+    let mut paths: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+    paths.sort();
+    let prefix = format!("{date} ");
+    let mut out = Vec::new();
+    for p in paths {
+        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let Some(title) = name.strip_suffix(".md").and_then(|s| s.strip_prefix(&prefix)) else { continue };
+        if !is_regular(&p) {
+            continue;
+        }
+        out.push((title.to_string(), fs::read_to_string(&p).unwrap_or_default()));
+    }
+    out
+}
+
+/// A receipt whose OCR names Costco (spacing and 0-for-o forgiven).
+fn costco_text(text: &str) -> bool {
+    ocr_lines(text).iter().any(|l| {
+        let m: String = l.to_lowercase().replace('0', "o").split_whitespace().collect();
+        m.contains("costco")
+    })
 }
