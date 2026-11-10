@@ -18,6 +18,10 @@
         <string>__RECIPES_DIR__</string>
         <key>PIP_FOODS_DIR</key>
         <string>__FOODS_DIR__</string>
+        <key>PIP_PANTRY_NOTE</key>
+        <string>__PANTRY_NOTE__</string>
+        <key>PIP_DISH_NOTES</key>
+        <string>__DISH_NOTES__</string>
         <key>PIP_KCAL_TARGET</key>
         <string>2400</string>
         <key>PIP_MODEL</key>
