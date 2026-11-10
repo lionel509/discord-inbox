@@ -350,7 +350,7 @@ pub fn render_with(rows: &[Row], products: &[Product], today: &str) -> String {
         }
         s.push_str(&format!("{PRODUCTS_CLOSE}\n"));
     }
-    s.push_str("\nHub: [[Pantry]]\n");
+    s.push_str("\n**Hub:** [[Pantry]]\n");
     s
 }
 
@@ -473,31 +473,16 @@ fn restock_with(root: &Path, date: &str, all: bool, today: &str, extract: Option
             .collect();
         (rows, source, s.others, s.unassigned)
     } else {
-        let dir = root.join("State Street");
-        let mut paths: Vec<PathBuf> = fs::read_dir(&dir)
-            .map_err(|e| e.to_string())?
-            .flatten()
-            .map(|e| e.path())
-            .collect();
-        paths.sort();
-        let prefix = format!("{date} ");
-        let mut filed = 0usize;
+        let receipts = filed_receipts(root, date);
+        let filed = receipts.len();
         // (canonical food, title of the note it came from). First note to name a food wins.
         let mut found: Vec<(String, String)> = Vec::new();
         let mut costco = false;
-        for p in paths {
-            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let Some(stem) = name.strip_suffix(".md") else { continue };
-            let Some(title) = stem.strip_prefix(&prefix) else { continue };
-            if !is_regular(&p) {
-                continue;
-            }
-            let text = fs::read_to_string(&p).unwrap_or_default();
-            costco |= costco_text(&text);
-            filed += 1;
-            for c in receipt_items(&text) {
+        for (title, text) in &receipts {
+            costco |= costco_text(text);
+            for c in receipt_items(text) {
                 if !found.iter().any(|(f, _)| *f == c) {
-                    found.push((c, title.to_string()));
+                    found.push((c, title.clone()));
                 }
             }
         }

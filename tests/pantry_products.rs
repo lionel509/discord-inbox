@@ -65,7 +65,12 @@ fn digit_run(s: &str) -> bool {
 #[test]
 fn render_without_products_is_unchanged() {
     let rows = vec![row("Eggs", "12 ct", "Costco", "2026-11-01")];
-    assert_eq!(pantry::render_with(&rows, &[], TODAY), pantry::render(&rows, TODAY));
+    let text = pantry::render_with(&rows, &[], TODAY);
+    assert!(text.ends_with("
+**Hub:** [[Pantry]]
+"), "{text}");
+    assert!(!text.contains(pantry::PRODUCTS_OPEN), "{text}");
+    assert_eq!(text, pantry::render(&rows, TODAY));
 }
 
 #[test]
@@ -199,7 +204,7 @@ fn pantry_never_holds_money_or_digit_runs() {
         let ex = |_p: &str| -> Option<String> { Some(reply.clone()) };
         let extract: &dyn Fn(&str) -> Option<String> = &ex;
         pantry::run_with(&r, restock("2026-11-08"), TODAY, Some(extract)).unwrap();
-        let text = read(&r);
+        let text = read(&r).replace("**Hub:**", "Hub:");
         for bad in ["$", "€", "£", "¥", "*", "12.99", "4111"] {
             assert!(!text.contains(bad), "{bad} in {text}");
         }
