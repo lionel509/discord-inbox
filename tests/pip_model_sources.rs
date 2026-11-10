@@ -9,6 +9,11 @@ fn product() -> Product {
     Product { name: "Farmhouse Sourdough Bread".into(), brand: "Pepperidge Farm".into(), size: "24 oz".into(), bought: "2026-11-08".into() }
 }
 
+// The product the reply picks is listed, so a typed weight has to bind through the product branch.
+fn ham() -> Product {
+    Product { name: "Uncured Black Forest Ham".into(), brand: "Good & Gather".into(), size: "16 oz".into(), bought: "2026-11-08".into() }
+}
+
 fn dish() -> Dish {
     Dish { note: "Garlic Spinach Rice".into(), lines: vec!["About 520 kcal a serving.".into()] }
 }
@@ -105,8 +110,9 @@ fn existing_lines_unchanged() {
 fn typed_weight_wins_over_product_and_dish() {
     for g in [1u32, 7, 150, 999, 2500, 5000] {
         let out = reply(&obj("honey ham", 999.0, 110.0, ",\"product\":\"Uncured Black Forest Ham\",\"dish\":\"Garlic Spinach Rice\",\"dish_kcal\":520"));
-        let p = parse(&format!("{g}g honey ham"), &out, &sources(vec![product()], vec![dish()]));
+        let p = parse(&format!("{g}g honey ham"), &out, &sources(vec![product(), ham()], vec![dish()]));
         assert_eq!(p.items[0].grams, g as f64, "a typed weight is authoritative (#130)");
+        assert!(nutrition::source_tail(&p.items[0]).unwrap().contains("bought: Uncured Black Forest Ham"), "{:?}", p.items[0]);
     }
 }
 

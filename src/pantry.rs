@@ -629,31 +629,34 @@ fn has_digit_run(s: &str, n: usize) -> bool {
     s.as_bytes().windows(n).any(|w| w.iter().all(u8::is_ascii_digit))
 }
 
-/// A unit word that makes the number before it a size ("1000 mL", "1.25 lb"), not a price or a card digit.
+/// A weight or volume unit: the only word that makes a two-decimal number a size ("1.25 lb"), not a price.
+fn is_weight(w: &str) -> bool {
+    matches!(w.trim_end_matches('.').to_ascii_lowercase().as_str(), "g" | "kg" | "mg" | "ml" | "cl" | "l" | "oz" | "lb" | "lbs")
+}
+
+/// A unit word that makes a number before it a size: a weight or volume, or a count ("12 ct", "8 slices").
 fn is_unit(w: &str) -> bool {
-    matches!(
-        w.trim_end_matches('.').to_ascii_lowercase().as_str(),
-        "g" | "kg" | "mg" | "ml" | "cl" | "l" | "oz" | "lb" | "lbs" | "ct" | "pk" | "pc" | "pcs" | "ea" | "count" | "slice" | "slices"
-    )
+    is_weight(w) || matches!(w.trim_end_matches('.').to_ascii_lowercase().as_str(), "ct" | "pk" | "pc" | "pcs" | "ea" | "count" | "slice" | "slices")
 }
 
 /// A number token sized by a unit: its own letters ("1000mL") or the next token ("1000 mL").
-fn sized(t: &str, next: Option<&str>) -> bool {
+fn sized(t: &str, next: Option<&str>, unit: fn(&str) -> bool) -> bool {
     let letters = t.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ',');
-    next.is_some_and(is_unit) || (letters.len() < t.len() && is_unit(letters))
+    next.is_some_and(unit) || (letters.len() < t.len() && unit(letters))
 }
 
 /// A token that is a price, a card number or a `*` mask. Dropped whole. A 9+ digit run is a card, phone or order
-/// number; a 4-digit group is a card's last four unless a unit sizes it. A two-decimal number is a price unless sized.
+/// number; a 4-digit group is a card's last four unless a unit sizes it. A two-decimal number is a price unless a
+/// weight or volume sizes it.
 fn money_token(t: &str, next: Option<&str>) -> bool {
     if t.contains(['$', '€', '£', '¥', '*']) || has_digit_run(t, 9) {
         return true;
     }
-    let sz = sized(t, next);
-    if has_digit_run(t, 4) && !sz {
+    if has_digit_run(t, 4) && !sized(t, next, is_unit) {
         return true;
     }
-    !sz && t.contains('.') && t.chars().all(|c| c.is_ascii_digit() || c == '.') && t.rsplit('.').next().is_some_and(|f| f.len() == 2)
+    // A count word ("2 @ 3.49 ea", "1.99 ct") is a per-unit price, so only a weight or volume spares a decimal.
+    !sized(t, next, is_weight) && t.contains('.') && t.chars().all(|c| c.is_ascii_digit() || c == '.') && t.rsplit('.').next().is_some_and(|f| f.len() == 2)
 }
 
 /// One product field, safe for the pantry note: no secrets, markup, prices or card digits; 60 chars at most.

@@ -199,13 +199,13 @@ fn pantry_never_holds_money_or_digit_runs() {
         let r = root(&format!("money-{i}"));
         receipt(&r, "2026-11-08", "Solo receipt", "ORG EGGS");
         let reply = format!(
-            "date: 2026-11-08\n- Item {i} $12.99 | Brand 4111222233334444 | 2 * 3 | x\n- Eggs {i}€ | Store | 12 ct\n- Pack £4 | ¥5 | 8 oz\n"
+            "date: 2026-11-08\n- Item {i} $12.99 | Brand 4111222233334444 | 2 * 3 | x\n- Eggs {i}€ | Store | 12 ct\n- Pack £4 | ¥5 | 8 oz\n- Eggs 2 @ 3.49 ea | Store | 1.99 ct\n"
         );
         let ex = |_p: &str| -> Option<String> { Some(reply.clone()) };
         let extract: &dyn Fn(&str) -> Option<String> = &ex;
         pantry::run_with(&r, restock("2026-11-08"), TODAY, Some(extract)).unwrap();
         let text = read(&r).replace("**Hub:**", "Hub:");
-        for bad in ["$", "€", "£", "¥", "*", "12.99", "4111"] {
+        for bad in ["$", "€", "£", "¥", "*", "12.99", "4111", "3.49", "1.99"] {
             assert!(!text.contains(bad), "{bad} in {text}");
         }
         for p in pantry::parse_products(&text) {
@@ -224,4 +224,10 @@ fn sized_numbers_keep_their_size() {
     assert_eq!(pantry::clean_field("Hummus 1.25 lb"), "Hummus 1.25 lb");
     assert_eq!(pantry::clean_field("Card 4321"), "Card");
     assert_eq!(pantry::clean_field("Order 1234567890 Eggs"), "Order Eggs");
+    // A per-unit price is not a size, whatever count word follows it.
+    assert_eq!(pantry::clean_field("2 @ 3.49 ea"), "2 @ ea");
+    assert_eq!(pantry::clean_field("1.99 ct"), "ct");
+    assert_eq!(pantry::clean_field("Eggs 1.99 pk"), "Eggs pk");
+    assert_eq!(pantry::clean_field("1.25 lb"), "1.25 lb");
+    assert_eq!(pantry::clean_field("0.5 L"), "0.5 L");
 }
