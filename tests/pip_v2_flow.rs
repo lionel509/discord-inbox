@@ -98,7 +98,7 @@ fn cfg(nutrition: &Path, recipes: &Path) -> Config {
     Config {
         nutrition_dir: nutrition.to_path_buf(),
         recipes_dir: Some(recipes.to_path_buf()),
-        low_kcal: 1800,
+        foods_dir: None,        low_kcal: 1800,
         kcal_target: 2400,
         model: None,
         model_timeout: std::time::Duration::from_secs(90),

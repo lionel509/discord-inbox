@@ -565,7 +565,7 @@ pub async fn ingest_with<M: Inbound>(
                     Ok(crate::calendar::Finish::Done(t) | crate::calendar::Finish::Ask(t)) => Some(t),
                     Err(e) => {
                         eprintln!("discord-inbox: calendar for {id} failed: {e}");
-                        Some("I couldn't reach your calendar just now 😿 Your message is saved in your Inbox.".to_string())
+                        Some("I couldn't reach your calendar just now. Your message is saved in your Inbox.".to_string())
                     }
                 };
                 if let Some(text) = text {

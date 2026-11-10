@@ -44,6 +44,16 @@ pub fn table_food(name: &str) -> Option<&'static Food> {
     FOODS.iter().find(|f| f.name == n || f.aliases.iter().any(|a| *a == n))
 }
 
+/// Whether `w` is a word the table already uses: a word of a food's name or alias, an ambiguous key or a dish word.
+/// Plural-tolerant.
+pub fn is_table_word(w: &str) -> bool {
+    let w = w.to_lowercase();
+    let eq = |a: &str| a == w || a.strip_suffix('s') == Some(w.as_str()) || w.strip_suffix('s') == Some(a);
+    FOODS.iter().any(|f| std::iter::once(&f.name).chain(f.aliases.iter()).any(|n| n.split_whitespace().any(eq)))
+        || AMBIGUOUS.iter().any(|(k, _)| eq(k))
+        || NOT_THE_SAME_FOOD.iter().any(|k| eq(k))
+}
+
 /// The grams of every mass amount (g, kg, oz, lb) in `text`.
 pub fn typed_grams(text: &str) -> Vec<f64> {
     scan(text).amounts.iter().filter(|a| a.kind == Kind::Mass).map(|a| a.value).collect()
@@ -57,7 +67,7 @@ pub struct TypedSpan {
 }
 
 /// Words that never name a food in a typed span: articles, prep words and two-letter function words.
-const STOP: &[&str] = &[
+pub(crate) const STOP: &[&str] = &[
     "and", "the", "with", "some", "cooked", "raw", "fresh", "plain", "grilled", "fried", "boiled", "steamed", "baked", "roasted", "about", "around", "had", "ate", "for", "of", "in", "on", "an", "or", "at", "to", "my", "it", "is", "as", "by", "up", "so", "me", "we",
 ];
 /// Misspellings of "grams" he types in place of `g` (`100 grnas`). A closed list: no fuzzy match, so `2 glass` is never grams.
@@ -110,6 +120,23 @@ pub fn typed_spans(text: &str) -> Vec<TypedSpan> {
             let words = meal_words(food);
             if !words.is_empty() {
                 out.push(TypedSpan { grams, words });
+            }
+        }
+    }
+    out
+}
+
+/// The counts he typed (`24 wontons`, `3 pieces`): a reader's `count` must be one of them.
+pub fn typed_counts(text: &str) -> Vec<f64> {
+    let mut out = Vec::new();
+    for piece in split_pieces(text) {
+        // A number in a piece that already parses as a table food belongs to that food.
+        if !parse_meal(&piece).items.is_empty() {
+            continue;
+        }
+        for a in scan(&piece).amounts {
+            if matches!(a.kind, Kind::Bare | Kind::Piece { .. }) {
+                out.push(a.value);
             }
         }
     }
@@ -910,7 +937,9 @@ fn fmt_qty(q: f64) -> String {
 pub fn item_line(item: &Item) -> String {
     let g = fmt_num(item.grams);
     let kcal = (item.grams / 100.0 * item.food.kcal).round() as i64;
-    let tail = if item.estimated {
+    let tail = if let Some(t) = label_tail(item) {
+        t
+    } else if item.estimated {
         " (estimated)".to_string()
     } else if item.scale {
         " (scale)".to_string()
@@ -922,6 +951,22 @@ pub fn item_line(item: &Item) -> String {
         format!(" ({} {})", fmt_qty(item.qty), unit_name(item.unit))
     };
     format!("{g} g {}{tail} · {kcal} kcal", item.food.name)
+}
+
+/// The tail of a label food's line (#146): counted by its pieces, grams or servings, `default` when he named no count.
+/// `None` for every other food, so table and reader lines are unchanged.
+pub fn label_tail(item: &Item) -> Option<String> {
+    if item.food.source != "label" || item.scale {
+        return None;
+    }
+    let what = match item.unit {
+        Unit::Piece => format!("{} pc", fmt_num(item.qty)),
+        Unit::Portion if item.qty == 1.0 => "1 serving".to_string(),
+        Unit::Portion => format!("{} servings", fmt_num(item.qty)),
+        _ => format!("{} g", fmt_num(item.qty)),
+    };
+    let default = if item.assumed { "default " } else { "" };
+    Some(format!(" ({default}{what}, label)"))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

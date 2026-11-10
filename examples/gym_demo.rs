@@ -67,6 +67,7 @@ async fn main() {
     let cfg = Config {
         nutrition_dir: dir.clone(),
         recipes_dir: None,
+        foods_dir: None,
         low_kcal: 1800,
         kcal_target: 2400,
         model: None,

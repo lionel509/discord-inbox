@@ -375,7 +375,7 @@ fn fmt(v: f64) -> String {
     format!("{}", (v * 100.0).round() / 100.0)
 }
 
-fn split_frontmatter(text: &str) -> (&str, &str) {
+pub(crate) fn split_frontmatter(text: &str) -> (&str, &str) {
     let mut it = text.split_inclusive('\n');
     match it.next() {
         Some(first) if first.trim_end() == "---" => {
@@ -396,7 +396,7 @@ fn unquote(s: &str) -> String {
     s.trim().trim_matches(|c| c == '"' || c == '\'').trim().to_string()
 }
 
-fn frontmatter_aliases(fm: &str) -> Vec<String> {
+pub(crate) fn frontmatter_aliases(fm: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut lines = fm.lines();
     while let Some(line) = lines.next() {
