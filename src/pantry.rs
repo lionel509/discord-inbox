@@ -350,7 +350,7 @@ pub fn render_with(rows: &[Row], products: &[Product], today: &str) -> String {
         }
         s.push_str(&format!("{PRODUCTS_CLOSE}\n"));
     }
-    s.push_str("\n**Hub:** [[Pantry]]\n");
+    s.push_str("\nHub: [[Pantry]]\n");
     s
 }
 
