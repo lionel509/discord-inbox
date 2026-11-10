@@ -129,7 +129,7 @@ fn cfg(dir: &Path, foods: Option<&Path>, model: Option<PathBuf>) -> Config {
     Config {
         nutrition_dir: dir.to_path_buf(),
         recipes_dir: None,
-        foods_dir: foods.map(Path::to_path_buf),
+        foods_dir: foods.map(Path::to_path_buf), pantry_note: None, dish_paths: Vec::new(),
         low_kcal: 1800,
         kcal_target: 2400,
         model,

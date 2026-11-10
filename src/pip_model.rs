@@ -528,3 +528,30 @@ fn model_text(s: &str) -> String {
     let clean = redact::sensitive(s).split_whitespace().collect::<Vec<_>>().join(" ");
     clean.chars().take(MAX_UNREADABLE_CHARS).collect()
 }
+
+// ---- #159 skeleton: bodies are `todo!()` until U2 fills them in ----
+use crate::dishes::Dish;
+use crate::pantry::Product;
+
+/// Everything the reader may pick from: saved foods (#146/#151), recipe-note dishes and bought products (#159).
+#[derive(Clone, Debug, Default)]
+pub struct Sources {
+    pub foods: Vec<SavedFood>,
+    pub dishes: Vec<Dish>,
+    pub products: Vec<Product>,
+}
+
+pub fn prompt_sources(text: &str, photos: &[PathBuf], src: &Sources) -> String {
+    let _ = (text, photos, src);
+    todo!()
+}
+
+pub fn read_sources(cmd: &Path, text: &str, photos: &[PathBuf], src: &Sources, timeout: Duration) -> Reading {
+    let _ = (cmd, text, photos, src, timeout);
+    todo!()
+}
+
+pub fn parse_sources(text: &str, out: &str, src: &Sources) -> Option<Parsed> {
+    let _ = (text, out, src);
+    todo!()
+}

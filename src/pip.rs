@@ -47,6 +47,10 @@ pub struct Config {
     pub model: Option<PathBuf>,
     /// How long the reader gets before a meal counts as down (`PIP_MODEL_TIMEOUT`, seconds).
     pub model_timeout: Duration,
+    /// The pantry note with the bought-products block (`PIP_PANTRY_NOTE`, absolute, #159). `None` offers no products.
+    pub pantry_note: Option<PathBuf>,
+    /// Recipe notes with a quoted kcal (`PIP_DISH_NOTES`, `:`-separated absolute paths, #159).
+    pub dish_paths: Vec<PathBuf>,
 }
 
 impl Config {
@@ -107,6 +111,8 @@ impl Config {
             kcal_target,
             model,
             model_timeout,
+            pantry_note: None,
+            dish_paths: Vec::new(),
         })
     }
 }

@@ -19,6 +19,7 @@ pub mod foods;
 pub mod daylog;
 pub mod gym;
 pub mod checkin;
+pub mod dishes;
 pub mod pip;
 pub mod pip_model;
 pub mod png;

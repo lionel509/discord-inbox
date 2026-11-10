@@ -538,3 +538,67 @@ pub fn run(root: &Path, cmd: Command, today: &str) -> Result<String, String> {
         Command::OutOf(item) => out_of(root, &item, today),
     }
 }
+
+// ---- #159 skeleton: bodies are `todo!()` until U1 fills them in ----
+
+/// A bought product from the kitchen pantry note's products block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Product {
+    pub name: String,
+    pub brand: String,
+    pub size: String,
+    pub bought: String,
+}
+
+pub const PRODUCTS_OPEN: &str = "<!-- pantry:products -->";
+pub const PRODUCTS_CLOSE: &str = "<!-- /pantry:products -->";
+pub const PRODUCT_DAYS: i64 = 90;
+pub const MAX_PRODUCTS: usize = 60;
+
+/// One product field, cleaned: no money, no 4+ digit runs, no markup, one line, at most 60 chars.
+pub fn clean_field(s: &str) -> String {
+    let _ = s;
+    todo!()
+}
+
+/// Products between the block markers of a pantry note.
+pub fn parse_products(text: &str) -> Vec<Product> {
+    let _ = text;
+    todo!()
+}
+
+/// The extractor prompt for a receipt note's OCR text (tender lines removed, masked, capped).
+pub fn extract_prompt(note: &str) -> String {
+    let _ = note;
+    todo!()
+}
+
+/// The extractor's reply as products (name, brand, size; `bought` from its date line or `note_date`).
+pub fn parse_extract(reply: &str, note_date: &str) -> Vec<Product> {
+    let _ = (reply, note_date);
+    todo!()
+}
+
+/// Adds or refreshes products by `foods::norm(name)`; keeps the list sorted by (bought, name).
+pub fn upsert_products(have: &mut Vec<Product>, new: Vec<Product>) {
+    let _ = (have, new);
+    todo!()
+}
+
+/// The pantry note text: the table, then the products block when there are products.
+pub fn render_with(rows: &[Row], products: &[Product], today: &str) -> String {
+    let _ = (rows, products, today);
+    todo!()
+}
+
+/// Fresh products (not older than `PRODUCT_DAYS`, not from the future) from the note; `[]` for a missing or linked note.
+pub fn products_at(note: &Path, today: &str) -> Vec<Product> {
+    let _ = (note, today);
+    todo!()
+}
+
+/// `run` with an optional extractor (the reader helper); `None` is today's behaviour.
+pub fn run_with(root: &Path, cmd: Command, today: &str, extract: Option<&dyn Fn(&str) -> Option<String>>) -> Result<String, String> {
+    let _ = (root, cmd, today, extract);
+    todo!()
+}

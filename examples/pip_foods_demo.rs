@@ -98,7 +98,7 @@ async fn main() {
     let c = Config {
         nutrition_dir: nutrition.clone(),
         recipes_dir: None,
-        foods_dir: Some(foods.clone()),
+        foods_dir: Some(foods.clone()), pantry_note: None, dish_paths: Vec::new(),
         low_kcal: 1800,
         kcal_target: 2400,
         model: Some(model),
