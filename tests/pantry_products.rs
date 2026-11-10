@@ -211,3 +211,12 @@ fn pantry_never_holds_money_or_digit_runs() {
         }
     }
 }
+
+// Review round 1 (#161): a sized number keeps its size; a card run and a bare card group still drop.
+#[test]
+fn sized_numbers_keep_their_size() {
+    assert_eq!(pantry::clean_field("Swanson Chicken Broth 1000 mL"), "Swanson Chicken Broth 1000 mL");
+    assert_eq!(pantry::clean_field("Hummus 1.25 lb"), "Hummus 1.25 lb");
+    assert_eq!(pantry::clean_field("Card 4321"), "Card");
+    assert_eq!(pantry::clean_field("Order 1234567890 Eggs"), "Order Eggs");
+}

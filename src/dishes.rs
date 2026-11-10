@@ -9,7 +9,6 @@ pub struct Dish {
     pub lines: Vec<String>,
 }
 
-const MAX_NOTES: usize = 40;
 const MAX_LINES: usize = 8;
 const MAX_CHARS: usize = 160;
 
@@ -42,8 +41,8 @@ pub fn load(paths: &[PathBuf]) -> Vec<Dish> {
             }
         }
     }
+    // Every note is offered: a cap here would drop late-alphabet dishes with no sign. The prompt bounds its own size.
     out.sort_by(|a, b| a.note.cmp(&b.note));
-    out.truncate(MAX_NOTES);
     out
 }
 
@@ -191,16 +190,30 @@ pub fn quoted(dish: &Dish, kcal: f64) -> bool {
     }
     dish.lines.iter().any(|line| {
         let toks = number_tokens(line);
-        if toks.iter().any(|(v, _, _)| (v - kcal).abs() <= 0.5) {
+        if toks.iter().any(|&(v, s, e)| (v - kcal).abs() <= 0.5 && kcal_segment(line, s, e)) {
             return true;
         }
         toks.windows(2).any(|w| {
-            let (a, _, a_end) = w[0];
-            let (b, b_start, _) = w[1];
+            let (a, a_start, a_end) = w[0];
+            let (b, b_start, b_end) = w[1];
             let gap = line[a_end..b_start].trim();
-            matches!(gap, "-" | "–" | "—" | "to") && a <= kcal && kcal <= b
+            matches!(gap, "-" | "–" | "—" | "to") && a <= kcal && kcal <= b && kcal_segment(line, a_start, b_end)
         })
     })
+}
+
+/// Separators that end a segment of a note line. A number only counts as kcal when its own segment says kcal, so
+/// "Serves 4 · 320 kcal" leaves the 4 out, and "43 g per slice, 115 kcal" leaves the 43 out.
+const SEGMENT_SEPS: &[char] = &['·', '|', ';', ',', '(', ')', '•'];
+
+/// True when the number at `start..end` shares a segment (split at `SEGMENT_SEPS`) with the word kcal.
+fn kcal_segment(line: &str, start: usize, end: usize) -> bool {
+    let lb = match line[..start].rfind(SEGMENT_SEPS) {
+        Some(i) => i + line[i..].chars().next().map_or(1, char::len_utf8),
+        None => 0,
+    };
+    let rb = line[end..].find(SEGMENT_SEPS).map_or(line.len(), |i| end + i);
+    line[lb..rb].to_lowercase().contains("kcal")
 }
 
 /// The one dish whose note name matches `mark`; `None` for no match or several.

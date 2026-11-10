@@ -121,8 +121,10 @@ pub fn prompt_sources(text: &str, photos: &[PathBuf], src: &Sources) -> String {
     }
     if !src.dishes.is_empty() {
         let mut list = String::new();
-        for d in &src.dishes {
+        for (i, d) in src.dishes.iter().enumerate() {
             if list.chars().count() > 6000 {
+                // Said out loud in the prompt, so a long library never drops notes silently.
+                list.push_str(&format!("; {} more recipe notes not listed", src.dishes.len() - i));
                 break;
             }
             if !list.is_empty() {
@@ -634,11 +636,12 @@ fn sourced(raw: &Value, typed: Option<f64>, counts: &[f64], src: &Sources, notes
                         let grams = raw.get("grams").and_then(Value::as_f64).filter(|g| (1.0..=3000.0).contains(g));
                         let name = mark("name").filter(|n| n.chars().count() <= 60);
                         if let (Some(grams), Some(name)) = (grams, name) {
+                            let c = raw.get("count").and_then(Value::as_f64).filter(|c| counts.contains(c) && *c > 0.0 && *c <= 12.0).unwrap_or(1.0);
                             let kcal_100 = kcal * 100.0 / grams;
-                            if kcal_100 > 1000.0 {
+                            // The pick's total weight (one serving times the count) is held to the same 3 kg cap as a generic item.
+                            if kcal_100 > 1000.0 || grams * c > 3000.0 {
                                 notes.push(Unknown { text: format!("recipe note \"{d}\""), hint: IMPOSSIBLE.to_string() });
                             } else {
-                                let c = raw.get("count").and_then(Value::as_f64).filter(|c| counts.contains(c) && *c > 0.0 && *c <= 12.0).unwrap_or(1.0);
                                 let macro_of = |key: &str| raw.get(key).and_then(Value::as_f64).filter(|v| (0.0..=100.0).contains(v)).unwrap_or(0.0);
                                 let food = Food::sourced(&name, kcal_100, macro_of("protein_100"), macro_of("carbs_100"), macro_of("fat_100"), raw.get("veg").and_then(Value::as_bool).unwrap_or(false), &format!("recipe: {}", dish.note));
                                 return Some(Ok(Item { food, grams: grams * c, unit: Unit::Portion, qty: c, assumed: false, estimated: false, scale: false }));

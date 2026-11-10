@@ -103,14 +103,17 @@ fn load_reads_one_file() {
 }
 
 #[test]
-fn load_caps_at_forty_notes() {
+fn load_keeps_every_note_past_forty() {
+    // Review round 1 (#161): a silent cap dropped late-alphabet dishes, so every note is loaded.
     let root = scratch("cap");
     for i in 0..45 {
         write(&root.join(format!("Dish {i:02}.md")), "Serving: 300 kcal\n");
     }
+    write(&root.join("Zucchini Bake.md"), "Serves 2 · 250 kcal\n");
     let got = dishes::load(&[root]);
-    assert_eq!(got.len(), 40);
+    assert_eq!(got.len(), 46);
     assert_eq!(got[0].note, "Dish 00");
+    assert!(got.iter().any(|d| d.note == "Zucchini Bake"));
 }
 
 #[test]
@@ -123,4 +126,25 @@ fn marked_is_the_one_matching_note() {
     assert!(dishes::marked("rice", &ds).is_none());
     let dup = vec![ds[0].clone(), Dish { note: "garlic rice".into(), lines: vec!["500 kcal".into()] }];
     assert!(dishes::marked("Garlic Rice", &dup).is_none(), "several matches is no match");
+}
+
+// Review round 1 (#161): a serving count or a weight on the same line is not the kcal; the note list is never cut silently.
+#[test]
+fn serving_count_is_not_the_kcal() {
+    let rice = dish(&["Serves 4 · 320 kcal per serving"]);
+    assert!(!dishes::quoted(&rice, 4.0));
+    assert!(dishes::quoted(&rice, 320.0));
+}
+
+#[test]
+fn weight_on_a_bread_line_is_not_the_kcal() {
+    let bread = dish(&["Farmhouse Sourdough: 43 g per slice, 115 kcal"]);
+    assert!(!dishes::quoted(&bread, 43.0));
+    assert!(dishes::quoted(&bread, 115.0));
+}
+
+#[test]
+fn a_range_on_one_kcal_segment_still_counts() {
+    let stew = dish(&["Stew: 320–360 kcal per bowl"]);
+    assert!(dishes::quoted(&stew, 340.0));
 }

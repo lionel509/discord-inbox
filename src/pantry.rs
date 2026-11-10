@@ -644,19 +644,39 @@ fn has_digit_run(s: &str, n: usize) -> bool {
     s.as_bytes().windows(n).any(|w| w.iter().all(u8::is_ascii_digit))
 }
 
-/// A token that is a price, a card number or a `*` mask. Dropped whole.
-fn money_token(t: &str) -> bool {
-    if t.contains(['$', '€', '£', '¥', '*']) || has_digit_run(t, 4) {
+/// A unit word that makes the number before it a size ("1000 mL", "1.25 lb"), not a price or a card digit.
+fn is_unit(w: &str) -> bool {
+    matches!(
+        w.trim_end_matches('.').to_ascii_lowercase().as_str(),
+        "g" | "kg" | "mg" | "ml" | "cl" | "l" | "oz" | "lb" | "lbs" | "ct" | "pk" | "pc" | "pcs" | "ea" | "count" | "slice" | "slices"
+    )
+}
+
+/// A number token sized by a unit: its own letters ("1000mL") or the next token ("1000 mL").
+fn sized(t: &str, next: Option<&str>) -> bool {
+    let letters = t.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ',');
+    next.is_some_and(is_unit) || (letters.len() < t.len() && is_unit(letters))
+}
+
+/// A token that is a price, a card number or a `*` mask. Dropped whole. A 9+ digit run is a card, phone or order
+/// number; a 4-digit group is a card's last four unless a unit sizes it. A two-decimal number is a price unless sized.
+fn money_token(t: &str, next: Option<&str>) -> bool {
+    if t.contains(['$', '€', '£', '¥', '*']) || has_digit_run(t, 9) {
         return true;
     }
-    t.contains('.') && t.chars().all(|c| c.is_ascii_digit() || c == '.') && t.rsplit('.').next().is_some_and(|f| f.len() == 2)
+    let sz = sized(t, next);
+    if has_digit_run(t, 4) && !sz {
+        return true;
+    }
+    !sz && t.contains('.') && t.chars().all(|c| c.is_ascii_digit() || c == '.') && t.rsplit('.').next().is_some_and(|f| f.len() == 2)
 }
 
 /// One product field, safe for the pantry note: no secrets, markup, prices or card digits; 60 chars at most.
 pub fn clean_field(s: &str) -> String {
     let safe = redact::sensitive(s);
     let spaced: String = safe.chars().map(|c| if c.is_control() || "|·<>[]()#`".contains(c) { ' ' } else { c }).collect();
-    let kept: Vec<&str> = spaced.split_whitespace().filter(|t| !money_token(t)).collect();
+    let words: Vec<&str> = spaced.split_whitespace().collect();
+    let kept: Vec<&str> = words.iter().enumerate().filter(|(i, t)| !money_token(t, words.get(i + 1).copied())).map(|(_, t)| *t).collect();
     kept.join(" ").chars().take(60).collect::<String>().trim().to_string()
 }
 
