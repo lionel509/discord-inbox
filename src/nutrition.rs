@@ -939,6 +939,8 @@ pub fn item_line(item: &Item) -> String {
     let kcal = (item.grams / 100.0 * item.food.kcal).round() as i64;
     let tail = if let Some(t) = label_tail(item) {
         t
+    } else if let Some(t) = source_tail(item) {
+        t
     } else if item.estimated {
         " (estimated)".to_string()
     } else if item.scale {
@@ -1249,18 +1251,40 @@ fn drop_percent(text: &str) -> String {
 fn is_percent_label(t: &str) -> bool {
     t.trim_end_matches([',', '.', ';']).strip_suffix('%').is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit() || c == '.'))
 }
-
-// ---- #159 skeleton: bodies are `todo!()` until U2 fills them in ----
 impl Food {
     /// A food from a saved label or a recipe note: `model` with `source` naming where the numbers came from.
     pub fn sourced(name: &str, kcal: f64, protein: f64, carbs: f64, fat: f64, veg: bool, source: &str) -> &'static Food {
-        let _ = (name, kcal, protein, carbs, fat, veg, source);
-        todo!()
+        Box::leak(Box::new(Food {
+            name: Box::leak(name.to_string().into_boxed_str()),
+            aliases: &[],
+            kcal,
+            protein,
+            carbs,
+            fat,
+            veg,
+            cup_g: None,
+            piece_g: None,
+            portion_g: 100.0,
+            source: Box::leak(source.to_string().into_boxed_str()),
+        }))
     }
 }
 
 /// The source tail of an item line (` (bought: X)`, ` (1 serving, recipe: X)`), or `None` for other sources.
 pub fn source_tail(item: &Item) -> Option<String> {
-    let _ = item;
-    todo!()
+    let source = item.food.source;
+    if source.starts_with("bought: ") {
+        let w = if item.scale {
+            "scale, "
+        } else if item.estimated {
+            "estimated, "
+        } else {
+            ""
+        };
+        return Some(format!(" ({w}{source})"));
+    }
+    if source.starts_with("recipe: ") {
+        return Some(if item.qty == 1.0 { format!(" (1 serving, {source})") } else { format!(" ({} servings, {source})", fmt_num(item.qty)) });
+    }
+    None
 }
