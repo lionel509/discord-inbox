@@ -81,7 +81,7 @@ pub fn prompt(ocr: &str) -> String {
     let text: String = crate::redact::sensitive(ocr).chars().take(PROMPT_CHARS).collect();
     format!(
         "You classify text read from a photo. Reply with exactly these four lines and nothing else:\n\
-         receipt: yes or no\n\
+         receipt: yes or no (a store app's order or purchase-history screen that lists items bought counts as yes)\n\
          merchant: <name or unknown>\n\
          total: <number or unknown>\n\
          category: one of groceries, dining, games, household, transport, school, other\n\
@@ -269,7 +269,7 @@ pub fn scaledown_request(ocr: &str) -> String {
             "merchant": "the name of the store or business that issued this receipt",
             "total": "the final amount paid: the grand total after tax, as printed",
             "receipt": {"labels": [
-                {"name": "yes", "rubric": "the text is a purchase receipt, bill or invoice listing items and amounts paid"},
+                {"name": "yes", "rubric": "the text is a purchase receipt, bill or invoice, or a store app's order or purchase-history screen, listing items and amounts paid"},
                 {"name": "no", "rubric": "the text is not a receipt: a chat, a document, a sign, a card or anything else"}
             ]},
             "category": {"labels": [

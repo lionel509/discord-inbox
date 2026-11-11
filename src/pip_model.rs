@@ -1,6 +1,8 @@
 //! #130 unit A: the meal reader. The model's JSON becomes items only through `enforce`/`parse`, so an impossible number never reaches the log. Weight precedence per food: a weight he typed beside that food (bound by `nutrition::typed_spans`) > a scale reading, only when an image is attached (` (scale)`) > the reader's estimate (` (estimated)`). A typed weight no food matches is listed under Not counted. Plain water and sparkling water are logged at 0 kcal. The helper is injected through `PIP_MODEL` (see pip.rs); this file never names a model or a network endpoint.
+use crate::dishes::{self, Dish};
 use crate::foods::{self, SavedFood};
 use crate::nutrition::{self, Food, Item, Parsed, Unit, Unknown};
+use crate::pantry::Product;
 use crate::{ocr, redact};
 use serde_json::Value;
 use std::fs;
@@ -78,6 +80,13 @@ pub fn prompt(text: &str, photos: &[PathBuf]) -> String {
 
 /// `prompt`, plus a rule listing his saved foods (name and one serving), so the reader can mark an item as one of them.
 pub fn prompt_saved(text: &str, photos: &[PathBuf], foods: &[SavedFood]) -> String {
+    prompt_sources(text, photos, &Sources { foods: foods.to_vec(), ..Default::default() })
+}
+
+/// `prompt_saved` over every candidate list (#159): saved foods, recipe-note dishes, bought products. With both new
+/// lists empty the text is `prompt_saved`'s, byte for byte.
+pub fn prompt_sources(text: &str, photos: &[PathBuf], src: &Sources) -> String {
+    let foods = &src.foods;
     let message = if text.trim().is_empty() {
         "Message: (no text)".to_string()
     } else {
@@ -104,9 +113,52 @@ pub fn prompt_saved(text: &str, photos: &[PathBuf], foods: &[SavedFood]) -> Stri
         "- Anything you cannot turn into an item goes in \"unreadable\" with a short reason. No food at all: both lists empty.".to_string(),
         EXAMPLE.to_string(),
     ];
+    let mut at = 6;
     if !foods.is_empty() {
         let list = foods.iter().map(|f| format!("{} ({})", f.name, foods::serving_text(f))).collect::<Vec<_>>().join("; ");
-        lines.insert(6, format!("- Saved foods, from his own labels (name; one serving): {}. An item that is one of these foods gets \"saved\": its exact name from this list, and \"count\": the number of pieces he typed for it, copied as written (never count pieces in a photo; do no arithmetic); leave \"count\" out when he typed no number for it. Fill every other field as usual. The caption and a photo of the same food are one item, never two. List each saved food once, marked: never add a second, unmarked item for it, even when the photo shows it or you would name it differently. Never put \"saved\" on a food that is not in this list.", redact::sensitive(&list)));
+        lines.insert(at, format!("- Saved foods, from his own labels (name; one serving): {}. An item that is one of these foods gets \"saved\": its exact name from this list, and \"count\": the number of pieces he typed for it, copied as written (never count pieces in a photo; do no arithmetic); leave \"count\" out when he typed no number for it. Fill every other field as usual. The caption and a photo of the same food are one item, never two. List each saved food once, marked: never add a second, unmarked item for it, even when the photo shows it or you would name it differently. Never put \"saved\" on a food that is not in this list.", redact::sensitive(&list)));
+        at += 1;
+    }
+    if !src.dishes.is_empty() {
+        let mut list = String::new();
+        for (i, d) in src.dishes.iter().enumerate() {
+            if list.chars().count() > 6000 {
+                // Said out loud in the prompt, so a long library never drops notes silently.
+                list.push_str(&format!("; {} more recipe notes not listed", src.dishes.len() - i));
+                break;
+            }
+            if !list.is_empty() {
+                list.push_str("; ");
+            }
+            list.push_str(&format!("{}: {}", d.note, d.lines.join(" / ")));
+        }
+        lines.insert(at, format!("- Dishes with a kcal in his recipe notes (note: its lines): {}. When the meal, or one part of it, is one of these dishes, list that dish as ONE item, not its ingredients: set \"dish\": the note's exact name from this list, \"dish_kcal\": the kcal of one serving copied from that note's line (for a range, a number inside it), and \"count\": the number of servings he typed, copied as written, or leave it out. Still give grams (your estimate of one serving) and the per-100 g protein, carbs and fat. Never put \"dish\" on a meal that is not in these notes.", redact::sensitive(&list)));
+        at += 1;
+    }
+    if !src.products.is_empty() {
+        let list = src
+            .products
+            .iter()
+            .map(|p| {
+                let mut parts = Vec::new();
+                if !p.brand.is_empty() {
+                    parts.push(p.brand.clone());
+                }
+                if !p.size.is_empty() {
+                    parts.push(p.size.clone());
+                }
+                if !p.bought.is_empty() {
+                    parts.push(format!("bought {}", p.bought));
+                }
+                if parts.is_empty() {
+                    p.name.clone()
+                } else {
+                    format!("{} ({})", p.name, parts.join("; "))
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        lines.insert(at, format!("- Bought products, from his pantry (name; brand; size; bought): {}. He names foods loosely and misspells them, so decide what each food he ate IS, from his words and the photo, and whether it is one of these products (his \"honey ham\" can be the ham on this list; the bread in a sandwich photo can be the loaf on this list). When it is, set \"product\": that product's exact name from this list, and take grams and the per-100 g values from that product's own printed label as you know it: one slice, piece or tablespoon of that product times the number he typed or the photo shows (a size like \"8 oz / 12 slices\" gives the weight of one piece). When two products fit, use the one bought most recently. A typed weight still sets the grams. Keep \"name\" a plain food name. A food on the saved list is marked \"saved\", not \"product\". Never put \"product\" on a food that is not one of these products; when unsure, leave it out.", redact::sensitive(&list)));
     }
     lines.join("\n")
 }
@@ -118,15 +170,20 @@ pub fn read(cmd: &Path, text: &str, photos: &[PathBuf], timeout: Duration) -> Re
 
 /// `read`, telling the reader his saved foods so it can mark them (`parse_saved` prices the marks).
 pub fn read_saved(cmd: &Path, text: &str, photos: &[PathBuf], foods: &[SavedFood], timeout: Duration) -> Reading {
+    read_sources(cmd, text, photos, &Sources { foods: foods.to_vec(), ..Default::default() }, timeout)
+}
+
+/// `read_saved` over every candidate list (#159). Label replies and the no-photo scale rule are unchanged.
+pub fn read_sources(cmd: &Path, text: &str, photos: &[PathBuf], src: &Sources, timeout: Duration) -> Reading {
     let args: Vec<String> = photos.iter().map(|p| p.to_string_lossy().into_owned()).collect();
-    let Some(out) = ocr::run_args(cmd, &args, prompt_saved(text, photos, foods).as_bytes(), timeout) else {
+    let Some(out) = ocr::run_args(cmd, &args, prompt_sources(text, photos, src).as_bytes(), timeout) else {
         eprintln!("pip: model helper gave nothing");
         return Reading::Down;
     };
     if let Some(label) = parse_label(&out) {
         return Reading::Label(label);
     }
-    match parse_saved(text, &out, foods) {
+    match parse_sources(text, &out, src) {
         Some(p) if !photos.iter().any(|f| is_image(f)) => Reading::Read(without_photo_scales(p)),
         Some(p) => Reading::Read(p),
         None => {
@@ -184,6 +241,13 @@ pub fn parse(text: &str, out: &str) -> Option<Parsed> {
 /// mark is valid (`foods::price`); otherwise it stays the reader's estimate and the reply says why. With no foods the
 /// marks are ignored.
 pub fn parse_saved(text: &str, out: &str, foods: &[SavedFood]) -> Option<Parsed> {
+    parse_sources(text, out, &Sources { foods: foods.to_vec(), ..Default::default() })
+}
+
+/// `parse_saved` over every candidate list (#159). A reader's dish or product pick is priced first (`sourced`); a
+/// saved mark that fails still falls to dish, product, then the generic estimate.
+pub fn parse_sources(text: &str, out: &str, src: &Sources) -> Option<Parsed> {
+    let foods: &[SavedFood] = &src.foods;
     let v = reply_object(out)?;
     let items = v.get("items")?.as_array()?;
 
@@ -214,12 +278,22 @@ pub fn parse_saved(text: &str, out: &str, foods: &[SavedFood]) -> Option<Parsed>
             continue;
         }
         let typed = binds[at].map(|j| spans[j].grams);
-        let est = item_from(raw, typed);
+        let mut notes = Vec::new();
+        let est = match sourced(raw, typed, &counts, src, &mut notes) {
+            Some(picked) => picked,
+            None => item_from(raw, typed, None),
+        };
         let mark = raw.get("saved").and_then(Value::as_str).map(model_text).filter(|m| !m.is_empty() && !foods.is_empty());
         match mark {
             None => match est {
-                Ok(item) => parsed.items.push(item),
-                Err(u) => parsed.unknown.push(with_typed(u, typed)),
+                Ok(item) => {
+                    parsed.unknown.append(&mut notes);
+                    parsed.items.push(item);
+                }
+                Err(u) => {
+                    parsed.unknown.append(&mut notes);
+                    parsed.unknown.push(with_typed(u, typed));
+                }
             },
             Some(m) => {
                 // Each saved food yields at most one line per reply, keyed on the food the mark resolves to.
@@ -246,10 +320,14 @@ pub fn parse_saved(text: &str, out: &str, foods: &[SavedFood]) -> Option<Parsed>
                     // The mark is not usable: the item stays the reader's estimate, and the reply says why.
                     Err(why) => match est {
                         Ok(item) => {
+                            parsed.unknown.append(&mut notes);
                             parsed.unknown.push(Unknown { text: format!("saved food \"{m}\""), hint: format!("{why}; {} is counted as the reader's estimate", item.food.name) });
                             parsed.items.push(item);
                         }
-                        Err(u) => parsed.unknown.push(with_typed(u, typed)),
+                        Err(u) => {
+                            parsed.unknown.append(&mut notes);
+                            parsed.unknown.push(with_typed(u, typed));
+                        }
                     },
                 }
             }
@@ -415,7 +493,7 @@ fn is_echo(v: &Value) -> bool {
 
 /// One item object from the reply. Missing `typed`/`veg` are false; missing macros are 0. `typed` is the weight he
 /// typed beside this food, if `parse` bound one.
-fn item_from(raw: &Value, typed: Option<f64>) -> Result<Item, Unknown> {
+fn item_from(raw: &Value, typed: Option<f64>, origin: Option<&str>) -> Result<Item, Unknown> {
     let no_name = || Unknown { text: "(unnamed item)".to_string(), hint: "the reader gave no usable name".to_string() };
     let name = raw.get("name").and_then(Value::as_str).ok_or_else(no_name)?;
     let grams = match (raw.get("grams").and_then(Value::as_f64), typed) {
@@ -438,7 +516,7 @@ fn item_from(raw: &Value, typed: Option<f64>) -> Result<Item, Unknown> {
         None if raw.get("typed").and_then(Value::as_bool).unwrap_or(false) => Source::Text,
         None => Source::Estimate,
     };
-    check(name, grams, source, typed, kcal, macro_of("protein_100"), macro_of("carbs_100"), macro_of("fat_100"), veg)
+    check(name, grams, source, typed, kcal, macro_of("protein_100"), macro_of("carbs_100"), macro_of("fat_100"), veg, origin)
 }
 
 /// Where the reader says a weight came from: his typed text, a kitchen scale in a photo, or its own estimate.
@@ -456,7 +534,7 @@ const MAX_SCALE_G: f64 = 5000.0;
 /// as typed, whatever the reader or a photo says; else a `Scale` reading is measured (` (scale)`, 5 kg cap); else the
 /// reader's number is its estimate (` (estimated)`). A non-table food with no calories is unknown, except plain water.
 #[allow(clippy::too_many_arguments)]
-fn check(name: &str, grams: f64, source: Source, typed: Option<f64>, kcal_100: f64, p: f64, c: f64, f: f64, veg: bool) -> Result<Item, Unknown> {
+fn check(name: &str, grams: f64, source: Source, typed: Option<f64>, kcal_100: f64, p: f64, c: f64, f: f64, veg: bool, origin: Option<&str>) -> Result<Item, Unknown> {
     // The name is the model's text: redacted and flattened to one line before anything else sees it.
     let name = model_text(name);
     if name.is_empty() || name.chars().count() > 60 {
@@ -473,7 +551,8 @@ fn check(name: &str, grams: f64, source: Source, typed: Option<f64>, kcal_100: f
         (None, _) => (grams, true, false, 3000.0),
     };
     // The model's numbers are checked even when a table name will override them. Limit 1000 kcal/100 g (pure fat is ~900).
-    let table = nutrition::table_food(&name);
+    // A bought product (`origin`) carries its own label values: the table is not consulted (#159).
+    let table = if origin.is_some() { None } else { nutrition::table_food(&name) };
     let in_range = (1.0..=cap).contains(&grams)
         && (0.0..=1000.0).contains(&kcal_100)
         && (0.0..=100.0).contains(&p)
@@ -482,12 +561,13 @@ fn check(name: &str, grams: f64, source: Source, typed: Option<f64>, kcal_100: f
     if !in_range {
         return Err(Unknown { text: model_text(&format!("{name} {grams} g")), hint: IMPOSSIBLE.to_string() });
     }
-    let food: &'static Food = match table {
-        Some(food) => food,
-        None if kcal_100 < 1.0 && !ZERO_KCAL.contains(&name.to_lowercase().as_str()) => {
+    let food: &'static Food = match (table, origin) {
+        (Some(food), _) => food,
+        (None, _) if kcal_100 < 1.0 && !ZERO_KCAL.contains(&name.to_lowercase().as_str()) => {
             return Err(Unknown { text: name, hint: "the reader gave no calories".to_string() });
         }
-        None => Food::model(&name, kcal_100, p, c, f, veg),
+        (None, Some(o)) => Food::sourced(&name, kcal_100, p, c, f, veg, o),
+        (None, None) => Food::model(&name, kcal_100, p, c, f, veg),
     };
     Ok(Item { food, grams, unit: Unit::G, qty: grams, assumed: false, estimated, scale })
 }
@@ -499,7 +579,7 @@ pub fn enforce(text: &str, name: &str, grams: f64, source: Source, kcal_100: f64
     let spans = nutrition::typed_spans(text);
     let (binds, _) = bind(&spans, &[model_text(name)]);
     let typed = binds[0].map(|j| spans[j].grams);
-    check(name, grams, source, typed, kcal_100, p, c, f, veg).map_err(|u| with_typed(u, typed))
+    check(name, grams, source, typed, kcal_100, p, c, f, veg, None).map_err(|u| with_typed(u, typed))
 }
 
 /// A bound item that is rejected still shows his typed weight: the weight goes in front of the rejection's text,
@@ -527,4 +607,57 @@ fn names_weight(text: &str, g: f64) -> bool {
 fn model_text(s: &str) -> String {
     let clean = redact::sensitive(s).split_whitespace().collect::<Vec<_>>().join(" ");
     clean.chars().take(MAX_UNREADABLE_CHARS).collect()
+}
+
+/// Everything the reader may pick from: saved foods (#146/#151), recipe-note dishes and bought products (#159).
+#[derive(Clone, Debug, Default)]
+pub struct Sources {
+    pub foods: Vec<SavedFood>,
+    pub dishes: Vec<Dish>,
+    pub products: Vec<Product>,
+}
+
+/// The reader's dish or product pick, priced from its source (#159). `None` means no usable pick: the caller falls to
+/// the generic estimate. A refused pick pushes why into `notes`; the caller keeps them only when it uses this item.
+/// Order: a dish (its quoted kcal, no typed weight) before a bought product (its label values, the typed weight).
+fn sourced(raw: &Value, typed: Option<f64>, counts: &[f64], src: &Sources, notes: &mut Vec<Unknown>) -> Option<Result<Item, Unknown>> {
+    let mark = |key: &str| raw.get(key).and_then(Value::as_str).map(model_text).filter(|m| !m.is_empty());
+    if let Some(d) = mark("dish").filter(|_| !src.dishes.is_empty()) {
+        match dishes::marked(&d, &src.dishes) {
+            None => notes.push(Unknown { text: format!("recipe note \"{d}\""), hint: "is not one of your recipe notes; counted as the reader's estimate".to_string() }),
+            Some(_) if typed.is_some() || raw.get("source").and_then(Value::as_str) == Some("scale") => {
+                notes.push(Unknown { text: format!("recipe note \"{d}\""), hint: "you gave a weight, so the note's per-serving kcal was not used".to_string() });
+            }
+            Some(dish) => {
+                let kcal = raw.get("dish_kcal").and_then(Value::as_f64);
+                match kcal.filter(|k| dishes::quoted(dish, *k)) {
+                    None => notes.push(Unknown { text: format!("recipe note \"{d}\""), hint: "the reader's kcal is not a number in that note; counted as the reader's estimate".to_string() }),
+                    Some(kcal) => {
+                        let grams = raw.get("grams").and_then(Value::as_f64).filter(|g| (1.0..=3000.0).contains(g));
+                        let name = mark("name").filter(|n| n.chars().count() <= 60);
+                        if let (Some(grams), Some(name)) = (grams, name) {
+                            let c = raw.get("count").and_then(Value::as_f64).filter(|c| counts.contains(c) && *c > 0.0 && *c <= 12.0).unwrap_or(1.0);
+                            let kcal_100 = kcal * 100.0 / grams;
+                            // The pick's total weight (one serving times the count) is held to the same 3 kg cap as a generic item.
+                            if kcal_100 > 1000.0 || grams * c > 3000.0 {
+                                notes.push(Unknown { text: format!("recipe note \"{d}\""), hint: IMPOSSIBLE.to_string() });
+                            } else {
+                                let macro_of = |key: &str| raw.get(key).and_then(Value::as_f64).filter(|v| (0.0..=100.0).contains(v)).unwrap_or(0.0);
+                                let food = Food::sourced(&name, kcal_100, macro_of("protein_100"), macro_of("carbs_100"), macro_of("fat_100"), raw.get("veg").and_then(Value::as_bool).unwrap_or(false), &format!("recipe: {}", dish.note));
+                                return Some(Ok(Item { food, grams: grams * c, unit: Unit::Portion, qty: c, assumed: false, estimated: false, scale: false }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(p) = mark("product").filter(|_| !src.products.is_empty()) {
+        let Some(product) = src.products.iter().find(|q| foods::norm(&q.name) == foods::norm(&p)) else {
+            notes.push(Unknown { text: format!("product \"{p}\""), hint: "is not in your pantry; counted as the reader's generic estimate".to_string() });
+            return None;
+        };
+        return Some(item_from(raw, typed, Some(&format!("bought: {}", product.name))));
+    }
+    None
 }

@@ -9,7 +9,9 @@ use crate::gym;
 use crate::ingest::{typing_while, Handle, Inbound, Outcome, FAILED_MARK, SAVED_MARK};
 use crate::foods::{self, SavedFood};
 use crate::nutrition::{self, Parsed};
-use crate::pip_model::{self, Label, Reading};
+use crate::pantry;
+use crate::dishes;
+use crate::pip_model::{self, Label, Reading, Sources};
 use crate::recipes::{self, Recipe, Scaled};
 use crate::rich::Rich;
 use crate::summary;
@@ -47,6 +49,10 @@ pub struct Config {
     pub model: Option<PathBuf>,
     /// How long the reader gets before a meal counts as down (`PIP_MODEL_TIMEOUT`, seconds).
     pub model_timeout: Duration,
+    /// The pantry note with the bought-products block (`PIP_PANTRY_NOTE`, absolute, #159). `None` offers no products.
+    pub pantry_note: Option<PathBuf>,
+    /// Recipe notes with a quoted kcal (`PIP_DISH_NOTES`, `:`-separated absolute paths, #159).
+    pub dish_paths: Vec<PathBuf>,
 }
 
 impl Config {
@@ -92,6 +98,30 @@ impl Config {
             }
             _ => None,
         };
+        let pantry_note = match std::env::var("PIP_PANTRY_NOTE") {
+            Ok(r) if !r.trim().is_empty() => {
+                let p = PathBuf::from(&r);
+                if !p.is_absolute() {
+                    return Err(format!("PIP_PANTRY_NOTE must be an absolute path, got {r:?}"));
+                }
+                Some(p)
+            }
+            _ => None,
+        };
+        let dish_paths = match std::env::var("PIP_DISH_NOTES") {
+            Ok(r) if !r.trim().is_empty() => {
+                let mut out = Vec::new();
+                for part in r.split(':').map(str::trim).filter(|s| !s.is_empty()) {
+                    let p = PathBuf::from(part);
+                    if !p.is_absolute() {
+                        return Err(format!("PIP_DISH_NOTES must be absolute paths separated by ':', got {part:?}"));
+                    }
+                    out.push(p);
+                }
+                out
+            }
+            _ => Vec::new(),
+        };
         let model_timeout = match std::env::var("PIP_MODEL_TIMEOUT") {
             Ok(v) if !v.trim().is_empty() => match v.trim().parse::<u64>() {
                 Ok(s) if s > 0 => Duration::from_secs(s),
@@ -107,6 +137,8 @@ impl Config {
             kcal_target,
             model,
             model_timeout,
+            pantry_note,
+            dish_paths,
         })
     }
 }
@@ -368,6 +400,19 @@ async fn log_message<M: Inbound>(
             // The reader blocks for up to the model timeout, so the analysis runs off the async workers, with typing shown.
             let (cmd, timeout, reads) = (cmd.to_path_buf(), cfg.model_timeout, paths.clone());
             let (subject_run, recipes_run, foods_run) = (subject.clone(), recipe_list.clone(), food_list.clone());
+            // The reader's candidates (#159): saved foods, recipe-note dishes, and bought products (the label wins a name clash).
+            let src_run = Sources {
+                foods: food_list.clone(),
+                dishes: dishes::load(&cfg.dish_paths),
+                products: cfg
+                    .pantry_note
+                    .as_deref()
+                    .map(|p| pantry::products_at(p, day))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|p| !food_list.iter().any(|f| foods::norm(&f.name) == foods::norm(&p.name)))
+                    .collect(),
+            };
             // A printed label is handed back through this slot: it is saved as a food, not counted as a meal (#146).
             let label_slot: Arc<Mutex<Option<Label>>> = Arc::new(Mutex::new(None));
             let slot = label_slot.clone();
@@ -377,7 +422,7 @@ async fn log_message<M: Inbound>(
                     if t.trim().is_empty() && reads.is_empty() {
                         return Some(Parsed::default());
                     }
-                    match pip_model::read_saved(&cmd, t, &reads, &foods_run, timeout) {
+                    match pip_model::read_sources(&cmd, t, &reads, &src_run, timeout) {
                         Reading::Read(p) => Some(p),
                         Reading::Label(l) => {
                             *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(l);
@@ -412,10 +457,31 @@ async fn log_message<M: Inbound>(
     let photos: Vec<String> = paths.iter().map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned()).collect();
     // Typed text only: a photo's estimate is the reader's guess, and the label note says so (#146).
     if cfg.foods_dir.is_some() && files.is_empty() {
-        let est: Vec<&str> = an.parsed.items.iter().filter(|i| i.estimated).map(|i| i.food.name).collect();
+        let est: Vec<&str> = an
+            .parsed
+            .items
+            .iter()
+            .filter(|i| i.estimated && !i.food.source.starts_with("bought: "))
+            .map(|i| i.food.name)
+            .collect();
         if !est.is_empty() {
             an.assumed.push(format!("Estimated: {}. A photo of its nutrition label makes it exact next time.", est.join(", ")));
         }
+    }
+    // A bought product's numbers are the reader's memory of its label, so the reply says so, with or without a photo (#159).
+    let mut bought: Vec<&str> = Vec::new();
+    for i in an.parsed.items.iter() {
+        if let Some(p) = i.food.source.strip_prefix("bought: ") {
+            if !bought.contains(&p) {
+                bought.push(p);
+            }
+        }
+    }
+    if !bought.is_empty() {
+        an.assumed.push(format!(
+            "From what you bought: {}. Their numbers are the reader's memory of each label; a photo of the nutrition label makes it exact.",
+            bought.join(", ")
+        ));
     }
 
     if !an.is_meal {
@@ -805,7 +871,7 @@ pub fn reply_text(
             .iter()
             .map(|i| {
                 let kcal = i.grams / 100.0 * i.food.kcal;
-                let default = nutrition::label_tail(i).unwrap_or_else(|| if i.assumed { format!(" (default {} g)", trim_num(i.grams)) } else { String::new() });
+                let default = nutrition::label_tail(i).or_else(|| nutrition::source_tail(i)).unwrap_or_else(|| if i.assumed { format!(" (default {} g)", trim_num(i.grams)) } else { String::new() });
                 format!("{} g {} {}{default}", trim_num(i.grams), i.food.name, kcal.round() as i64)
             })
             .collect();
